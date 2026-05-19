@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: prospera-sub-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: prospera_sub
+      POSTGRES_PASSWORD: prospera_sub
+      POSTGRES_DB: prospera_sub
+    ports:
+      - "54329:5432"
+    volumes:
+      - prospera_sub_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U prospera_sub -d prospera_sub"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  prospera_sub_postgres_data:

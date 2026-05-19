@@ -1,0 +1,593 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRoleName {
+  SUPER_ADMIN
+  RESTAURANT_ADMIN
+  DRIVER
+  USER
+}
+
+enum AuthProvider {
+  EMAIL
+  GOOGLE
+  LIGHTNING
+}
+
+enum MenuCategory {
+  STANDARD
+  VEGETARIAN
+  VEGAN
+  KETO
+  GLUTEN_FREE
+  LACTOSE_FREE
+}
+
+enum MealTypeSlot {
+  BREAKFAST
+  LUNCH
+  DINNER
+}
+
+enum DayOfWeek {
+  MONDAY
+  TUESDAY
+  WEDNESDAY
+  THURSDAY
+  FRIDAY
+  SATURDAY
+  SUNDAY
+}
+
+enum MenuStatus {
+  DRAFT
+  PUBLISHED
+}
+
+enum MealChoice {
+  EAT_IN
+  DELIVERY
+  CANCELLED
+}
+
+enum MealStatus {
+  PENDING
+  PREPARED
+  DELIVERED
+  COMPLETED
+  NO_SHOW
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+}
+
+enum PaymentMethod {
+  LIGHTNING
+  FIAT
+  CRYPTO
+}
+
+enum PaymentCurrency {
+  USD
+  SATS
+}
+
+enum CleaningBookingStatus {
+  BOOKED
+  COMPLETED
+  CANCELLED
+}
+
+enum CleaningClientStatus {
+  ACTIVE
+  PAUSED
+  CANCELLED
+  ARCHIVED
+}
+
+enum CleaningBillingType {
+  DAILY
+  WEEKLY
+  MONTHLY
+  CUSTOM
+}
+
+enum CleaningPaymentTiming {
+  PREPAID
+  AFTER_SERVICE_COMPLETED
+  CUSTOM_TERMS
+}
+
+enum CleaningScheduleStatus {
+  ACTIVE
+  PAUSED
+  CANCELLED
+  ARCHIVED
+}
+
+enum CleaningChecklistType {
+  DAILY_UPKEEP
+  DEEP_CLEANING
+  CUSTOM
+}
+
+model User {
+  id                 String                 @id @default(uuid())
+  email              String?                @unique
+  passwordHash       String?
+  name               String?
+  displayName        String?
+  lightningPubkey    String?                @unique
+  authProvider       AuthProvider           @default(EMAIL)
+  avatarUrl          String?
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+  lastLoginAt        DateTime?
+  roles              UserRole[]
+  profile            UserProfile?
+  sessions           UserSession[]
+  loginHistory       LoginHistory[]
+  restaurantAdmins   RestaurantAdmin[]
+  restaurantsCreated Restaurant[]           @relation("RestaurantCreatedBy")
+  subscriptions      Subscription[]
+  favorites          Favorite[]
+  cleaningSubs       CleaningSubscription[]
+  cleaningBookings   CleaningBooking[]
+  payments           Payment[]
+}
+
+model UserRole {
+  id        String       @id @default(uuid())
+  userId    String
+  role      UserRoleName
+  createdAt DateTime     @default(now())
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, role])
+  @@index([role])
+}
+
+model UserProfile {
+  id                     String   @id @default(uuid())
+  userId                 String   @unique
+  phone                  String?
+  defaultDeliveryAddress Json?
+  nwcConnection          String?
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+  user                   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model UserSession {
+  id               String   @id @default(uuid())
+  userId           String
+  refreshTokenHash String   @unique
+  expiresAt        DateTime
+  revokedAt        DateTime?
+  createdAt        DateTime @default(now())
+  lastActivityAt   DateTime @default(now())
+  userAgent        String?
+  ipAddress        String?
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt, expiresAt])
+}
+
+model LightningAuthChallenge {
+  id        String   @id @default(uuid())
+  k1        String   @unique
+  status    String   @default("pending")
+  pubkey    String?
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+}
+
+model LoginHistory {
+  id        String       @id @default(uuid())
+  userId    String
+  provider  AuthProvider
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime     @default(now())
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Restaurant {
+  id             String              @id @default(uuid())
+  name           String
+  description    String?
+  address        String?
+  logoUrl        String?
+  openingHours   Json?
+  isActive       Boolean             @default(true)
+  createdById    String?
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+  createdBy      User?               @relation("RestaurantCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  admins         RestaurantAdmin[]
+  settings       RestaurantSettings?
+  plans          SubscriptionPlan[]
+  weeklyMenus    WeeklyMenu[]
+  menuItems      MenuItem[]
+  subscriptions  Subscription[]
+  favorites      Favorite[]
+  payments       Payment[]
+
+  @@index([isActive])
+}
+
+model RestaurantAdmin {
+  id           String     @id @default(uuid())
+  userId       String
+  restaurantId String
+  isOwner      Boolean    @default(false)
+  createdAt    DateTime   @default(now())
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, restaurantId])
+  @@index([restaurantId])
+}
+
+model RestaurantSettings {
+  id               String     @id @default(uuid())
+  restaurantId     String     @unique
+  cutoffHour       Int        @default(18)
+  deliveryFeeCents Int        @default(0)
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+  restaurant       Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+}
+
+model SubscriptionPlan {
+  id                String          @id @default(uuid())
+  restaurantId      String
+  name              String
+  description       String?
+  pricePerWeekCents Int
+  mealTime          String          @default("13:00:00")
+  menuCategory      MenuCategory    @default(STANDARD)
+  supportsDelivery  Boolean         @default(false)
+  isActive          Boolean         @default(true)
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+  restaurant        Restaurant      @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  subscriptions     Subscription[]
+  weeklyMenus       WeeklyMenu[]
+  favorites         Favorite[]
+
+  @@index([restaurantId, isActive])
+  @@index([menuCategory])
+}
+
+model Subscription {
+  id               String             @id @default(uuid())
+  userId           String
+  restaurantId     String
+  planId           String
+  startDate        DateTime
+  endDate          DateTime
+  durationWeeks    Int
+  totalPriceCents  Int
+  paidAmountSats   Int?
+  paymentStatus    PaymentStatus      @default(PENDING)
+  paymentMethod    PaymentMethod?
+  paymentReference String?
+  isActive         Boolean            @default(true)
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+  user             User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  restaurant       Restaurant         @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  plan             SubscriptionPlan   @relation(fields: [planId], references: [id], onDelete: Restrict)
+  mealChoices      DailyMealChoice[]
+  payments         Payment[]
+
+  @@index([userId, isActive])
+  @@index([restaurantId, paymentStatus])
+}
+
+model WeeklyMenu {
+  id            String            @id @default(uuid())
+  restaurantId  String
+  planId        String?
+  weekStartDate DateTime
+  weekEndDate   DateTime
+  category      MenuCategory      @default(STANDARD)
+  status        MenuStatus        @default(DRAFT)
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+  restaurant    Restaurant        @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  plan          SubscriptionPlan? @relation(fields: [planId], references: [id], onDelete: SetNull)
+  items         MenuItem[]
+
+  @@unique([restaurantId, weekStartDate, category])
+  @@index([restaurantId, status])
+}
+
+model MenuItem {
+  id           String       @id @default(uuid())
+  weeklyMenuId String
+  restaurantId String
+  dayOfWeek    DayOfWeek
+  mealType     MealTypeSlot
+  name         String
+  description  String?
+  tags         String[]     @default([])
+  imageUrl     String?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  weeklyMenu   WeeklyMenu   @relation(fields: [weeklyMenuId], references: [id], onDelete: Cascade)
+  restaurant   Restaurant   @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+
+  @@index([restaurantId, dayOfWeek, mealType])
+}
+
+model DailyMealChoice {
+  id             String       @id @default(uuid())
+  subscriptionId String
+  date           DateTime
+  choice         MealChoice   @default(EAT_IN)
+  status         MealStatus   @default(PENDING)
+  notes          String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  subscription   Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  @@unique([subscriptionId, date])
+  @@index([date, status])
+}
+
+model Favorite {
+  id           String            @id @default(uuid())
+  userId       String
+  restaurantId String?
+  planId       String?
+  createdAt    DateTime          @default(now())
+  user         User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  restaurant   Restaurant?       @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  plan         SubscriptionPlan? @relation(fields: [planId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@unique([userId, restaurantId])
+  @@unique([userId, planId])
+}
+
+model CleaningPackage {
+  id                    String                 @id @default(uuid())
+  name                  String
+  description           String?
+  pricePerCleaningCents Int
+  cleaningsPerMonth     Int                    @default(4)
+  isActive              Boolean                @default(true)
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+  subscriptions         CleaningSubscription[]
+
+  @@index([isActive])
+}
+
+model CleaningAvailableSlot {
+  id        String            @id @default(uuid())
+  startsAt  DateTime
+  endsAt    DateTime
+  capacity  Int               @default(1)
+  isActive  Boolean           @default(true)
+  createdAt DateTime          @default(now())
+  bookings  CleaningBooking[]
+
+  @@index([startsAt, isActive])
+}
+
+model CleaningSubscription {
+  id        String            @id @default(uuid())
+  userId    String
+  packageId String
+  isActive  Boolean           @default(true)
+  startsAt  DateTime          @default(now())
+  endsAt    DateTime?
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+  user      User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  package   CleaningPackage   @relation(fields: [packageId], references: [id], onDelete: Restrict)
+  bookings  CleaningBooking[]
+
+  @@index([userId, isActive])
+}
+
+model CleaningClient {
+  id                 String                 @id @default(uuid())
+  companyName        String
+  contactPerson      String?
+  email              String?
+  phone              String?
+  location           String
+  serviceType        String?
+  notes              String?
+  internalAdminNotes String?
+  startDate          DateTime
+  status             CleaningClientStatus   @default(ACTIVE)
+  isPrivate          Boolean                @default(true)
+  visibility         String                 @default("admin_only")
+  clientType         String                 @default("custom_cleaning_client")
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+  customPlans        CleaningCustomPlan[]
+  bookings           CleaningBooking[]
+  recurringSchedules CleaningRecurringSchedule[]
+  checklistTemplates CleaningChecklistTemplate[]
+  completionReports  CleaningCompletionReport[]
+
+  @@index([status])
+  @@index([visibility, isPrivate])
+}
+
+model CleaningCustomPlan {
+  id                         String                       @id @default(uuid())
+  clientId                   String
+  planName                   String
+  customPriceCents           Int
+  billingType                CleaningBillingType          @default(CUSTOM)
+  monthlyInvoice             Boolean                      @default(false)
+  paymentTiming              CleaningPaymentTiming        @default(CUSTOM_TERMS)
+  customTerms                String?
+  serviceFrequency           String?
+  daysOfWeek                 DayOfWeek[]                  @default([])
+  deepCleaningAddOn          Boolean                      @default(false)
+  estimatedMonthlyTotalCents Int?
+  customChecklist            String[]                     @default([])
+  status                     CleaningClientStatus         @default(ACTIVE)
+  isPrivate                  Boolean                      @default(true)
+  visibility                 String                       @default("admin_only")
+  clientType                 String                       @default("custom_cleaning_client")
+  createdAt                  DateTime                     @default(now())
+  updatedAt                  DateTime                     @updatedAt
+  client                     CleaningClient               @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  recurringSchedules         CleaningRecurringSchedule[]
+  bookings                   CleaningBooking[]
+  checklistTemplates         CleaningChecklistTemplate[]
+  completionReports          CleaningCompletionReport[]
+
+  @@index([clientId, status])
+  @@index([visibility, isPrivate])
+}
+
+model CleaningRecurringSchedule {
+  id                     String                 @id @default(uuid())
+  clientId               String
+  customPlanId           String
+  startDate              DateTime
+  endDate                DateTime?
+  daysOfWeek             DayOfWeek[]            @default([])
+  preferredStartTime     String
+  preferredEndTime       String
+  assignedCleaner        String?
+  location               String
+  serviceDurationMinutes Int                    @default(120)
+  repeatFrequency        String                 @default("weekly")
+  status                 CleaningScheduleStatus @default(ACTIVE)
+  pausedAt               DateTime?
+  createdAt              DateTime               @default(now())
+  updatedAt              DateTime               @updatedAt
+  client                 CleaningClient         @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  customPlan             CleaningCustomPlan     @relation(fields: [customPlanId], references: [id], onDelete: Cascade)
+  bookings               CleaningBooking[]
+
+  @@index([clientId, status])
+  @@index([customPlanId, status])
+}
+
+model CleaningChecklistTemplate {
+  id           String                @id @default(uuid())
+  clientId     String
+  customPlanId String
+  templateType CleaningChecklistType @default(CUSTOM)
+  name         String
+  items        String[]              @default([])
+  isActive     Boolean               @default(true)
+  createdAt    DateTime              @default(now())
+  updatedAt    DateTime              @updatedAt
+  client       CleaningClient        @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  customPlan   CleaningCustomPlan    @relation(fields: [customPlanId], references: [id], onDelete: Cascade)
+  bookings     CleaningBooking[]
+
+  @@index([customPlanId, isActive])
+}
+
+model CleaningBooking {
+  id             String                @id @default(uuid())
+  userId         String
+  subscriptionId String?
+  clientId       String?
+  customPlanId   String?
+  recurringScheduleId String?
+  checklistTemplateId String?
+  slotId         String
+  status         CleaningBookingStatus @default(BOOKED)
+  notes          String?
+  location       String?
+  assignedCleaner String?
+  serviceDurationMinutes Int?
+  isPrivate      Boolean               @default(false)
+  visibility     String?
+  clientType     String?
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+  user           User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subscription   CleaningSubscription? @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  slot           CleaningAvailableSlot @relation(fields: [slotId], references: [id], onDelete: Restrict)
+  client         CleaningClient?       @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  customPlan     CleaningCustomPlan?   @relation(fields: [customPlanId], references: [id], onDelete: Cascade)
+  recurringSchedule CleaningRecurringSchedule? @relation(fields: [recurringScheduleId], references: [id], onDelete: SetNull)
+  checklistTemplate CleaningChecklistTemplate? @relation(fields: [checklistTemplateId], references: [id], onDelete: SetNull)
+  completionReport CleaningCompletionReport?
+
+  @@unique([subscriptionId, slotId])
+  @@unique([customPlanId, slotId])
+  @@index([userId, status])
+  @@index([clientId, status])
+  @@index([recurringScheduleId, status])
+}
+
+model CleaningCompletionReport {
+  id                 String             @id @default(uuid())
+  bookingId          String             @unique
+  clientId           String?
+  customPlanId       String?
+  checklistCompleted String[]           @default([])
+  notes              String?
+  photoUrl           String?
+  issueReport        String?
+  completedBy        String
+  completedAt        DateTime           @default(now())
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+  booking            CleaningBooking    @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  client             CleaningClient?    @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  customPlan         CleaningCustomPlan? @relation(fields: [customPlanId], references: [id], onDelete: SetNull)
+
+  @@index([clientId, completedAt])
+  @@index([customPlanId, completedAt])
+}
+
+model Payment {
+  id             String          @id @default(uuid())
+  userId         String
+  restaurantId   String?
+  subscriptionId String?
+  amountCents    Int?
+  amountSats     Int?
+  currency       PaymentCurrency @default(USD)
+  method         PaymentMethod
+  status         PaymentStatus   @default(PENDING)
+  provider       String?
+  providerRef    String?
+  description    String?
+  paidAt         DateTime?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  restaurant     Restaurant?     @relation(fields: [restaurantId], references: [id], onDelete: SetNull)
+  subscription   Subscription?   @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+
+  @@index([userId, status])
+  @@index([providerRef])
+  @@index([restaurantId, status])
+}
+
+model GlobalSetting {
+  id        String   @id @default(uuid())
+  key       String   @unique
+  value     Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}

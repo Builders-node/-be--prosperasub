@@ -1,0 +1,13 @@
+project_id = "yhizbhjpgeaulkfzgpid"
+
+[functions.create-invoice]
+verify_jwt = false
+
+[functions.verify-payment]
+verify_jwt = false
+
+[functions.lnurl-auth]
+verify_jwt = false
+
+[functions.admin-applications]
+verify_jwt = false
