@@ -1,5 +1,6 @@
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "rhel-openssl-3.0.x"]
 }
 
 datasource db {
@@ -90,6 +91,7 @@ enum CleaningBookingStatus {
 
 enum CleaningClientStatus {
   ACTIVE
+  INACTIVE
   PAUSED
   CANCELLED
   ARCHIVED
@@ -389,19 +391,29 @@ model CleaningAvailableSlot {
 }
 
 model CleaningSubscription {
-  id        String            @id @default(uuid())
-  userId    String
-  packageId String
-  isActive  Boolean           @default(true)
-  startsAt  DateTime          @default(now())
-  endsAt    DateTime?
-  createdAt DateTime          @default(now())
-  updatedAt DateTime          @updatedAt
-  user      User              @relation(fields: [userId], references: [id], onDelete: Cascade)
-  package   CleaningPackage   @relation(fields: [packageId], references: [id], onDelete: Restrict)
-  bookings  CleaningBooking[]
+  id                  String            @id @default(uuid())
+  userId              String
+  packageId           String
+  isActive            Boolean           @default(true)
+  startsAt            DateTime          @default(now())
+  endsAt              DateTime?
+  billingPeriodMonths Int               @default(1)
+  monthlyPriceCents   Int               @default(0)
+  totalPriceCents     Int               @default(0)
+  serviceStartDate    DateTime?
+  serviceEndDate      DateTime?
+  paidUntil           DateTime?
+  paymentStatus       String            @default("pending")
+  subscriptionStatus  String            @default("active")
+  apartmentNote       String?
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+  user                User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  package             CleaningPackage   @relation(fields: [packageId], references: [id], onDelete: Restrict)
+  bookings            CleaningBooking[]
 
   @@index([userId, isActive])
+  @@index([paidUntil, subscriptionStatus])
 }
 
 model CleaningClient {
@@ -414,6 +426,7 @@ model CleaningClient {
   serviceType        String?
   notes              String?
   internalAdminNotes String?
+  invoicePreferences String?
   startDate          DateTime
   status             CleaningClientStatus   @default(ACTIVE)
   isPrivate          Boolean                @default(true)
@@ -520,6 +533,11 @@ model CleaningBooking {
   isPrivate      Boolean               @default(false)
   visibility     String?
   clientType     String?
+  googleCalendarEventId String?
+  googleCalendarEventLink String?
+  googleCalendarSyncedAt DateTime?
+  googleCalendarSyncStatus String @default("pending")
+  googleCalendarSyncError String?
   createdAt      DateTime              @default(now())
   updatedAt      DateTime              @updatedAt
   user           User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -536,6 +554,7 @@ model CleaningBooking {
   @@index([userId, status])
   @@index([clientId, status])
   @@index([recurringScheduleId, status])
+  @@index([googleCalendarSyncStatus])
 }
 
 model CleaningCompletionReport {
@@ -582,6 +601,64 @@ model Payment {
   @@index([userId, status])
   @@index([providerRef])
   @@index([restaurantId, status])
+}
+
+model PaymentCheckoutSession {
+  id                  String   @id @default(uuid())
+  provider            String
+  providerPaymentId   String
+  context             String?
+  serviceName         String
+  clientName          String?
+  clientEmail         String?
+  clientPhone         String?
+  amountCents         Int?
+  amountSats          Int?
+  currency            String   @default("USD")
+  planName            String?
+  duration            String?
+  bookingId           String?
+  adminUrl            String?
+  selectedDateTime    String?
+  description         String?
+  externalId          String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@unique([provider, providerPaymentId])
+  @@index([context])
+}
+
+model AdminPaymentNotification {
+  id             String   @id @default(uuid())
+  provider       String
+  providerPaymentId String
+  serviceName    String
+  clientName     String?
+  clientEmail    String?
+  clientPhone    String?
+  amountCents    Int?
+  amountSats     Int?
+  currency       String   @default("USD")
+  planName       String?
+  duration       String?
+  bookingId      String?
+  adminUrl       String?
+  selectedDateTime String?
+  paymentStatus  String   @default("paid")
+  paidAt         DateTime
+  emailStatus    String   @default("pending")
+  emailSentAt    DateTime?
+  emailError     String?
+  telegramStatus String   @default("pending")
+  telegramSentAt DateTime?
+  telegramError  String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([provider, providerPaymentId])
+  @@index([paidAt])
+  @@index([emailStatus, telegramStatus])
 }
 
 model GlobalSetting {

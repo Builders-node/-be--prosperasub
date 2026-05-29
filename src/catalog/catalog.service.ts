@@ -158,15 +158,20 @@ export class CatalogService {
   }
 
   listPlans(): PlanDto[] {
-    return this.plans;
+    const activeRestaurantIds = new Set(this.listRestaurants().map((restaurant) => restaurant.id));
+    return this.plans.filter((plan) => activeRestaurantIds.has(plan.restaurantId));
   }
 
   getPlan(id: string): PlanDto | undefined {
-    return this.plans.find((plan) => plan.id === id);
+    return this.listPlans().find((plan) => plan.id === id);
   }
 
   listCleaningPackages(): CleaningPackageDto[] {
     return this.cleaningPackages.filter((pkg) => pkg.isActive);
+  }
+
+  getCleaningPackage(id: string): CleaningPackageDto | undefined {
+    return this.cleaningPackages.find((pkg) => pkg.id === id && pkg.isActive);
   }
 
   getOverview() {

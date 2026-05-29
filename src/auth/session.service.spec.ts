@@ -25,12 +25,34 @@ describe("SessionService", () => {
   it("verifies access tokens", async () => {
     const result = await service.createTokenPair({
       userId: "user-2",
-      roles: ["USER"]
+      roles: ["USER"],
+      email: "person@example.com",
+      name: "Person Example",
+      authProvider: "google",
+      avatarUrl: "https://example.com/avatar.png"
     });
 
     const payload = service.verifyAccessToken(result.accessToken);
 
     expect(payload.sub).toBe("user-2");
+    expect(payload.roles).toEqual(["USER"]);
+    expect(payload.email).toBe("person@example.com");
+    expect(payload.authProvider).toBe("google");
+  });
+
+  it("verifies refresh tokens", async () => {
+    const result = await service.createTokenPair({
+      userId: "user-3",
+      roles: ["USER"],
+      email: "refresh@example.com",
+      authProvider: "google"
+    });
+
+    const payload = service.verifyRefreshToken(result.refreshToken);
+
+    expect(payload.sub).toBe("user-3");
+    expect(payload.typ).toBe("refresh");
+    expect(payload.email).toBe("refresh@example.com");
     expect(payload.roles).toEqual(["USER"]);
   });
 });

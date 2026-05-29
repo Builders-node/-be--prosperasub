@@ -11,6 +11,7 @@
     "lint": "eslint \"src/**/*.ts\" \"prisma/**/*.ts\"",
     "test": "jest --runInBand",
     "test:watch": "jest --watch",
+    "telegram:test": "node scripts/test-telegram.mjs",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:seed": "tsx prisma/seed.ts"

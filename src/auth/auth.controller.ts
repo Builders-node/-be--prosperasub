@@ -1,6 +1,6 @@
-import { Body, Controller, Get, Post } from "@nestjs/common";
-import { ApiBody, ApiOperation, ApiProperty, ApiResponse, ApiTags } from "@nestjs/swagger";
-import { IsEmail, IsOptional, IsString, MinLength } from "class-validator";
+import { Body, Controller, Get, Headers, Post, Query, UnauthorizedException } from "@nestjs/common";
+import { ApiBearerAuth, ApiBody, ApiOperation, ApiProperty, ApiResponse, ApiTags } from "@nestjs/swagger";
+import { IsEmail, IsIn, IsOptional, IsString, MinLength } from "class-validator";
 import { AuthService } from "./auth.service";
 
 class LoginDto {
@@ -50,6 +50,36 @@ class ConfirmPasswordResetDto {
   password!: string;
 }
 
+class RefreshSessionDto {
+  @ApiProperty({ example: "refresh-token-example", writeOnly: true })
+  @IsString()
+  refresh_token!: string;
+}
+
+class GoogleOAuthStartDto {
+  @ApiProperty({ example: "https://prosperasub.com/auth" })
+  @IsString()
+  redirectUrl!: string;
+
+  @ApiProperty({ example: "oauth-state-value" })
+  @IsString()
+  state!: string;
+}
+
+class GoogleOAuthCallbackDto {
+  @ApiProperty({ enum: ["google"], example: "google" })
+  @IsIn(["google"])
+  provider!: "google";
+
+  @ApiProperty({ example: "authorization-code-from-google", writeOnly: true })
+  @IsString()
+  code!: string;
+
+  @ApiProperty({ example: "https://prosperasub.com/auth" })
+  @IsString()
+  redirectUrl!: string;
+}
+
 @ApiTags("Auth")
 @Controller("auth")
 export class AuthController {
@@ -89,10 +119,78 @@ export class AuthController {
     return this.auth.confirmPasswordReset(body.token, body.password);
   }
 
+  @ApiOperation({ summary: "Refresh an access token with a valid refresh token" })
+  @ApiBody({ type: RefreshSessionDto })
+  @ApiResponse({ status: 201, description: "New authenticated user, roles, and session tokens." })
+  @ApiResponse({ status: 401, description: "Invalid or expired refresh token." })
+  @Post("refresh")
+  refresh(@Body() body: RefreshSessionDto) {
+    return this.auth.refresh(body.refresh_token);
+  }
+
+  @ApiOperation({ summary: "Start Google OAuth login" })
+  @ApiBody({ type: GoogleOAuthStartDto })
+  @ApiResponse({ status: 201, description: "Google authorization URL." })
+  @Post("google/start")
+  startGoogleOAuth(@Body() body: GoogleOAuthStartDto) {
+    return this.auth.startGoogleOAuth(body.redirectUrl, body.state);
+  }
+
+  @ApiOperation({ summary: "Complete Google OAuth login" })
+  @ApiBody({ type: GoogleOAuthCallbackDto })
+  @ApiResponse({ status: 201, description: "Authenticated user, roles, and session tokens." })
+  @Post("google/callback")
+  completeGoogleOAuth(@Body() body: GoogleOAuthCallbackDto) {
+    return this.auth.completeGoogleOAuth(body.code, body.redirectUrl);
+  }
+
   @ApiOperation({ summary: "Return current user and roles" })
-  @ApiResponse({ status: 200, description: "Current owned API user and roles." })
+  @ApiBearerAuth()
+  @ApiResponse({ status: 200, description: "Current authenticated API user and roles." })
+  @ApiResponse({ status: 401, description: "Missing or invalid access token." })
   @Get("me")
-  me() {
-    return this.auth.me();
+  me(@Headers("authorization") authorization?: string) {
+    return this.auth.meFromAccessToken(this.readBearerToken(authorization));
+  }
+
+  /**
+   * Public callback for Google Calendar OAuth2 authorization.
+   * Google redirects here after the admin grants Calendar access.
+   * Copy the returned `code` and call POST /admin/google-calendar/exchange-code.
+   */
+  @ApiOperation({ summary: "Google Calendar OAuth2 callback — shows the authorization code" })
+  @ApiResponse({ status: 200, description: "Authorization code ready to be exchanged." })
+  @Get("calendar/callback")
+  googleCalendarCallback(@Query("code") code?: string, @Query("error") error?: string) {
+    if (error) {
+      return { ok: false, error };
+    }
+    if (!code) {
+      return { ok: false, error: "No authorization code received from Google." };
+    }
+    return {
+      ok: true,
+      code,
+      message: "Authorization code received. Copy it and use POST /admin/google-calendar/exchange-code.",
+      next: {
+        method: "POST",
+        url: "https://api.prosperasub.com/admin/google-calendar/exchange-code",
+        body: {
+          code,
+          redirect_uri: "https://api.prosperasub.com/auth/calendar/callback",
+        },
+        note: "You must be authenticated as super_admin to call this endpoint.",
+      },
+    };
+  }
+
+  private readBearerToken(authorization?: string) {
+    const [scheme, token] = authorization?.split(" ") ?? [];
+
+    if (scheme !== "Bearer" || !token) {
+      throw new UnauthorizedException("Bearer token is required");
+    }
+
+    return token;
   }
 }

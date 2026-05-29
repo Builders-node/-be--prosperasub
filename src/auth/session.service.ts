@@ -8,12 +8,30 @@ export type RoleName = "SUPER_ADMIN" | "RESTAURANT_ADMIN" | "DRIVER" | "USER";
 interface TokenInput {
   userId: string;
   roles: RoleName[];
+  email?: string;
+  name?: string;
+  authProvider?: string;
+  avatarUrl?: string | null;
 }
 
 interface AccessPayload extends jwt.JwtPayload {
   sub: string;
   roles: RoleName[];
   typ: "access";
+  email?: string;
+  name?: string;
+  authProvider?: string;
+  avatarUrl?: string | null;
+}
+
+interface RefreshPayload extends jwt.JwtPayload {
+  sub: string;
+  typ: "refresh";
+  roles?: RoleName[];
+  email?: string;
+  name?: string;
+  authProvider?: string;
+  avatarUrl?: string | null;
 }
 
 @Injectable()
@@ -31,7 +49,11 @@ export class SessionService {
     const accessToken = jwt.sign(
       {
         roles: input.roles,
-        typ: "access"
+        typ: "access",
+        email: input.email,
+        name: input.name,
+        authProvider: input.authProvider,
+        avatarUrl: input.avatarUrl ?? null
       },
       this.accessSecret(),
       {
@@ -42,7 +64,12 @@ export class SessionService {
 
     const refreshToken = jwt.sign(
       {
-        typ: "refresh"
+        typ: "refresh",
+        roles: input.roles,
+        email: input.email,
+        name: input.name,
+        authProvider: input.authProvider,
+        avatarUrl: input.avatarUrl ?? null
       },
       this.refreshSecret(),
       {
@@ -61,6 +88,10 @@ export class SessionService {
 
   verifyAccessToken(token: string): AccessPayload {
     return jwt.verify(token, this.accessSecret()) as AccessPayload;
+  }
+
+  verifyRefreshToken(token: string): RefreshPayload {
+    return jwt.verify(token, this.refreshSecret()) as RefreshPayload;
   }
 
   async hashRefreshToken(token: string): Promise<string> {
