@@ -5,22 +5,8 @@ describe("CatalogController", () => {
   const service = new CatalogService();
   const controller = new CatalogController(service);
 
-  it("returns active restaurants", () => {
-    const restaurants = controller.listRestaurants();
-
-    expect(restaurants.length).toBeGreaterThan(0);
-    expect(restaurants[0]).toHaveProperty("name");
-  });
-
-  it("returns active plans", () => {
-    const plans = controller.listPlans();
-
-    expect(plans.length).toBeGreaterThan(0);
-    expect(plans[0]).toHaveProperty("pricePerWeekCents");
-  });
-
-  it("returns active cleaning packages", () => {
-    const packages = controller.listCleaningPackages();
+  it("returns active cleaning packages", async () => {
+    const packages = await controller.listCleaningPackages();
 
     expect(packages).toEqual(expect.arrayContaining([
       expect.objectContaining({

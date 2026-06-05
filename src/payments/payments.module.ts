@@ -7,6 +7,7 @@ import { PaymentsController } from "./payments.controller";
 @Module({
   imports: [NotificationsModule],
   controllers: [PaymentsController],
-  providers: [BlinkService, CatalogService]
+  providers: [BlinkService, CatalogService],
+  exports: [BlinkService]
 })
 export class PaymentsModule {}

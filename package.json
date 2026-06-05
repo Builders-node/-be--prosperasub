@@ -12,6 +12,7 @@
     "test": "jest --runInBand",
     "test:watch": "jest --watch",
     "telegram:test": "node scripts/test-telegram.mjs",
+    "db:safe-reset": "tsx scripts/safe-data-reset.ts",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:seed": "tsx prisma/seed.ts"

@@ -67,6 +67,40 @@ describe("PaymentsController", () => {
     expect(blink.createUsdInvoice).not.toHaveBeenCalled();
   });
 
+  it("accepts cleaning invoices using admin-entered monthly override pricing", async () => {
+    (blink.createUsdInvoice as jest.Mock).mockResolvedValue({ payment_hash: "hash-monthly", amount_sats: 1000 });
+    const catalog = {
+      getCleaningPackage: jest.fn().mockResolvedValue({
+        id: "cowork-monthly",
+        name: "Cowork Monthly",
+        description: "Manual monthly plan",
+        pricePerCleaningCents: 1000,
+        monthlyPriceCents: 25500,
+        pricingMode: "fixed_monthly_price",
+        frequencyUnit: "month",
+        frequencyCount: 26,
+        customFrequencyLabel: null,
+        isActive: true,
+      }),
+    };
+    const monthlyController = new PaymentsController(blink, catalog as never, notifications as never);
+
+    await monthlyController.createInvoice({
+      amount_cents: 25500,
+      amount_sats: 1000,
+      context: "cleaning_subscription",
+      package_id: "cowork-monthly",
+      billing_period_months: 1,
+      description: "Cleaning - Cowork Monthly",
+    });
+
+    expect(blink.createUsdInvoice).toHaveBeenCalledWith({
+      amountCents: 25500,
+      memo: "Cleaning - Cowork Monthly",
+      externalId: undefined,
+    });
+  });
+
   it("sends admin notifications after confirmed payment", async () => {
     (blink.getPaymentStatus as jest.Mock).mockResolvedValue({
       paid: true,

@@ -11,11 +11,27 @@ export interface GoogleCalendarEventPayload {
   end: Date;
   recurrence?: string[];
   colorId?: string;
+  /** Stored in extendedProperties.private for idempotent lookup */
+  bookingId?: string;
 }
 
 export interface GoogleCalendarEventResult {
   id: string;
   htmlLink?: string | null;
+}
+
+export interface GoogleCalendarEventItem {
+  id: string;
+  summary?: string;
+  status?: string;
+  htmlLink?: string;
+  created?: string;
+  updated?: string;
+  start?: { dateTime?: string; date?: string };
+  end?: { dateTime?: string; date?: string };
+  extendedProperties?: {
+    private?: Record<string, string>;
+  };
 }
 
 interface GoogleTokenResponse {
@@ -155,6 +171,53 @@ export class GoogleCalendarService {
       }
       throw error;
     }
+  }
+
+  /**
+   * Find all calendar events tagged with a specific bookingId in extendedProperties.
+   * Returns events sorted by updated desc (newest first).
+   */
+  async findEventsByBookingId(bookingId: string): Promise<GoogleCalendarEventItem[]> {
+    try {
+      const response = await this.request<{ items?: GoogleCalendarEventItem[] }>(
+        "GET",
+        `/events?privateExtendedProperty=${encodeURIComponent(`bookingId=${bookingId}`)}&showDeleted=false&maxResults=10`,
+      );
+      const items = response.items ?? [];
+      return items.sort((a, b) =>
+        (b.updated ?? b.created ?? "").localeCompare(a.updated ?? a.created ?? ""),
+      );
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Fallback: find events by title prefix + date (for old events without extendedProperties).
+   */
+  async findEventsByFallback(summaryPrefix: string, startDate: string): Promise<GoogleCalendarEventItem[]> {
+    try {
+      const timeMin = `${startDate}T00:00:00Z`;
+      const timeMax = `${startDate}T23:59:59Z`;
+      const response = await this.request<{ items?: GoogleCalendarEventItem[] }>(
+        "GET",
+        `/events?q=${encodeURIComponent(summaryPrefix)}&timeMin=${encodeURIComponent(timeMin)}&timeMax=${encodeURIComponent(timeMax)}&showDeleted=false&maxResults=20`,
+      );
+      return response.items ?? [];
+    } catch {
+      return [];
+    }
+  }
+
+  /** Cancel (mark as cancelled) a Google Calendar event without deleting it. */
+  async cancelEvent(eventId: string, payload: GoogleCalendarEventPayload): Promise<GoogleCalendarEventResult> {
+    const body = {
+      ...this.toGoogleEvent(payload),
+      status: "cancelled",
+      colorId: "11", // Tomato — visually marks it as cancelled
+    };
+    const response = await this.request<{ id: string; htmlLink?: string }>("PATCH", `/events/${encodeURIComponent(eventId)}`, body);
+    return { id: response.id, htmlLink: response.htmlLink ?? null };
   }
 
   // ─── Private environment accessors ────────────────────────────────────────
@@ -356,7 +419,6 @@ export class GoogleCalendarService {
       description: payload.description,
       colorId: payload.colorId,
       start: {
-        // Local wall-clock time for the calendar timezone (no Z suffix)
         dateTime: this.toLocalISOString(payload.start, tz),
         timeZone: tz,
       },
@@ -365,6 +427,15 @@ export class GoogleCalendarService {
         timeZone: tz,
       },
       recurrence: payload.recurrence,
+      // Idempotency fingerprint — used to find/deduplicate events on re-sync
+      ...(payload.bookingId && {
+        extendedProperties: {
+          private: {
+            bookingId: payload.bookingId,
+            source: "prosperasub-cleaning",
+          },
+        },
+      }),
     };
   }
 }

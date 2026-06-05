@@ -3,7 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import * as crypto from "crypto";
 import * as jwt from "jsonwebtoken";
 
-export type RoleName = "SUPER_ADMIN" | "RESTAURANT_ADMIN" | "DRIVER" | "USER";
+export type RoleName = "SUPER_ADMIN" | "USER";
 
 interface TokenInput {
   userId: string;

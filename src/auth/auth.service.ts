@@ -6,7 +6,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { PasswordService } from "./password.service";
 import { RoleName, SessionService } from "./session.service";
 
-export type ApiRole = "super_admin" | "restaurant_admin" | "driver" | "user";
+export type ApiRole = "super_admin" | "user";
 
 export interface ApiUser {
   id: string;
@@ -16,7 +16,6 @@ export interface ApiUser {
   auth_provider: "email" | "google";
   avatar_url: string | null;
   lightning_pubkey: string | null;
-  restaurant_id: string | null;
 }
 
 interface GoogleTokenResponse {
@@ -70,14 +69,13 @@ export class AuthService {
 
   /** Hard-coded owner/super-admin identity (Frorex Studio). */
   private readonly user: ApiUser = {
-    id: "owned-user-frorex",
+    id: "516cbc10-c390-4c7f-93c3-f92111337f1c",
     email: "frorex.studio@gmail.com",
     name: "Frorex Studio",
-    display_name: "Frorex",
+    display_name: "Frorex Studio",
     auth_provider: "email",
     avatar_url: null,
-    lightning_pubkey: null,
-    restaurant_id: null
+    lightning_pubkey: null
   };
 
   private readonly roles: ApiRole[] = ["super_admin", "user"];
@@ -101,17 +99,19 @@ export class AuthService {
     params: Record<string, unknown>,
   ): Promise<T | null> {
     const supabaseUrl = this.config.get<string>("SUPABASE_URL");
+    const serviceKey = this.config.get<string>("SUPABASE_SERVICE_ROLE_KEY");
     const anonKey    = this.config.get<string>("SUPABASE_ANON_KEY");
+    const apiKey     = serviceKey || anonKey;
 
-    if (!supabaseUrl || !anonKey) return null;
+    if (!supabaseUrl || !apiKey) return null;
 
     try {
       const res = await fetch(`${supabaseUrl}/rest/v1/rpc/${fn}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "apikey":        anonKey,
-          "Authorization": `Bearer ${anonKey}`,
+          "apikey":        apiKey,
+          "Authorization": `Bearer ${apiKey}`,
         },
         body: JSON.stringify(params),
       });
@@ -199,7 +199,6 @@ export class AuthService {
         auth_provider: "email",
         avatar_url: null,
         lightning_pubkey: null,
-        restaurant_id: null,
       };
       const roles: ApiRole[] = ["user"];
       this.oauthUsers.set(user.id, { user, roles });
@@ -236,7 +235,7 @@ export class AuthService {
     return this.createSessionResponse(apiUser, roles);
   }
 
-  meFromAccessToken(accessToken: string) {
+  async meFromAccessToken(accessToken: string) {
     try {
       const payload = this.sessions.verifyAccessToken(accessToken);
 
@@ -244,15 +243,30 @@ export class AuthService {
         throw new UnauthorizedException("Invalid access token");
       }
 
-      const identity = this.findIdentity(payload.sub) ?? this.identityFromTokenPayload(payload);
+      const cached = this.findIdentity(payload.sub);
+      if (cached) return { user: cached.user, roles: cached.roles };
+
+      if (this.isSupabaseAvailable()) {
+        try {
+          const dbUser = await this.supabaseRpc<RpcUser>("auth_get_user_by_id", { p_user_id: payload.sub });
+          if (dbUser) {
+            const apiUser = this.rpcUserToApiUser(dbUser);
+            const roles = (dbUser.roles ?? []).map((r) => r.toLowerCase() as ApiRole);
+            const effectiveRoles = roles.length ? roles : (["user"] as ApiRole[]);
+            this.oauthUsers.set(apiUser.id, { user: apiUser, roles: effectiveRoles });
+            return { user: apiUser, roles: effectiveRoles };
+          }
+        } catch {
+          // Fall through to token payload
+        }
+      }
+
+      const identity = this.identityFromTokenPayload(payload);
       if (!identity) {
         throw new UnauthorizedException("Invalid access token");
       }
 
-      return {
-        user: identity.user,
-        roles: identity.roles
-      };
+      return { user: identity.user, roles: identity.roles };
     } catch {
       throw new UnauthorizedException("Invalid or expired access token");
     }
@@ -397,6 +411,69 @@ export class AuthService {
    * users cached in this instance's memory). Used by AdminService so the
    * admin panel can merge with DB users.
    */
+  /** Get a user by ID — used by AccountPasswordService. */
+  async getUserById(userId: string): Promise<ApiUser | null> {
+    // Hardcoded owner
+    if (userId === this.user.id) return this.user;
+
+    // In-memory cache (OAuth / sign-up users)
+    const cached = this.oauthUsers.get(userId);
+    if (cached) return cached.user;
+
+    // Supabase lookup
+    if (this.isSupabaseAvailable()) {
+      try {
+        const dbUser = await this.supabaseRpc<RpcUser>("auth_get_user_by_id", { p_user_id: userId });
+        if (dbUser) return this.rpcUserToApiUser(dbUser);
+      } catch (err) {
+        this.logger.warn(`getUserById RPC error: ${(err as Error).message}`);
+      }
+    }
+    return null;
+  }
+
+  /** Verify a user's current password without creating a session. */
+  async verifyCurrentPassword(email: string, password: string): Promise<boolean> {
+    const normalizedEmail = email.trim().toLowerCase();
+
+    // Frorex owner
+    if (normalizedEmail === this.user.email) {
+      await this.ensurePasswordHash();
+      return this.passwords.verify(password, this.passwordHash!);
+    }
+
+    if (!this.isSupabaseAvailable()) return false;
+
+    try {
+      const result = await this.supabaseRpc<RpcUser>("auth_login_verify", {
+        p_email: normalizedEmail,
+        p_password: password,
+      });
+      return result !== null;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Update a user's password (after verifying current password separately). */
+  async updatePassword(email: string, newPassword: string): Promise<void> {
+    const normalizedEmail = email.trim().toLowerCase();
+
+    if (normalizedEmail === this.user.email) {
+      this.passwordHash = await this.passwords.hash(newPassword);
+      return;
+    }
+
+    if (!this.isSupabaseAvailable()) {
+      throw new Error("Database unavailable — cannot update password.");
+    }
+
+    await this.supabaseRpc<boolean>("auth_update_password", {
+      p_email: normalizedEmail,
+      p_password: newPassword,
+    });
+  }
+
   listAllUsers(): Array<ApiUser & { roles: ApiRole[] }> {
     const result: Array<ApiUser & { roles: ApiRole[] }> = [
       { ...this.user, roles: this.roles },
@@ -423,7 +500,6 @@ export class AuthService {
       auth_provider:  row.auth_provider === "google" ? "google" : "email",
       avatar_url:     row.avatar_url ?? null,
       lightning_pubkey: row.lightning_pubkey ?? null,
-      restaurant_id:  null,
     };
   }
 
@@ -503,7 +579,6 @@ export class AuthService {
       auth_provider: payload.authProvider === "google" ? "google" : "email",
       avatar_url: payload.avatarUrl ?? null,
       lightning_pubkey: null,
-      restaurant_id: null
     };
 
     this.oauthUsers.set(user.id, { user, roles });
@@ -530,8 +605,7 @@ export class AuthService {
       display_name: profile.name || email,
       auth_provider: "google",
       avatar_url: profile.picture || null,
-      lightning_pubkey: null,
-      restaurant_id: null
+      lightning_pubkey: null
     };
   }
 

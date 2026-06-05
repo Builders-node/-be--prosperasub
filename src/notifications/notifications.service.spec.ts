@@ -2,6 +2,7 @@ import { NotificationsService } from "./notifications.service";
 
 describe("NotificationsService", () => {
   const prisma = {
+    isAvailable: jest.fn(() => true),
     paymentCheckoutSession: {
       upsert: jest.fn(),
       findUnique: jest.fn()
@@ -26,6 +27,7 @@ describe("NotificationsService", () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    prisma.isAvailable.mockReturnValue(true);
     service = new NotificationsService(prisma as never, email as never, telegram as never);
   });
 

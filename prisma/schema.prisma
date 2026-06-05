@@ -8,181 +8,79 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-enum UserRoleName {
-  SUPER_ADMIN
-  RESTAURANT_ADMIN
-  DRIVER
-  USER
-}
-
-enum AuthProvider {
-  EMAIL
-  GOOGLE
-  LIGHTNING
-}
-
-enum MenuCategory {
-  STANDARD
-  VEGETARIAN
-  VEGAN
-  KETO
-  GLUTEN_FREE
-  LACTOSE_FREE
-}
-
-enum MealTypeSlot {
-  BREAKFAST
-  LUNCH
-  DINNER
-}
-
-enum DayOfWeek {
-  MONDAY
-  TUESDAY
-  WEDNESDAY
-  THURSDAY
-  FRIDAY
-  SATURDAY
-  SUNDAY
-}
-
-enum MenuStatus {
-  DRAFT
-  PUBLISHED
-}
-
-enum MealChoice {
-  EAT_IN
-  DELIVERY
-  CANCELLED
-}
-
-enum MealStatus {
-  PENDING
-  PREPARED
-  DELIVERED
-  COMPLETED
-  NO_SHOW
-}
-
-enum PaymentStatus {
-  PENDING
-  PAID
-  FAILED
-  REFUNDED
-}
-
-enum PaymentMethod {
-  LIGHTNING
-  FIAT
-  CRYPTO
-}
-
-enum PaymentCurrency {
-  USD
-  SATS
-}
-
-enum CleaningBookingStatus {
-  BOOKED
-  COMPLETED
-  CANCELLED
-}
-
-enum CleaningClientStatus {
-  ACTIVE
-  INACTIVE
-  PAUSED
-  CANCELLED
-  ARCHIVED
-}
-
-enum CleaningBillingType {
-  DAILY
-  WEEKLY
-  MONTHLY
-  CUSTOM
-}
-
-enum CleaningPaymentTiming {
-  PREPAID
-  AFTER_SERVICE_COMPLETED
-  CUSTOM_TERMS
-}
-
-enum CleaningScheduleStatus {
-  ACTIVE
-  PAUSED
-  CANCELLED
-  ARCHIVED
-}
-
-enum CleaningChecklistType {
-  DAILY_UPKEEP
-  DEEP_CLEANING
-  CUSTOM
+enum app_role {
+  super_admin
+  restaurant_admin
+  user
 }
 
 model User {
-  id                 String                 @id @default(uuid())
-  email              String?                @unique
-  passwordHash       String?
-  name               String?
-  displayName        String?
-  lightningPubkey    String?                @unique
-  authProvider       AuthProvider           @default(EMAIL)
-  avatarUrl          String?
-  createdAt          DateTime               @default(now())
-  updatedAt          DateTime               @updatedAt
-  lastLoginAt        DateTime?
+  id              String                 @id @default(uuid())
+  email           String?                @unique
+  passwordHash    String?                @map("password_hash")
+  name            String?
+  displayName     String?                @map("display_name")
+  lightningPubkey String?                @unique @map("lightning_pubkey")
+  authProvider    String                 @default("email") @map("auth_provider")
+  avatarUrl       String?                @map("avatar_url")
+  bannedUntil     DateTime?              @map("banned_until")
+  deletedAt       DateTime?              @map("deleted_at")
+  createdAt       DateTime               @default(now()) @map("created_at")
+  updatedAt       DateTime               @updatedAt @map("updated_at")
+  lastLoginAt     DateTime?              @map("last_login_at")
   roles              UserRole[]
   profile            UserProfile?
   sessions           UserSession[]
   loginHistory       LoginHistory[]
-  restaurantAdmins   RestaurantAdmin[]
-  restaurantsCreated Restaurant[]           @relation("RestaurantCreatedBy")
-  subscriptions      Subscription[]
-  favorites          Favorite[]
   cleaningSubs       CleaningSubscription[]
   cleaningBookings   CleaningBooking[]
-  payments           Payment[]
+  notifications            UserNotification[]
+  cleaningPreferences      UserCleaningPreferences?
+  cleaningReminderJobs     CleaningReminderJob[]
+
+  @@map("users")
 }
 
 model UserRole {
   id        String       @id @default(uuid())
-  userId    String
-  role      UserRoleName
-  createdAt DateTime     @default(now())
+  userId    String       @map("user_id")
+  role      app_role
+  createdAt DateTime     @default(now()) @map("created_at")
   user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, role])
   @@index([role])
+  @@map("user_roles")
 }
 
 model UserProfile {
   id                     String   @id @default(uuid())
-  userId                 String   @unique
-  phone                  String?
-  defaultDeliveryAddress Json?
-  nwcConnection          String?
-  createdAt              DateTime @default(now())
-  updatedAt              DateTime @updatedAt
+  userId                 String   @unique @map("user_id")
+  phone                  String?  @map("phone_number")
+  telegramUsername       String?  @map("telegram_username")
+  whatsapp               String?  @map("whatsapp")
+  nwcConnection          String?  @map("nwc_connection")
+  createdAt              DateTime @default(now()) @map("created_at")
+  updatedAt              DateTime @updatedAt @map("updated_at")
   user                   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_profiles")
 }
 
 model UserSession {
   id               String   @id @default(uuid())
-  userId           String
-  refreshTokenHash String   @unique
-  expiresAt        DateTime
-  revokedAt        DateTime?
-  createdAt        DateTime @default(now())
-  lastActivityAt   DateTime @default(now())
-  userAgent        String?
-  ipAddress        String?
+  userId           String   @map("user_id")
+  refreshTokenHash String   @unique @map("refresh_token_hash")
+  expiresAt        DateTime @map("expires_at")
+  revokedAt        DateTime? @map("revoked_at")
+  createdAt        DateTime @default(now()) @map("created_at")
+  lastActivityAt   DateTime @default(now()) @map("last_activity_at")
+  userAgent        String?  @map("user_agent")
+  ipAddress        String?  @map("ip_address")
   user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, revokedAt, expiresAt])
+  @@map("user_sessions")
 }
 
 model LightningAuthChallenge {
@@ -190,250 +88,115 @@ model LightningAuthChallenge {
   k1        String   @unique
   status    String   @default("pending")
   pubkey    String?
-  createdAt DateTime @default(now())
-  expiresAt DateTime
+  createdAt DateTime @default(now()) @map("created_at")
+  expiresAt DateTime @map("expires_at")
+
+  @@map("lightning_auth_challenges")
 }
 
 model LoginHistory {
   id        String       @id @default(uuid())
-  userId    String
-  provider  AuthProvider
-  ipAddress String?
-  userAgent String?
-  createdAt DateTime     @default(now())
+  userId    String       @map("user_id")
+  provider  String
+  ipAddress String?      @map("ip_address")
+  userAgent String?      @map("user_agent")
+  createdAt DateTime     @default(now()) @map("created_at")
   user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-}
 
-model Restaurant {
-  id             String              @id @default(uuid())
-  name           String
-  description    String?
-  address        String?
-  logoUrl        String?
-  openingHours   Json?
-  isActive       Boolean             @default(true)
-  createdById    String?
-  createdAt      DateTime            @default(now())
-  updatedAt      DateTime            @updatedAt
-  createdBy      User?               @relation("RestaurantCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
-  admins         RestaurantAdmin[]
-  settings       RestaurantSettings?
-  plans          SubscriptionPlan[]
-  weeklyMenus    WeeklyMenu[]
-  menuItems      MenuItem[]
-  subscriptions  Subscription[]
-  favorites      Favorite[]
-  payments       Payment[]
-
-  @@index([isActive])
-}
-
-model RestaurantAdmin {
-  id           String     @id @default(uuid())
-  userId       String
-  restaurantId String
-  isOwner      Boolean    @default(false)
-  createdAt    DateTime   @default(now())
-  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
-  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
-
-  @@unique([userId, restaurantId])
-  @@index([restaurantId])
-}
-
-model RestaurantSettings {
-  id               String     @id @default(uuid())
-  restaurantId     String     @unique
-  cutoffHour       Int        @default(18)
-  deliveryFeeCents Int        @default(0)
-  createdAt        DateTime   @default(now())
-  updatedAt        DateTime   @updatedAt
-  restaurant       Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
-}
-
-model SubscriptionPlan {
-  id                String          @id @default(uuid())
-  restaurantId      String
-  name              String
-  description       String?
-  pricePerWeekCents Int
-  mealTime          String          @default("13:00:00")
-  menuCategory      MenuCategory    @default(STANDARD)
-  supportsDelivery  Boolean         @default(false)
-  isActive          Boolean         @default(true)
-  createdAt         DateTime        @default(now())
-  updatedAt         DateTime        @updatedAt
-  restaurant        Restaurant      @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
-  subscriptions     Subscription[]
-  weeklyMenus       WeeklyMenu[]
-  favorites         Favorite[]
-
-  @@index([restaurantId, isActive])
-  @@index([menuCategory])
-}
-
-model Subscription {
-  id               String             @id @default(uuid())
-  userId           String
-  restaurantId     String
-  planId           String
-  startDate        DateTime
-  endDate          DateTime
-  durationWeeks    Int
-  totalPriceCents  Int
-  paidAmountSats   Int?
-  paymentStatus    PaymentStatus      @default(PENDING)
-  paymentMethod    PaymentMethod?
-  paymentReference String?
-  isActive         Boolean            @default(true)
-  createdAt        DateTime           @default(now())
-  updatedAt        DateTime           @updatedAt
-  user             User               @relation(fields: [userId], references: [id], onDelete: Cascade)
-  restaurant       Restaurant         @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
-  plan             SubscriptionPlan   @relation(fields: [planId], references: [id], onDelete: Restrict)
-  mealChoices      DailyMealChoice[]
-  payments         Payment[]
-
-  @@index([userId, isActive])
-  @@index([restaurantId, paymentStatus])
-}
-
-model WeeklyMenu {
-  id            String            @id @default(uuid())
-  restaurantId  String
-  planId        String?
-  weekStartDate DateTime
-  weekEndDate   DateTime
-  category      MenuCategory      @default(STANDARD)
-  status        MenuStatus        @default(DRAFT)
-  createdAt     DateTime          @default(now())
-  updatedAt     DateTime          @updatedAt
-  restaurant    Restaurant        @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
-  plan          SubscriptionPlan? @relation(fields: [planId], references: [id], onDelete: SetNull)
-  items         MenuItem[]
-
-  @@unique([restaurantId, weekStartDate, category])
-  @@index([restaurantId, status])
-}
-
-model MenuItem {
-  id           String       @id @default(uuid())
-  weeklyMenuId String
-  restaurantId String
-  dayOfWeek    DayOfWeek
-  mealType     MealTypeSlot
-  name         String
-  description  String?
-  tags         String[]     @default([])
-  imageUrl     String?
-  createdAt    DateTime     @default(now())
-  updatedAt    DateTime     @updatedAt
-  weeklyMenu   WeeklyMenu   @relation(fields: [weeklyMenuId], references: [id], onDelete: Cascade)
-  restaurant   Restaurant   @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
-
-  @@index([restaurantId, dayOfWeek, mealType])
-}
-
-model DailyMealChoice {
-  id             String       @id @default(uuid())
-  subscriptionId String
-  date           DateTime
-  choice         MealChoice   @default(EAT_IN)
-  status         MealStatus   @default(PENDING)
-  notes          String?
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
-  subscription   Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
-
-  @@unique([subscriptionId, date])
-  @@index([date, status])
-}
-
-model Favorite {
-  id           String            @id @default(uuid())
-  userId       String
-  restaurantId String?
-  planId       String?
-  createdAt    DateTime          @default(now())
-  user         User              @relation(fields: [userId], references: [id], onDelete: Cascade)
-  restaurant   Restaurant?       @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
-  plan         SubscriptionPlan? @relation(fields: [planId], references: [id], onDelete: Cascade)
-
-  @@index([userId])
-  @@unique([userId, restaurantId])
-  @@unique([userId, planId])
+  @@map("login_history")
 }
 
 model CleaningPackage {
   id                    String                 @id @default(uuid())
   name                  String
   description           String?
-  pricePerCleaningCents Int
-  cleaningsPerMonth     Int                    @default(4)
-  isActive              Boolean                @default(true)
-  createdAt             DateTime               @default(now())
-  updatedAt             DateTime               @updatedAt
+  pricePerCleaningCents Int?                   @map("price_per_cleaning_cents")
+  monthlyPriceCents     Int?                   @map("monthly_price_cents")
+  cleaningsPerMonth     Int                    @default(4) @map("cleanings_per_month")
+  frequencyUnit         String                 @default("month") @map("frequency_unit")
+  frequencyCount        Int?                   @map("frequency_count")
+  customFrequencyLabel  String?                @map("custom_frequency_label")
+  pricingMode           String                 @default("price_per_cleaning") @map("pricing_mode")
+  isActive              Boolean                @default(true) @map("is_active")
+  deletedAt             DateTime?              @map("deleted_at")
+  createdAt             DateTime               @default(now()) @map("created_at")
+  updatedAt             DateTime               @updatedAt @map("updated_at")
   subscriptions         CleaningSubscription[]
 
   @@index([isActive])
+  @@map("cleaning_packages")
 }
 
 model CleaningAvailableSlot {
-  id        String            @id @default(uuid())
-  startsAt  DateTime
-  endsAt    DateTime
-  capacity  Int               @default(1)
-  isActive  Boolean           @default(true)
-  createdAt DateTime          @default(now())
-  bookings  CleaningBooking[]
+  id              String            @id @default(uuid())
+  date            String
+  startTime       String            @map("start_time")
+  endTime         String            @map("end_time")
+  maxBookings     Int               @default(1) @map("max_bookings")
+  currentBookings Int               @default(0) @map("current_bookings")
+  isActive        Boolean           @default(true) @map("is_active")
+  createdAt       DateTime          @default(now()) @map("created_at")
+  updatedAt       DateTime?         @updatedAt @map("updated_at")
+  bookings        CleaningBooking[]
 
-  @@index([startsAt, isActive])
+  @@index([date, isActive])
+  @@map("cleaning_available_slots")
 }
 
 model CleaningSubscription {
   id                  String            @id @default(uuid())
-  userId              String
-  packageId           String
-  isActive            Boolean           @default(true)
-  startsAt            DateTime          @default(now())
-  endsAt              DateTime?
-  billingPeriodMonths Int               @default(1)
-  monthlyPriceCents   Int               @default(0)
-  totalPriceCents     Int               @default(0)
-  serviceStartDate    DateTime?
-  serviceEndDate      DateTime?
-  paidUntil           DateTime?
-  paymentStatus       String            @default("pending")
-  subscriptionStatus  String            @default("active")
-  apartmentNote       String?
-  createdAt           DateTime          @default(now())
-  updatedAt           DateTime          @updatedAt
-  user                User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId              String?           @map("user_id")
+  clientId            String?           @map("client_id")
+  packageId           String            @map("package_id")
+  isActive            Boolean           @default(true) @map("is_active")
+  startDate           String?           @map("start_date")
+  endDate             String?           @map("end_date")
+  billingPeriodMonths Int               @default(1) @map("billing_period_months")
+  monthlyPriceCents   Int               @default(0) @map("monthly_price_cents")
+  totalPriceCents     Int               @default(0) @map("total_price_cents")
+  serviceStartDate    String?           @map("service_start_date")
+  serviceEndDate      String?           @map("service_end_date")
+  paidUntil           String?           @map("paid_until")
+  cleaningsRemaining  Int?              @map("cleanings_remaining")
+  paymentStatus       String            @default("pending") @map("payment_status")
+  subscriptionStatus  String            @default("active") @map("subscription_status")
+  paymentMethod       String?           @map("payment_method")
+  paymentReference    String?           @map("payment_reference")
+  recurringDayOfWeek  Int?              @map("recurring_day_of_week")
+  recurringTime       String?           @map("recurring_time")
+  apartmentNote       String?           @map("apartment_note")
+  adminNotes          String?           @map("admin_notes")
+  deletedAt           DateTime?         @map("deleted_at")
+  createdAt           DateTime          @default(now()) @map("created_at")
+  updatedAt           DateTime          @updatedAt @map("updated_at")
+  user                User?             @relation(fields: [userId], references: [id], onDelete: Cascade)
   package             CleaningPackage   @relation(fields: [packageId], references: [id], onDelete: Restrict)
   bookings            CleaningBooking[]
 
   @@index([userId, isActive])
   @@index([paidUntil, subscriptionStatus])
+  @@map("cleaning_subscriptions")
 }
 
 model CleaningClient {
   id                 String                 @id @default(uuid())
-  companyName        String
-  contactPerson      String?
+  companyName        String                 @map("company_name")
+  contactPerson      String?                @map("contact_person")
   email              String?
   phone              String?
   location           String
-  serviceType        String?
+  serviceType        String?                @map("service_type")
   notes              String?
-  internalAdminNotes String?
-  invoicePreferences String?
-  startDate          DateTime
-  status             CleaningClientStatus   @default(ACTIVE)
-  isPrivate          Boolean                @default(true)
+  internalAdminNotes String?                @map("internal_admin_notes")
+  invoicePreferences String?                @map("invoice_preferences")
+  startDate          DateTime               @map("start_date")
+  status             String                 @default("ACTIVE")
+  isPrivate          Boolean                @default(true) @map("is_private")
   visibility         String                 @default("admin_only")
-  clientType         String                 @default("custom_cleaning_client")
-  createdAt          DateTime               @default(now())
-  updatedAt          DateTime               @updatedAt
+  clientType         String                 @default("custom_cleaning_client") @map("client_type")
+  deletedAt          DateTime?              @map("deleted_at")
+  createdAt          DateTime               @default(now()) @map("created_at")
+  updatedAt          DateTime               @updatedAt @map("updated_at")
   customPlans        CleaningCustomPlan[]
   bookings           CleaningBooking[]
   recurringSchedules CleaningRecurringSchedule[]
@@ -442,28 +205,35 @@ model CleaningClient {
 
   @@index([status])
   @@index([visibility, isPrivate])
+  @@map("cleaning_clients")
 }
 
 model CleaningCustomPlan {
   id                         String                       @id @default(uuid())
-  clientId                   String
-  planName                   String
-  customPriceCents           Int
-  billingType                CleaningBillingType          @default(CUSTOM)
-  monthlyInvoice             Boolean                      @default(false)
-  paymentTiming              CleaningPaymentTiming        @default(CUSTOM_TERMS)
-  customTerms                String?
-  serviceFrequency           String?
-  daysOfWeek                 DayOfWeek[]                  @default([])
-  deepCleaningAddOn          Boolean                      @default(false)
-  estimatedMonthlyTotalCents Int?
-  customChecklist            String[]                     @default([])
-  status                     CleaningClientStatus         @default(ACTIVE)
-  isPrivate                  Boolean                      @default(true)
+  clientId                   String                       @map("client_id")
+  planName                   String                       @map("plan_name")
+  customPriceCents           Int                          @map("custom_price_cents")
+  monthlyPriceCents          Int?                         @map("monthly_price_cents")
+  pricePerCleaningCents      Int?                         @map("price_per_cleaning_cents")
+  frequencyUnit              String                       @default("custom") @map("frequency_unit")
+  frequencyCount             Int?                         @map("frequency_count")
+  customFrequencyLabel       String?                      @map("custom_frequency_label")
+  pricingMode                String                       @default("custom_manual") @map("pricing_mode")
+  billingType                String                       @default("CUSTOM") @map("billing_type")
+  monthlyInvoice             Boolean                      @default(false) @map("monthly_invoice")
+  paymentTiming              String                       @default("CUSTOM_TERMS") @map("payment_timing")
+  customTerms                String?                      @map("custom_terms")
+  serviceFrequency           String?                      @map("service_frequency")
+  daysOfWeek                 String[]                     @default([]) @map("days_of_week")
+  deepCleaningAddOn          Boolean                      @default(false) @map("deep_cleaning_add_on")
+  estimatedMonthlyTotalCents Int?                         @map("estimated_monthly_total_cents")
+  customChecklist            String[]                     @default([]) @map("custom_checklist")
+  status                     String                       @default("ACTIVE")
+  isPrivate                  Boolean                      @default(true) @map("is_private")
   visibility                 String                       @default("admin_only")
-  clientType                 String                       @default("custom_cleaning_client")
-  createdAt                  DateTime                     @default(now())
-  updatedAt                  DateTime                     @updatedAt
+  clientType                 String                       @default("custom_cleaning_client") @map("client_type")
+  createdAt                  DateTime                     @default(now()) @map("created_at")
+  updatedAt                  DateTime                     @updatedAt @map("updated_at")
   client                     CleaningClient               @relation(fields: [clientId], references: [id], onDelete: Cascade)
   recurringSchedules         CleaningRecurringSchedule[]
   bookings                   CleaningBooking[]
@@ -472,74 +242,79 @@ model CleaningCustomPlan {
 
   @@index([clientId, status])
   @@index([visibility, isPrivate])
+  @@map("cleaning_custom_plans")
 }
 
 model CleaningRecurringSchedule {
   id                     String                 @id @default(uuid())
-  clientId               String
-  customPlanId           String
-  startDate              DateTime
-  endDate                DateTime?
-  daysOfWeek             DayOfWeek[]            @default([])
-  preferredStartTime     String
-  preferredEndTime       String
-  assignedCleaner        String?
+  clientId               String                 @map("client_id")
+  customPlanId           String                 @map("custom_plan_id")
+  startDate              DateTime               @map("start_date")
+  endDate                DateTime?              @map("end_date")
+  daysOfWeek             String[]               @default([]) @map("days_of_week")
+  preferredStartTime     String                 @map("preferred_start_time")
+  preferredEndTime       String                 @map("preferred_end_time")
+  assignedCleaner        String?                @map("assigned_cleaner")
   location               String
-  serviceDurationMinutes Int                    @default(120)
-  repeatFrequency        String                 @default("weekly")
-  status                 CleaningScheduleStatus @default(ACTIVE)
-  pausedAt               DateTime?
-  createdAt              DateTime               @default(now())
-  updatedAt              DateTime               @updatedAt
+  serviceDurationMinutes Int                    @default(120) @map("service_duration_minutes")
+  repeatFrequency        String                 @default("weekly") @map("repeat_frequency")
+  status                 String                 @default("ACTIVE")
+  pausedAt               DateTime?              @map("paused_at")
+  createdAt              DateTime               @default(now()) @map("created_at")
+  updatedAt              DateTime               @updatedAt @map("updated_at")
   client                 CleaningClient         @relation(fields: [clientId], references: [id], onDelete: Cascade)
   customPlan             CleaningCustomPlan     @relation(fields: [customPlanId], references: [id], onDelete: Cascade)
   bookings               CleaningBooking[]
 
   @@index([clientId, status])
   @@index([customPlanId, status])
+  @@map("cleaning_recurring_schedules")
 }
 
 model CleaningChecklistTemplate {
   id           String                @id @default(uuid())
-  clientId     String
-  customPlanId String
-  templateType CleaningChecklistType @default(CUSTOM)
+  clientId     String                @map("client_id")
+  customPlanId String                @map("custom_plan_id")
+  templateType String                @default("CUSTOM") @map("template_type")
   name         String
   items        String[]              @default([])
-  isActive     Boolean               @default(true)
-  createdAt    DateTime              @default(now())
-  updatedAt    DateTime              @updatedAt
+  isActive     Boolean               @default(true) @map("is_active")
+  createdAt    DateTime              @default(now()) @map("created_at")
+  updatedAt    DateTime              @updatedAt @map("updated_at")
   client       CleaningClient        @relation(fields: [clientId], references: [id], onDelete: Cascade)
   customPlan   CleaningCustomPlan    @relation(fields: [customPlanId], references: [id], onDelete: Cascade)
   bookings     CleaningBooking[]
 
   @@index([customPlanId, isActive])
+  @@map("cleaning_checklist_templates")
 }
 
 model CleaningBooking {
   id             String                @id @default(uuid())
-  userId         String
-  subscriptionId String?
-  clientId       String?
-  customPlanId   String?
-  recurringScheduleId String?
-  checklistTemplateId String?
-  slotId         String
-  status         CleaningBookingStatus @default(BOOKED)
+  userId         String                @map("user_id")
+  subscriptionId String?               @map("subscription_id")
+  cleaningSubscriptionId String?       @map("cleaning_subscription_id")
+  clientId       String?               @map("client_id")
+  customPlanId   String?               @map("custom_plan_id")
+  recurringScheduleId String?          @map("recurring_schedule_id")
+  checklistTemplateId String?          @map("checklist_template_id")
+  slotId         String                @map("slot_id")
+  status         String                @default("BOOKED")
   notes          String?
   location       String?
-  assignedCleaner String?
-  serviceDurationMinutes Int?
-  isPrivate      Boolean               @default(false)
+  assignedCleaner String?              @map("assigned_cleaner")
+  serviceDurationMinutes Int?          @map("service_duration_minutes")
+  source         String?
+  isPrivate      Boolean               @default(false) @map("is_private")
   visibility     String?
-  clientType     String?
-  googleCalendarEventId String?
-  googleCalendarEventLink String?
-  googleCalendarSyncedAt DateTime?
-  googleCalendarSyncStatus String @default("pending")
-  googleCalendarSyncError String?
-  createdAt      DateTime              @default(now())
-  updatedAt      DateTime              @updatedAt
+  clientType     String?               @map("client_type")
+  googleCalendarEventId String?        @map("google_calendar_event_id")
+  googleCalendarEventLink String?      @map("google_calendar_event_link")
+  googleCalendarSyncedAt DateTime?     @map("google_calendar_synced_at")
+  googleCalendarSyncStatus String      @default("pending") @map("google_calendar_sync_status")
+  googleCalendarSyncError String?      @map("google_calendar_sync_error")
+  createdAt      DateTime              @default(now()) @map("created_at")
+  updatedAt      DateTime              @updatedAt @map("updated_at")
   user           User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
   subscription   CleaningSubscription? @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
   slot           CleaningAvailableSlot @relation(fields: [slotId], references: [id], onDelete: Restrict)
@@ -549,122 +324,225 @@ model CleaningBooking {
   checklistTemplate CleaningChecklistTemplate? @relation(fields: [checklistTemplateId], references: [id], onDelete: SetNull)
   completionReport CleaningCompletionReport?
 
-  @@unique([subscriptionId, slotId])
-  @@unique([customPlanId, slotId])
   @@index([userId, status])
   @@index([clientId, status])
   @@index([recurringScheduleId, status])
   @@index([googleCalendarSyncStatus])
+  @@map("cleaning_bookings")
 }
 
 model CleaningCompletionReport {
   id                 String             @id @default(uuid())
-  bookingId          String             @unique
-  clientId           String?
-  customPlanId       String?
-  checklistCompleted String[]           @default([])
+  bookingId          String             @unique @map("booking_id")
+  clientId           String?            @map("client_id")
+  customPlanId       String?            @map("custom_plan_id")
+  checklistCompleted String[]           @default([]) @map("checklist_completed")
   notes              String?
-  photoUrl           String?
-  issueReport        String?
-  completedBy        String
-  completedAt        DateTime           @default(now())
-  createdAt          DateTime           @default(now())
-  updatedAt          DateTime           @updatedAt
+  photoUrl           String?            @map("photo_url")
+  issueReport        String?            @map("issue_report")
+  completedBy        String             @map("completed_by")
+  completedAt        DateTime           @default(now()) @map("completed_at")
+  createdAt          DateTime           @default(now()) @map("created_at")
+  updatedAt          DateTime           @updatedAt @map("updated_at")
   booking            CleaningBooking    @relation(fields: [bookingId], references: [id], onDelete: Cascade)
   client             CleaningClient?    @relation(fields: [clientId], references: [id], onDelete: SetNull)
   customPlan         CleaningCustomPlan? @relation(fields: [customPlanId], references: [id], onDelete: SetNull)
 
   @@index([clientId, completedAt])
   @@index([customPlanId, completedAt])
-}
-
-model Payment {
-  id             String          @id @default(uuid())
-  userId         String
-  restaurantId   String?
-  subscriptionId String?
-  amountCents    Int?
-  amountSats     Int?
-  currency       PaymentCurrency @default(USD)
-  method         PaymentMethod
-  status         PaymentStatus   @default(PENDING)
-  provider       String?
-  providerRef    String?
-  description    String?
-  paidAt         DateTime?
-  createdAt      DateTime        @default(now())
-  updatedAt      DateTime        @updatedAt
-  user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
-  restaurant     Restaurant?     @relation(fields: [restaurantId], references: [id], onDelete: SetNull)
-  subscription   Subscription?   @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
-
-  @@index([userId, status])
-  @@index([providerRef])
-  @@index([restaurantId, status])
+  @@map("cleaning_completion_reports")
 }
 
 model PaymentCheckoutSession {
   id                  String   @id @default(uuid())
   provider            String
-  providerPaymentId   String
+  providerPaymentId   String   @map("provider_payment_id")
   context             String?
-  serviceName         String
-  clientName          String?
-  clientEmail         String?
-  clientPhone         String?
-  amountCents         Int?
-  amountSats          Int?
+  serviceName         String   @map("service_name")
+  clientName          String?  @map("client_name")
+  clientEmail         String?  @map("client_email")
+  clientPhone         String?  @map("client_phone")
+  amountCents         Int?     @map("amount_cents")
+  amountSats          Int?     @map("amount_sats")
   currency            String   @default("USD")
-  planName            String?
+  planName            String?  @map("plan_name")
   duration            String?
-  bookingId           String?
-  adminUrl            String?
-  selectedDateTime    String?
+  bookingId           String?  @map("booking_id")
+  adminUrl            String?  @map("admin_url")
+  selectedDateTime    String?  @map("selected_date_time")
   description         String?
-  externalId          String?
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
+  externalId          String?  @map("external_id")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
 
   @@unique([provider, providerPaymentId])
   @@index([context])
+  @@map("payment_checkout_sessions")
 }
 
 model AdminPaymentNotification {
   id             String   @id @default(uuid())
   provider       String
-  providerPaymentId String
-  serviceName    String
-  clientName     String?
-  clientEmail    String?
-  clientPhone    String?
-  amountCents    Int?
-  amountSats     Int?
+  providerPaymentId String @map("provider_payment_id")
+  serviceName    String   @map("service_name")
+  clientName     String?  @map("client_name")
+  clientEmail    String?  @map("client_email")
+  clientPhone    String?  @map("client_phone")
+  amountCents    Int?     @map("amount_cents")
+  amountSats     Int?     @map("amount_sats")
   currency       String   @default("USD")
-  planName       String?
+  planName       String?  @map("plan_name")
   duration       String?
-  bookingId      String?
-  adminUrl       String?
-  selectedDateTime String?
-  paymentStatus  String   @default("paid")
-  paidAt         DateTime
-  emailStatus    String   @default("pending")
-  emailSentAt    DateTime?
-  emailError     String?
-  telegramStatus String   @default("pending")
-  telegramSentAt DateTime?
-  telegramError  String?
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  bookingId      String?  @map("booking_id")
+  adminUrl       String?  @map("admin_url")
+  selectedDateTime String? @map("selected_date_time")
+  paymentStatus  String   @default("paid") @map("payment_status")
+  paidAt         DateTime @map("paid_at")
+  emailStatus    String   @default("pending") @map("email_status")
+  emailSentAt    DateTime? @map("email_sent_at")
+  emailError     String?  @map("email_error")
+  telegramStatus String   @default("pending") @map("telegram_status")
+  telegramSentAt DateTime? @map("telegram_sent_at")
+  telegramError  String?  @map("telegram_error")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
 
   @@unique([provider, providerPaymentId])
   @@index([paidAt])
   @@index([emailStatus, telegramStatus])
+  @@map("admin_payment_notifications")
 }
 
 model GlobalSetting {
   id        String   @id @default(uuid())
   key       String   @unique
   value     Json
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("global_settings")
+}
+
+model RbacRole {
+  id          String               @id @default(uuid())
+  slug        String               @unique
+  name        String               @unique
+  description String?
+  status      String               @default("active")
+  isSystem    Boolean              @default(false) @map("is_system")
+  isAdminRole Boolean              @default(false) @map("is_admin_role")
+  createdAt   DateTime             @default(now()) @map("created_at")
+  updatedAt   DateTime             @updatedAt @map("updated_at")
+  archivedAt  DateTime?            @map("archived_at")
+  permissions RbacRolePermission[]
+  users       RbacUserRole[]
+
+  @@index([status])
+  @@map("rbac_roles")
+}
+
+model RbacPermission {
+  key               String               @id
+  category          String
+  name              String
+  description       String?
+  isAdminPermission Boolean              @default(false) @map("is_admin_permission")
+  createdAt         DateTime             @default(now()) @map("created_at")
+  rolePermissions   RbacRolePermission[]
+
+  @@index([category])
+  @@map("rbac_permissions")
+}
+
+model RbacRolePermission {
+  roleId        String         @map("role_id")
+  permissionKey String         @map("permission_key")
+  grantedAt     DateTime       @default(now()) @map("granted_at")
+  role          RbacRole       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission    RbacPermission @relation(fields: [permissionKey], references: [key], onDelete: Cascade)
+
+  @@id([roleId, permissionKey])
+  @@map("rbac_role_permissions")
+}
+
+model RbacUserRole {
+  id           String    @id @default(uuid())
+  userId       String    @map("user_id")
+  roleId       String    @map("role_id")
+  assignedBy   String?   @map("assigned_by")
+  assignedAt   DateTime  @default(now()) @map("assigned_at")
+  removedBy    String?   @map("removed_by")
+  removedAt    DateTime? @map("removed_at")
+  role         RbacRole  @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@index([userId, removedAt])
+  @@index([roleId, removedAt])
+  @@map("rbac_user_roles")
+}
+
+model RbacRoleAuditLog {
+  id          String   @id @default(uuid())
+  action      String
+  roleId      String?  @map("role_id")
+  targetUserId String? @map("target_user_id")
+  actorUserId String? @map("actor_user_id")
+  details     Json     @default("{}")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([roleId, createdAt])
+  @@index([targetUserId, createdAt])
+  @@map("rbac_role_audit_logs")
+}
+
+model UserCleaningPreferences {
+  id                    String   @id @default(uuid())
+  userId                String   @unique @map("user_id")
+  reminderEnabled       Boolean  @default(true) @map("reminder_enabled")
+  reminderMethod        String   @default("all") @map("reminder_method") // "all" | "email" | "in_app"
+  reminderMinutesBefore Int      @default(60) @map("reminder_minutes_before")
+  accessInstructions    String?  @map("access_instructions")
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @updatedAt @map("updated_at")
+  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_cleaning_preferences")
+}
+
+model CleaningReminderJob {
+  id            String    @id @default(uuid())
+  bookingId     String    @map("booking_id")
+  userId        String    @map("user_id")
+  scheduledAt   DateTime  @map("scheduled_at")
+  sentAt        DateTime? @map("sent_at")
+  status        String    @default("pending") // "pending" | "sent" | "skipped" | "failed"
+  methodsSent   Json?     @map("methods_sent")
+  errorMessage  String?   @map("error_message")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([bookingId, userId])
+  @@index([status, scheduledAt])
+  @@map("cleaning_reminder_jobs")
+}
+
+model UserNotification {
+  id                String   @id @default(uuid())
+  recipientUserId   String   @map("recipient_user_id")
+  category          String   // "payment" | "subscription" | "booking" | "reminder" | "plan"
+  type              String   // e.g. "payment_received" | "booking_created" | "booking_cancelled"
+  title             String
+  body              String
+  isRead            Boolean  @default(false) @map("is_read")
+  isArchived        Boolean  @default(false) @map("is_archived")
+  relatedEntityType String?  @map("related_entity_type") // "booking" | "subscription" | "plan"
+  relatedEntityId   String?  @map("related_entity_id")
+  actionUrl         String?  @map("action_url")
+  metadata          Json?
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+  user              User     @relation(fields: [recipientUserId], references: [id], onDelete: Cascade)
+
+  @@index([recipientUserId, isRead, isArchived])
+  @@index([recipientUserId, category])
+  @@map("user_notifications")
 }

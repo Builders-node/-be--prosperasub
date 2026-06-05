@@ -1,7 +1,8 @@
 import { BadRequestException, Body, Controller, Post } from "@nestjs/common";
 import { ApiBody, ApiOperation, ApiProperty, ApiResponse, ApiTags } from "@nestjs/swagger";
 import { IsInt, IsOptional, IsString, Min } from "class-validator";
-import { CatalogService } from "../catalog/catalog.service";
+import { CatalogService, type CleaningPackageDto } from "../catalog/catalog.service";
+import { resolveMonthlyPriceCents } from "../catalog/cleaning-plan-pricing";
 import { NotificationsService } from "../notifications/notifications.service";
 import { BlinkService } from "./blink.service";
 
@@ -160,8 +161,9 @@ export class PaymentsController {
       throw new BadRequestException("amount_cents is required for Blink USD Lightning invoices.");
     }
 
+    let cleaningPackage: CleaningPackageDto | undefined;
     if (body.context === "cleaning_subscription") {
-      this.validateCleaningInvoiceAmount(body);
+      cleaningPackage = await this.validateCleaningInvoiceAmount(body);
     }
 
     const invoice = await this.blink.createUsdInvoice({
@@ -181,7 +183,7 @@ export class PaymentsController {
       amountCents: body.amount_cents,
       amountSats: invoice.amount_sats ?? body.amount_sats ?? null,
       currency: "USD",
-      planName: this.resolvePlanName(body),
+      planName: this.resolvePlanName(body, cleaningPackage),
       duration: this.resolveDuration(body),
       bookingId: body.booking_id ?? null,
       adminUrl: body.admin_url ?? null,
@@ -193,22 +195,24 @@ export class PaymentsController {
     return invoice;
   }
 
-  private validateCleaningInvoiceAmount(body: CreateLightningInvoiceDto) {
+  private async validateCleaningInvoiceAmount(body: CreateLightningInvoiceDto) {
     const validMonths = [1, 2, 3];
     if (!body.package_id || !body.billing_period_months || !validMonths.includes(body.billing_period_months)) {
       throw new BadRequestException("Cleaning invoice requires package_id and billing_period_months of 1, 2, or 3.");
     }
 
-    const cleaningPackage = this.catalog.getCleaningPackage(body.package_id);
+    const cleaningPackage = await this.catalog.getCleaningPackage(body.package_id);
     if (!cleaningPackage) {
       throw new BadRequestException("Cleaning package was not found.");
     }
 
-    const monthlyPriceCents = cleaningPackage.pricePerCleaningCents * cleaningPackage.cleaningsPerMonth;
+    const monthlyPriceCents = resolveMonthlyPriceCents(cleaningPackage);
     const expectedTotalCents = monthlyPriceCents * body.billing_period_months;
     if (body.amount_cents !== expectedTotalCents) {
       throw new BadRequestException("Cleaning invoice amount does not match the selected package and duration.");
     }
+
+    return cleaningPackage;
   }
 
   @ApiOperation({ summary: "Check Blink Lightning invoice status" })
@@ -241,15 +245,14 @@ export class PaymentsController {
   private resolveServiceName(body: CreateLightningInvoiceDto) {
     if (body.service_name) return body.service_name;
     if (body.context === "cleaning_subscription") return "Cleaning subscription";
-    if (body.context === "meal_subscription") return "Meal subscription";
     if (body.context === "admin_test_payment") return "Admin test payment";
     return "ProsperaSub payment";
   }
 
-  private resolvePlanName(body: CreateLightningInvoiceDto) {
+  private resolvePlanName(body: CreateLightningInvoiceDto, cleaningPackage?: CleaningPackageDto) {
     if (body.plan_name) return body.plan_name;
     if (body.context === "cleaning_subscription" && body.package_id) {
-      return this.catalog.getCleaningPackage(body.package_id)?.name ?? body.package_id;
+      return cleaningPackage?.name ?? body.package_id;
     }
     return null;
   }

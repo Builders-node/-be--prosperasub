@@ -1,9 +1,9 @@
-import { PrismaClient, UserRoleName, AuthProvider, MenuCategory, PaymentStatus } from "@prisma/client";
+import { PrismaClient, type app_role } from "@prisma/client";
 import * as bcrypt from "bcryptjs";
 
 const prisma = new PrismaClient();
 
-async function ensureUserRoles(userId: string, roles: UserRoleName[]) {
+async function ensureUserRoles(userId: string, roles: app_role[]) {
   await prisma.userRole.createMany({
     data: roles.map((role) => ({ userId, role })),
     skipDuplicates: true
@@ -22,21 +22,16 @@ async function main() {
       passwordHash: adminPasswordHash,
       name: "Prospera Sub Admin",
       displayName: "Admin",
-      authProvider: AuthProvider.EMAIL,
+      authProvider: "email",
       profile: {
         create: {
-          phone: "+50400000000",
-          defaultDeliveryAddress: {
-            address: "Prospera",
-            city: "Roatan",
-            country: "Honduras"
-          }
+          phone: "+50400000000"
         }
       }
     }
   });
 
-  await ensureUserRoles(admin.id, [UserRoleName.SUPER_ADMIN, UserRoleName.USER]);
+  await ensureUserRoles(admin.id, ["super_admin", "user"]);
 
   await prisma.user.upsert({
     where: { email: "frorex.studio@gmail.com" },
@@ -44,66 +39,19 @@ async function main() {
       passwordHash: frorexPasswordHash,
       name: "Frorex Studio",
       displayName: "Frorex",
-      authProvider: AuthProvider.EMAIL
+      authProvider: "email"
     },
     create: {
       email: "frorex.studio@gmail.com",
       passwordHash: frorexPasswordHash,
       name: "Frorex Studio",
       displayName: "Frorex",
-      authProvider: AuthProvider.EMAIL,
+      authProvider: "email",
       profile: {
-        create: {
-          defaultDeliveryAddress: {
-            address: "Prospera Village",
-            city: "Roatan",
-            country: "Honduras"
-          }
-        }
+        create: {}
       }
     }
-  }).then((user) => ensureUserRoles(user.id, [UserRoleName.SUPER_ADMIN, UserRoleName.USER]));
-
-  const restaurant = await prisma.restaurant.upsert({
-    where: { id: "seed-restaurant-prospera-cafe" },
-    update: {},
-    create: {
-      id: "seed-restaurant-prospera-cafe",
-      name: "Prospera Cafe",
-      description: "Seed restaurant for local meal subscriptions.",
-      address: "Prospera Village",
-      isActive: true,
-      createdById: admin.id,
-      admins: {
-        create: {
-          userId: admin.id,
-          isOwner: true
-        }
-      },
-      settings: {
-        create: {
-          cutoffHour: 18,
-          deliveryFeeCents: 300
-        }
-      }
-    }
-  });
-
-  await prisma.subscriptionPlan.upsert({
-    where: { id: "seed-plan-weekly-lunch" },
-    update: {},
-    create: {
-      id: "seed-plan-weekly-lunch",
-      restaurantId: restaurant.id,
-      name: "Weekly Lunch",
-      description: "Five lunches per week.",
-      pricePerWeekCents: 7500,
-      mealTime: "13:00:00",
-      menuCategory: MenuCategory.STANDARD,
-      supportsDelivery: true,
-      isActive: true
-    }
-  });
+  }).then((user) => ensureUserRoles(user.id, ["super_admin", "user"]));
 
   await prisma.cleaningPackage.upsert({
     where: { id: "cleaning-1-bedroom-studio" },
@@ -148,14 +96,14 @@ async function main() {
     update: {
       value: {
         name: "Prospera Sub",
-        paymentStatus: PaymentStatus.PENDING
+        paymentStatus: "pending"
       }
     },
     create: {
       key: "platform",
       value: {
         name: "Prospera Sub",
-        paymentStatus: PaymentStatus.PENDING
+        paymentStatus: "pending"
       }
     }
   });
