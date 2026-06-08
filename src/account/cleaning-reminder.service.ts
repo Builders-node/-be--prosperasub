@@ -4,7 +4,7 @@ import { MailService } from "../mail/mail.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { AccountNotificationsService } from "./account-notifications.service";
 
-const BUSINESS_TZ = process.env.BUSINESS_TIMEZONE || "UTC";
+const BUSINESS_TZ = process.env.BUSINESS_TIMEZONE || "America/Tegucigalpa";
 
 /** Convert "YYYY-MM-DD" + "HH:MM:SS" in business TZ to a UTC Date. */
 function slotToUtc(date: string, startTime: string): Date {
@@ -123,10 +123,14 @@ export class CleaningReminderService {
     const now = new Date();
 
     try {
-      // Look-ahead: find bookings in the next 25 hours (covers 1-day-before reminders)
-      const todayStr = now.toISOString().slice(0, 10);
+      // Look-ahead: find bookings in the next 25 hours (covers 1-day-before reminders).
+      // Use the *business* calendar date (Honduras), not the UTC date — they can differ by up to 6 h.
+      const toBusinessDateStr = (d: Date) =>
+        new Intl.DateTimeFormat("en-CA", { timeZone: BUSINESS_TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
+
+      const todayStr      = toBusinessDateStr(now);
       const lookAheadDate = new Date(now.getTime() + 25 * 60 * 60 * 1000);
-      const lookAheadStr = lookAheadDate.toISOString().slice(0, 10);
+      const lookAheadStr  = toBusinessDateStr(lookAheadDate);
 
       const upcomingBookings = await this.supabaseRest<any[]>(
         `/cleaning_bookings?select=id,user_id,client_id,status,slot_id,cleaning_available_slots(date,start_time,end_time)&status=eq.booked&cleaning_available_slots.date=gte.${todayStr}&cleaning_available_slots.date=lte.${lookAheadStr}&limit=200`,
@@ -345,14 +349,16 @@ export class CleaningReminderService {
 
   private formatDate(d: string): string {
     try {
+      // Compare against the *business* calendar date (Honduras), not the UTC server date.
+      const toLocalDate = (date: Date) =>
+        new Intl.DateTimeFormat("en-CA", { timeZone: BUSINESS_TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
+      const now      = new Date();
+      const todayStr = toLocalDate(now);
+      const tmrwStr  = toLocalDate(new Date(now.getTime() + 24 * 60 * 60 * 1000));
+      if (d === todayStr)  return "today";
+      if (d === tmrwStr)   return "tomorrow";
       const dt = new Date(`${d}T12:00:00Z`);
-      const today = new Date();
-      const isToday = dt.toDateString() === today.toDateString();
-      const tomorrow = new Date(today); tomorrow.setDate(today.getDate() + 1);
-      const isTomorrow = dt.toDateString() === tomorrow.toDateString();
-      if (isToday) return "today";
-      if (isTomorrow) return "tomorrow";
-      return dt.toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" });
+      return dt.toLocaleDateString("en-US", { timeZone: BUSINESS_TZ, weekday: "long", month: "short", day: "numeric" });
     } catch { return d; }
   }
 
