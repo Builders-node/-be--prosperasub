@@ -12,5 +12,15 @@
       "src": "/(.*)",
       "dest": "api/index.ts"
     }
+  ],
+  "crons": [
+    {
+      "path": "/cron/reconcile-payments",
+      "schedule": "0 6 * * *"
+    },
+    {
+      "path": "/reminders/subscriptions/process",
+      "schedule": "0 13 * * *"
+    }
   ]
 }

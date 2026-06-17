@@ -10,6 +10,7 @@ import { AccountPreferencesService } from "./account-preferences.service";
 import { AccountPaymentService } from "./account-payment.service";
 import { AccountController } from "./account.controller";
 import { CleaningReminderService } from "./cleaning-reminder.service";
+import { SubscriptionExpirationService } from "./subscription-expiration.service";
 import { RemindersController } from "./reminders.controller";
 
 @Module({
@@ -22,7 +23,8 @@ import { RemindersController } from "./reminders.controller";
     AccountPreferencesService,
     AccountPaymentService,
     CleaningReminderService,
+    SubscriptionExpirationService,
   ],
-  exports: [AccountNotificationsService, CleaningReminderService],
+  exports: [AccountNotificationsService, CleaningReminderService, SubscriptionExpirationService],
 })
 export class AccountModule {}
