@@ -993,7 +993,45 @@ export class AdminService {
     }
   }
 
-  async createSubscriptionInvoice(subscriptionId: string) {
+  /**
+   * Server-side reconciliation: find cleaning subscriptions that have a payment
+   * reference but aren't marked paid, check the provider, and activate the paid
+   * ones. Runs from a cron so activation happens without any manual action.
+   */
+  async reconcilePendingPayments(): Promise<{ checked: number; activated: number }> {
+    if (!this.blink) return { checked: 0, activated: 0 };
+
+    let rows: Array<Record<string, any>> = [];
+    try {
+      rows = await this.supabaseRest<Array<Record<string, any>>>(
+        `/cleaning_subscriptions?select=*&payment_status=neq.paid&payment_reference=not.is.null&subscription_status=neq.cancelled&deleted_at=is.null&limit=200`,
+      );
+    } catch {
+      return { checked: 0, activated: 0 };
+    }
+
+    let activated = 0;
+    for (const sub of rows) {
+      try {
+        const paid = sub.payment_method === "onchain"
+          ? (await this.blink.getOnchainStatus(sub.payment_reference)).paid
+          : (await this.blink.getPaymentStatus(sub.payment_reference)).paid;
+        if (!paid) continue;
+
+        await this.supabaseRest(
+          `/cleaning_subscriptions?id=eq.${encodeURIComponent(sub.id)}`,
+          { method: "PATCH", body: JSON.stringify({ payment_status: "paid", subscription_status: "active", is_active: true, updated_at: new Date().toISOString() }) },
+        );
+        void this.notifySubscriptionUpdated(sub, { payment_status: "paid" }, sub.id);
+        activated++;
+      } catch {
+        // skip this sub, continue with the rest
+      }
+    }
+    return { checked: rows.length, activated };
+  }
+
+  async createSubscriptionInvoice(subscriptionId: string, method: "lightning" | "onchain" = "lightning") {
     if (!this.blink) {
       throw new BadRequestException("Payment provider is not configured.");
     }
@@ -1013,6 +1051,35 @@ export class AdminService {
     }
 
     const { planName, clientName } = await this.resolveSubscriptionNames(sub);
+
+    // ── On-chain Bitcoin (Blink) ──────────────────────────────────────────────
+    if (method === "onchain") {
+      // Reuse + reconcile an existing on-chain address if one is set.
+      if (sub.payment_reference && sub.payment_method === "onchain") {
+        try {
+          const status = await this.blink.getOnchainStatus(sub.payment_reference);
+          if (status.paid) {
+            await this.supabaseRest(
+              `/cleaning_subscriptions?id=eq.${encodeURIComponent(subscriptionId)}`,
+              { method: "PATCH", body: JSON.stringify({ payment_status: "paid", subscription_status: "active", is_active: true, updated_at: new Date().toISOString() }) },
+            );
+            if (sub.payment_status !== "paid") void this.notifySubscriptionUpdated(sub, { payment_status: "paid" }, subscriptionId);
+            return { subscription_id: subscriptionId, address: sub.payment_reference, amount_cents: amountCents, plan_name: planName, client_name: clientName, method: "onchain", status: "paid" };
+          }
+          return { subscription_id: subscriptionId, address: sub.payment_reference, amount_cents: amountCents, plan_name: planName, client_name: clientName, method: "onchain", status: "pending" };
+        } catch {
+          // fall through to create a fresh address
+        }
+      }
+
+      const onchain = await this.blink.createOnchainAddress({ memo: `${planName} — ${clientName}` });
+      await this.supabaseRest(
+        `/cleaning_subscriptions?id=eq.${encodeURIComponent(subscriptionId)}`,
+        { method: "PATCH", body: JSON.stringify({ payment_reference: onchain.address, payment_method: "onchain", updated_at: new Date().toISOString() }) },
+      );
+      void this.notifySubscriptionUpdated(sub, { payment_status: "pending" }, subscriptionId);
+      return { subscription_id: subscriptionId, address: onchain.address, amount_cents: amountCents, plan_name: planName, client_name: clientName, method: "onchain", status: "pending" };
+    }
 
     // If an invoice already exists, check its status and return it
     if (sub.payment_reference) {
@@ -1134,60 +1201,79 @@ export class AdminService {
     return { pending: row.pending, paid: row.paid, revenueCents: row.revenue_cents };
   }
 
+  // Service categories that can be shown/hidden from regular users.
+  private static readonly CATEGORY_KEYS = [
+    "category_food_visible",
+    "category_cars_visible",
+    "category_cleaning_visible",
+    "category_beach_visible",
+  ] as const;
+
   async getPlatformSettings() {
+    const keys = [
+      "min_subscription_weeks", "max_subscription_weeks", "platform_fee_percent",
+      ...AdminService.CATEGORY_KEYS,
+    ];
+    const keyList = keys.map((k) => `'${k}'`).join(", ");
+
+    let values = new Map<string, unknown>();
     if (this.shouldUseFallback()) {
       const rows = await this.supabaseRest<Array<{ key: string; value: unknown }>>(
-        "/global_settings?select=key,value&key=in.(min_subscription_weeks,max_subscription_weeks,platform_fee_percent)",
+        `/global_settings?select=key,value&key=in.(${keys.join(",")})`,
       );
-      const values = new Map(rows.map((row) => [row.key, row.value]));
-      return {
-        min_subscription_weeks: Number(values.get("min_subscription_weeks") ?? 1),
-        max_subscription_weeks: Number(values.get("max_subscription_weeks") ?? 4),
-        platform_fee_percent: Number(values.get("platform_fee_percent") ?? 0),
-      };
+      values = new Map(rows.map((row) => [row.key, row.value]));
+    } else {
+      const rows = await this.prisma.$queryRawUnsafe<Array<{ key: string; value: unknown }>>(
+        `SELECT key, value FROM public.global_settings WHERE key IN (${keyList})`,
+      );
+      values = new Map(rows.map((row) => [row.key, row.value]));
     }
-    const rows = await this.prisma.$queryRawUnsafe<Array<{ key: string; value: unknown }>>(
-      `SELECT key, value
-       FROM public.global_settings
-       WHERE key IN ('min_subscription_weeks', 'max_subscription_weeks', 'platform_fee_percent')`,
-    );
-    const values = new Map(rows.map((row) => [row.key, row.value]));
+
+    // Categories default to visible when no setting has been saved yet.
+    const bool = (v: unknown, d = true) => (v === undefined || v === null ? d : v === true || v === "true");
     return {
       min_subscription_weeks: Number(values.get("min_subscription_weeks") ?? 1),
       max_subscription_weeks: Number(values.get("max_subscription_weeks") ?? 4),
       platform_fee_percent: Number(values.get("platform_fee_percent") ?? 0),
+      category_food_visible: bool(values.get("category_food_visible")),
+      category_cars_visible: bool(values.get("category_cars_visible")),
+      category_cleaning_visible: bool(values.get("category_cleaning_visible")),
+      category_beach_visible: bool(values.get("category_beach_visible")),
     };
   }
 
   async updatePlatformSettings(input: Record<string, unknown>, actorUserId: string) {
-    const settings = {
-      min_subscription_weeks: Number(input.min_subscription_weeks ?? 1),
-      max_subscription_weeks: Number(input.max_subscription_weeks ?? 4),
-      platform_fee_percent: Number(input.platform_fee_percent ?? 0),
-    };
+    // Only persist the keys actually provided — this keeps partial updates safe
+    // (e.g. toggling category visibility must not reset the subscription-week settings).
+    const updates: Record<string, unknown> = {};
+    for (const key of ["min_subscription_weeks", "max_subscription_weeks", "platform_fee_percent"]) {
+      if (input[key] !== undefined) updates[key] = Number(input[key]);
+    }
+    for (const key of AdminService.CATEGORY_KEYS) {
+      if (input[key] !== undefined) updates[key] = Boolean(input[key]);
+    }
+    if (Object.keys(updates).length === 0) return this.getPlatformSettings();
 
     if (this.shouldUseFallback()) {
       await this.supabaseRest("/global_settings?on_conflict=key", {
         method: "POST",
         headers: { Prefer: "resolution=merge-duplicates,return=representation" },
-        body: JSON.stringify(Object.entries(settings).map(([key, value]) => ({ key, value }))),
+        body: JSON.stringify(Object.entries(updates).map(([key, value]) => ({ key, value }))),
       });
-      await this.auditAdminEvent(actorUserId, "edit", "settings", "platform", settings);
-      return settings;
+    } else {
+      for (const [key, value] of Object.entries(updates)) {
+        await this.prisma.$executeRawUnsafe(
+          `INSERT INTO public.global_settings (key, value)
+           VALUES ($1, $2::jsonb)
+           ON CONFLICT (key)
+           DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+          key,
+          JSON.stringify(value),
+        );
+      }
     }
-
-    for (const [key, value] of Object.entries(settings)) {
-      await this.prisma.$executeRawUnsafe(
-        `INSERT INTO public.global_settings (key, value)
-         VALUES ($1, $2::jsonb)
-         ON CONFLICT (key)
-         DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
-        key,
-        JSON.stringify(value),
-      );
-    }
-    await this.auditAdminEvent(actorUserId, "edit", "settings", "platform", settings);
-    return settings;
+    await this.auditAdminEvent(actorUserId, "edit", "settings", "platform", updates);
+    return this.getPlatformSettings();
   }
 
   async listCustomCleaningClients() {
@@ -2025,8 +2111,20 @@ export class AdminService {
       return { deleted: true };
     }
 
+    // Look up the slot before deleting so we can free its capacity.
+    // Only bookings still counting toward the slot (not already cancelled)
+    // should decrement current_bookings — a cancelled booking already did.
+    const booking = await this.prisma.cleaningBooking.findUnique({
+      where: { id },
+      select: { slotId: true, status: true },
+    });
+
     await this.cleaningCalendarSync.deleteCalendarEventForBooking(id);
     await this.prisma.cleaningBooking.delete({ where: { id } });
+
+    if (booking?.slotId && booking.status !== "cancelled") {
+      await this.decrementSlotBookings([booking.slotId]);
+    }
     return { deleted: true };
   }
 
