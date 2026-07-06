@@ -616,6 +616,10 @@ model Booking {
   status     String    @default("held")   // held|confirmed|cancelled|completed|no_show|released
   orderRef   String?   @map("order_ref")
   expiresAt  DateTime? @map("expires_at")
+  label      String?                        // display name (e.g. member_name for admin bookings)
+  notes      String?
+  googleCalendarEventId    String? @map("google_calendar_event_id")
+  googleCalendarSyncStatus String? @map("google_calendar_sync_status")
   createdAt  DateTime  @default(now()) @map("created_at")
   updatedAt  DateTime  @updatedAt @map("updated_at")
 

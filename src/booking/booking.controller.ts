@@ -8,6 +8,8 @@ class HoldDto {
   @IsString() resource_id!: string;
   @IsString() date!: string; // YYYY-MM-DD
   @IsString() from!: string; // HH:MM
+  @IsOptional() @IsString() label?: string;
+  @IsOptional() @IsString() notes?: string;
 }
 class WaitlistDto extends HoldDto {}
 class ConfirmDto {
@@ -30,11 +32,22 @@ export class BookingController {
     return this.booking.getAvailability(resourceId, date);
   }
 
+  @ApiOperation({ summary: "Active bookings for a resource on a date" })
+  @Get("bookings")
+  listBookings(@Query("resourceId") resourceId?: string, @Query("date") date?: string) {
+    if (!resourceId || !date) throw new BadRequestException("resourceId and date (YYYY-MM-DD) are required");
+    return this.booking.listBookings(resourceId, date);
+  }
+
   @ApiOperation({ summary: "Hold a slot (TTL) for the authenticated subject" })
   @UseGuards(AccountAuthGuard)
   @Post("hold")
   hold(@Req() req: AccountRequest, @Body() body: HoldDto) {
-    return this.booking.hold({ resourceId: body.resource_id, date: body.date, from: body.from, subjectRef: `user:${req.authUser!.id}` });
+    return this.booking.hold({
+      resourceId: body.resource_id, date: body.date, from: body.from,
+      subjectRef: `user:${req.authUser!.id}`,
+      label: body.label ?? null, notes: body.notes ?? null,
+    });
   }
 
   @ApiOperation({ summary: "Confirm a held slot" })

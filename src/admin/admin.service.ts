@@ -116,43 +116,49 @@ export class AdminService {
     if (!this.beachCourtCalendarSync?.isConfigured()) {
       return { ok: false, skipped: true, reason: "not_configured" as const };
     }
-    // Load booking + court in one round.
-    const rows = await this.supabaseRest<Array<Record<string, any>>>(
-      `/beach_club_court_bookings?id=eq.${encodeURIComponent(bookingId)}` +
-      `&select=id,court_id,date,start_hour,end_hour,member_name,notes,status&limit=1`,
-    );
-    const booking = rows?.[0];
+    // Read engine booking → bridge to legacy court via bookable_resources so we
+    // can resolve the Google Calendar id. Uses PostgREST (matches admin.service).
+    if (!this.prisma.isAvailable()) return { ok: false, error: "DB unavailable" };
+    const booking = await this.prisma.booking.findUnique({ where: { id: bookingId } });
     if (!booking) return { ok: false, error: "Booking not found" };
-    if (booking.status !== "booked") return { ok: false, skipped: true, reason: "not_booked" as const };
+    if (booking.status !== "confirmed" && booking.status !== "held") return { ok: false, skipped: true, reason: "not_active" as const };
+
+    const bridge = await this.supabaseRest<Array<Record<string, any>>>(
+      `/bookable_resources?id=eq.${encodeURIComponent(String(booking.resourceId))}&select=source_resource_id&limit=1`,
+    );
+    const legacyCourtId = bridge?.[0]?.source_resource_id;
+    if (!legacyCourtId) return { ok: false, error: "Resource → court bridge not found" };
 
     const courts = await this.supabaseRest<Array<Record<string, any>>>(
-      `/beach_club_courts?id=eq.${encodeURIComponent(String(booking.court_id))}&select=id,name,google_calendar_id&limit=1`,
+      `/beach_club_courts?id=eq.${encodeURIComponent(String(legacyCourtId))}&select=id,name,google_calendar_id&limit=1`,
     );
     const court = courts?.[0];
     if (!court) return { ok: false, error: "Court not found" };
     if (!court.google_calendar_id) return { ok: false, skipped: true, reason: "no_calendar" as const };
 
+    const dateStr = new Date(booking.startAt).toISOString().slice(0, 10);
+    const startHour = new Date(booking.startAt).getUTCHours();
+    const endHour = new Date(booking.endAt).getUTCHours() || startHour + 1;
+
     const result = await this.beachCourtCalendarSync.syncCreated({
-      bookingId: String(booking.id),
+      bookingId,
       courtId: String(court.id),
       courtName: String(court.name),
       courtGoogleCalendarId: String(court.google_calendar_id),
-      date: String(booking.date),
-      startHour: Number(booking.start_hour),
-      endHour: Number(booking.end_hour),
-      memberName: booking.member_name ?? null,
+      date: dateStr,
+      startHour,
+      endHour,
+      memberName: booking.label ?? null,
       notes: booking.notes ?? null,
     });
 
-    // Tag the booking row with sync outcome (best-effort — never fail).
-    await this.supabaseRest(`/beach_club_court_bookings?id=eq.${encodeURIComponent(bookingId)}`, {
-      method: "PATCH",
-      body: JSON.stringify({
-        google_calendar_event_id: result.eventId ?? null,
-        google_calendar_sync_status: result.error ? "failed" : result.skipped ? "skipped" : "synced",
-        google_calendar_sync_error: result.error ?? null,
-        updated_at: new Date().toISOString(),
-      }),
+    // Tag the engine booking with the sync outcome (best-effort — never fail).
+    await this.prisma.booking.update({
+      where: { id: bookingId },
+      data: {
+        googleCalendarEventId: result.eventId ?? null,
+        googleCalendarSyncStatus: result.error ? "failed" : result.skipped ? "skipped" : "synced",
+      },
     }).catch(() => { /* ignore */ });
 
     return { ok: !result.error, eventId: result.eventId ?? null, error: result.error };

@@ -46,9 +46,40 @@ export class BookingService {
     return { resourceId, date: dateISO, bookingModel, slots };
   }
 
+  /**
+   * Active (held or confirmed) bookings for a resource on a calendar day. Public
+   * read — matches the display contract callers had against the legacy tables.
+   */
+  async listBookings(resourceId: string, dateISO: string) {
+    if (!this.prisma.isAvailable()) return [];
+    const start = new Date(`${dateISO}T00:00:00.000Z`);
+    const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
+    const rows = await this.prisma.booking.findMany({
+      where: {
+        resourceId,
+        status: { in: ["held", "confirmed"] },
+        startAt: { gte: start, lt: end },
+      },
+      orderBy: { startAt: "asc" },
+    });
+    return rows.map((b) => ({
+      id: b.id,
+      resource_id: b.resourceId,
+      subject_ref: b.subjectRef,
+      start_at: b.startAt,
+      end_at: b.endAt,
+      slot_key: b.slotKey,
+      status: b.status,
+      label: b.label,
+      notes: b.notes,
+      google_calendar_event_id: b.googleCalendarEventId,
+      google_calendar_sync_status: b.googleCalendarSyncStatus,
+    }));
+  }
+
   // ── Write side ───────────────────────────────────────────────────────────
   /** Tentatively hold a slot (TTL). Rejects if the slot isn't generated or is already claimed. */
-  async hold(input: { resourceId: string; date: string; from: string; subjectRef?: string; ttlMinutes?: number }) {
+  async hold(input: { resourceId: string; date: string; from: string; subjectRef?: string; ttlMinutes?: number; label?: string | null; notes?: string | null }) {
     this.assertDb();
     const avail = await this.getAvailability(input.resourceId, input.date);
     const slot = avail.slots.find((s) => s.from === input.from);
@@ -74,6 +105,8 @@ export class BookingService {
           providerId: resource?.provider_id ?? null,
           subjectRef: input.subjectRef ?? null,
           startAt, endAt, slotKey, status: "held", expiresAt,
+          label: input.label ?? null,
+          notes: input.notes ?? null,
         },
       });
       await this.eventBus.publish({
