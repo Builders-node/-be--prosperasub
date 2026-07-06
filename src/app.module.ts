@@ -8,6 +8,16 @@ import { HealthController } from "./health/health.controller";
 import { MailModule } from "./mail/mail.module";
 import { PaymentsModule } from "./payments/payments.module";
 import { PrismaModule } from "./prisma/prisma.module";
+import { VerifyModule } from "./verify/verify.module";
+import { FoodModule } from "./food/food.module";
+import { EventsModule } from "./events/events.module";
+import { BillingModule } from "./billing/billing.module";
+import { MembershipModule } from "./membership/membership.module";
+import { ResourceModule } from "./resource/resource.module";
+import { BookingModule } from "./booking/booking.module";
+import { OrderModule } from "./order/order.module";
+import { AnalyticsModule } from "./analytics/analytics.module";
+import { NotificationEventsModule } from "./notification/notification-events.module";
 
 @Module({
   imports: [
@@ -16,12 +26,22 @@ import { PrismaModule } from "./prisma/prisma.module";
       isGlobal: true
     }),
     PrismaModule,
+    EventsModule,
+    BillingModule,
+    MembershipModule,
+    ResourceModule,
+    BookingModule,
+    OrderModule,
+    AnalyticsModule,
+    NotificationEventsModule,
     AuthModule,
     MailModule,
     CatalogModule,
     PaymentsModule,
     AdminModule,
     AccountModule,
+    VerifyModule,
+    FoodModule,
   ],
   controllers: [HealthController]
 })

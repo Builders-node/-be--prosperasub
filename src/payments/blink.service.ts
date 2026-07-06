@@ -112,6 +112,116 @@ export class BlinkService {
     };
   }
 
+  /** Create an on-chain receive address on the Blink BTC wallet. */
+  async createOnchainAddress(input: { amountSats?: number; memo?: string }) {
+    const walletId = await this.resolveBtcWalletId();
+
+    const result = await this.request<{
+      onChainAddressCreate?: {
+        errors?: BlinkGraphQLError[];
+        address?: string;
+      };
+    }>(
+      `
+        mutation OnChainAddressCreate($input: OnChainAddressCreateInput!) {
+          onChainAddressCreate(input: $input) {
+            errors { message }
+            address
+          }
+        }
+      `,
+      { input: { walletId } }
+    );
+
+    const payload = result.onChainAddressCreate;
+    const error = payload?.errors?.find((item) => item.message)?.message;
+    if (error) {
+      throw new ServiceUnavailableException(error);
+    }
+
+    const address = payload?.address;
+    if (!address) {
+      throw new ServiceUnavailableException("Blink did not return a Bitcoin address.");
+    }
+
+    return {
+      address,
+      amount_sats: input.amountSats,
+      provider: "blink",
+      status: "pending"
+    };
+  }
+
+  /**
+   * Check whether an on-chain address has received the expected amount.
+   * Treats both PENDING (mempool/0-conf) and SUCCESS as paid, per product decision.
+   */
+  async getOnchainStatus(address: string, expectedSats?: number) {
+    const result = await this.request<{
+      me?: {
+        defaultAccount?: {
+          wallets?: Array<{
+            walletCurrency?: string;
+            transactions?: {
+              edges?: Array<{
+                node?: {
+                  settlementAmount?: number;
+                  status?: string;
+                  initiationVia?: { address?: string };
+                };
+              }>;
+            };
+          }>;
+        };
+      };
+    }>(
+      `
+        query Me {
+          me {
+            defaultAccount {
+              wallets {
+                walletCurrency
+                transactions(first: 25) {
+                  edges {
+                    node {
+                      settlementAmount
+                      status
+                      initiationVia {
+                        ... on InitiationViaOnChain { address }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      `,
+      {}
+    );
+
+    const wallets = result.me?.defaultAccount?.wallets ?? [];
+    let paid = false;
+    for (const wallet of wallets) {
+      for (const edge of wallet.transactions?.edges ?? []) {
+        const node = edge.node;
+        if (!node || node.initiationVia?.address !== address) continue;
+        const amount = Number(node.settlementAmount ?? 0);
+        const status = (node.status ?? "").toUpperCase();
+        const okStatus = status === "SUCCESS" || status === "PENDING";
+        // allow 1 sat rounding; underpayment does not count
+        const okAmount = !expectedSats || amount >= expectedSats - 1;
+        if (okStatus && amount > 0 && okAmount) {
+          paid = true;
+          break;
+        }
+      }
+      if (paid) break;
+    }
+
+    return { paid, address, provider: "blink", status: paid ? "paid" : "pending" };
+  }
+
   private async request<T>(query: string, variables: Record<string, unknown>): Promise<T> {
     this.assertConfigured();
 
@@ -174,5 +284,44 @@ export class BlinkService {
 
   private get walletId() {
     return this.config.get<string>("BLINK_WALLET_ID") || "";
+  }
+
+  private cachedBtcWalletId: string | null = null;
+
+  /**
+   * Resolve the Blink BTC wallet id. Uses BLINK_BTC_WALLET_ID if set, otherwise
+   * auto-discovers it from the account (the same API key used for Lightning).
+   */
+  private async resolveBtcWalletId(): Promise<string> {
+    const configured = this.config.get<string>("BLINK_BTC_WALLET_ID");
+    if (configured) return configured;
+    if (this.cachedBtcWalletId) return this.cachedBtcWalletId;
+
+    const result = await this.request<{
+      me?: {
+        defaultAccount?: {
+          wallets?: Array<{ id?: string; walletCurrency?: string }>;
+        };
+      };
+    }>(
+      `
+        query Me {
+          me {
+            defaultAccount {
+              wallets { id walletCurrency }
+            }
+          }
+        }
+      `,
+      {}
+    );
+
+    const wallets = result.me?.defaultAccount?.wallets ?? [];
+    const btc = wallets.find((w) => (w.walletCurrency ?? "").toUpperCase() === "BTC");
+    if (!btc?.id) {
+      throw new ServiceUnavailableException("No BTC wallet was found on this Blink account.");
+    }
+    this.cachedBtcWalletId = btc.id;
+    return btc.id;
   }
 }

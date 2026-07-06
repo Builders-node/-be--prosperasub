@@ -9,6 +9,7 @@
     "start": "node dist/main.js",
     "postinstall": "prisma generate",
     "lint": "eslint \"src/**/*.ts\" \"prisma/**/*.ts\"",
+    "check:boundaries": "node scripts/check-domain-boundaries.mjs",
     "test": "jest --runInBand",
     "test:watch": "jest --watch",
     "telegram:test": "node scripts/test-telegram.mjs",

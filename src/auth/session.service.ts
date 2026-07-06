@@ -38,6 +38,7 @@ interface RefreshPayload extends jwt.JwtPayload {
 export class SessionService {
   private readonly localAccessSecret = "dev-only-access-secret-change-before-production-2026";
   private readonly localRefreshSecret = "dev-only-refresh-secret-change-before-production-2026";
+  private readonly localVerifySecret = "dev-only-verify-secret-change-before-production-2026";
 
   constructor(private readonly config: ConfigService) {}
 
@@ -94,6 +95,27 @@ export class SessionService {
     return jwt.verify(token, this.refreshSecret()) as RefreshPayload;
   }
 
+  /**
+   * Sign a short-lived, single-purpose "access verification" token for a user's
+   * profile QR code. Uses a SEPARATE secret from access/refresh tokens so a
+   * verify token can never be replayed as a session token.
+   */
+  createVerifyToken(userId: string, ttlSeconds = 300): { token: string; expiresIn: number } {
+    const token = jwt.sign({ typ: "verify" }, this.verifySecret(), {
+      subject: userId,
+      expiresIn: ttlSeconds
+    });
+    return { token, expiresIn: ttlSeconds };
+  }
+
+  verifyVerifyToken(token: string): { sub: string; typ: string } {
+    const payload = jwt.verify(token, this.verifySecret()) as jwt.JwtPayload;
+    if (payload.typ !== "verify" || !payload.sub) {
+      throw new Error("Invalid verification token");
+    }
+    return { sub: payload.sub, typ: "verify" };
+  }
+
   async hashRefreshToken(token: string): Promise<string> {
     return crypto.createHash("sha256").update(token).digest("hex");
   }
@@ -106,7 +128,11 @@ export class SessionService {
     return this.secret("JWT_REFRESH_SECRET", this.localRefreshSecret);
   }
 
-  private secret(name: "JWT_ACCESS_SECRET" | "JWT_REFRESH_SECRET", fallback: string): string {
+  private verifySecret(): string {
+    return this.secret("JWT_VERIFY_SECRET", this.localVerifySecret);
+  }
+
+  private secret(name: "JWT_ACCESS_SECRET" | "JWT_REFRESH_SECRET" | "JWT_VERIFY_SECRET", fallback: string): string {
     const configured = this.config.get<string>(name)?.trim();
     const isProduction = this.config.get<string>("NODE_ENV") === "production";
 

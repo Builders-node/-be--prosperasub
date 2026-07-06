@@ -546,3 +546,143 @@ model UserNotification {
   @@index([recipientUserId, category])
   @@map("user_notifications")
 }
+
+// ── Phase 0: domain event bus (transactional outbox) ──────────────────────────
+// The backbone of the DDD migration. `EventBusService.publish` writes an
+// unpublished row here (ideally in the same tx as the state change); the outbox
+// dispatcher (cron) delivers to in-process handlers idempotently.
+model DomainEvent {
+  id            String                @id @default(uuid()) @db.Uuid
+  type          String
+  version       Int                   @default(1)
+  occurredAt    DateTime              @default(now()) @map("occurred_at")
+  subjectRef    String?               @map("subject_ref")
+  correlationId String?               @map("correlation_id") @db.Uuid
+  causationId   String?               @map("causation_id") @db.Uuid
+  payload       Json                  @default("{}")
+  publishedAt   DateTime?             @map("published_at")
+  deliveries    DomainEventDelivery[]
+
+  @@index([occurredAt])
+  @@index([type])
+  @@map("domain_events")
+}
+
+model DomainEventDelivery {
+  eventId     String      @map("event_id") @db.Uuid
+  consumer    String
+  status      String      @default("delivered") // delivered | failed | dead
+  attempts    Int         @default(1)
+  lastError   String?     @map("last_error")
+  deliveredAt DateTime    @default(now()) @map("delivered_at")
+  updatedAt   DateTime    @default(now()) @updatedAt @map("updated_at")
+  event       DomainEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@id([eventId, consumer])
+  @@map("domain_event_deliveries")
+}
+
+// ── Phase 1: Billing domain — generic payment ledger ─────────────────────────
+// Reuses the pre-existing (empty) `payments` table. One row per captured payment
+// across every rail; written by BillingService.recordCaptured (idempotent on
+// provider + provider_ref). Extra legacy columns (user_id, restaurant_id,
+// subscription_id, amount_sats, description) stay nullable and are left unset.
+model Payment {
+  id          String    @id @default(uuid())
+  method      String
+  provider    String?
+  providerRef String?   @map("provider_ref")
+  amountCents Int?      @map("amount_cents")
+  currency    String    @default("USD")
+  status      String    @default("pending")
+  subjectRef  String?   @map("subject_ref")
+  metadata    Json      @default("{}")
+  paidAt      DateTime? @map("paid_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  @@map("payments")
+}
+
+// ── Phase 4b: Booking write side ─────────────────────────────────────────────
+model Booking {
+  id         String    @id @default(uuid()) @db.Uuid
+  resourceId String    @map("resource_id") @db.Uuid
+  providerId String?   @map("provider_id") @db.Uuid
+  subjectRef String?   @map("subject_ref")
+  startAt    DateTime  @map("start_at")
+  endAt      DateTime  @map("end_at")
+  slotKey    String    @map("slot_key")
+  status     String    @default("held")   // held|confirmed|cancelled|completed|no_show|released
+  orderRef   String?   @map("order_ref")
+  expiresAt  DateTime? @map("expires_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  @@index([status])
+  @@map("bookings")
+}
+
+model BookingWaitlist {
+  id         String   @id @default(uuid()) @db.Uuid
+  resourceId String   @map("resource_id") @db.Uuid
+  slotKey    String   @map("slot_key")
+  subjectRef String?  @map("subject_ref")
+  status     String   @default("waiting") // waiting|promoted|left
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([resourceId, slotKey, status])
+  @@map("booking_waitlist")
+}
+
+// ── Phase 5: Order domain — transaction / saga aggregate ─────────────────────
+model Order {
+  id          String   @id @default(uuid()) @db.Uuid
+  subjectRef  String?  @map("subject_ref")
+  status      String   @default("pending_payment") // draft|pending_payment|confirmed|completed|cancelled|refunded
+  amountCents Int?     @map("amount_cents")
+  currency    String   @default("USD")
+  lines       Json     @default("[]")
+  paymentRef  String?  @map("payment_ref")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@index([subjectRef])
+  @@index([status])
+  @@map("orders")
+}
+
+// ── Phase 7: Analytics domain — event-sourced read model ─────────────────────
+model AnalyticsEventCount {
+  eventType String   @map("event_type")
+  day       DateTime @db.Date
+  count     Int      @default(0)
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@id([eventType, day])
+  @@map("analytics_event_counts")
+}
+
+// ── Phase 7b: Notification domain — intent log (pure subscriber) ─────────────
+model NotificationLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  eventType  String   @map("event_type")
+  subjectRef String?  @map("subject_ref")
+  channel    String   @default("inapp")
+  status     String   @default("queued") // queued|sent|failed
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([subjectRef])
+  @@map("notification_log")
+}
+
+// ── Phase 7: Analytics revenue projection ────────────────────────────────────
+model AnalyticsRevenueDaily {
+  day          DateTime @db.Date
+  method       String   @default("unknown")
+  revenueCents Int      @default(0) @map("revenue_cents")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@id([day, method])
+  @@map("analytics_revenue_daily")
+}

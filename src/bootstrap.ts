@@ -23,6 +23,22 @@ export async function createNestApp() {
     response.setHeader("X-Frame-Options", "DENY");
     next();
   });
+  // Public payments API (/v1/payments/*): open CORS for any origin. Access is
+  // gated by an API key (not cookies), so cross-origin use is safe here.
+  app.use((request: any, response: any, next: () => void) => {
+    if (typeof request.url === "string" && request.url.startsWith("/v1/")) {
+      response.setHeader("Access-Control-Allow-Origin", "*");
+      response.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+      response.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization,x-api-key");
+      response.setHeader("Access-Control-Max-Age", "86400");
+      if (request.method === "OPTIONS") {
+        response.statusCode = 204;
+        response.end();
+        return;
+      }
+    }
+    next();
+  });
   app.enableCors({
     origin: buildCorsOrigin(config, isProduction),
     credentials: true
@@ -73,10 +89,28 @@ function setupSwagger(app: Awaited<ReturnType<typeof NestFactory.create>>) {
     .build();
 
   const document = SwaggerModule.createDocument(app, config);
-  SwaggerModule.setup("docs", app, document, {
-    jsonDocumentUrl: "docs-json",
-    swaggerOptions: {
-      persistAuthorization: true
-    }
+
+  // Serverless (Vercel) doesn't serve @nestjs/swagger's bundled static assets, so
+  // the default /docs page renders blank. Serve the spec as JSON and load Swagger
+  // UI from a CDN instead — works reliably in serverless.
+  const httpAdapter = app.getHttpAdapter();
+  httpAdapter.get("/docs-json", (_req: unknown, res: any) => res.json(document));
+  httpAdapter.get("/docs", (_req: unknown, res: any) => {
+    res.type("text/html").send(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ProsperaSub API</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css" />
+</head>
+<body style="margin:0">
+  <div id="app"></div>
+  <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+  <script>
+    window.ui = SwaggerUIBundle({ url: "/docs-json", dom_id: "#app", persistAuthorization: true });
+  </script>
+</body>
+</html>`);
   });
 }

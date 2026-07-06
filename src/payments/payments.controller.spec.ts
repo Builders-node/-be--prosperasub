@@ -14,7 +14,8 @@ describe("PaymentsController", () => {
     notifyPaymentSucceededForProviderRef: jest.fn()
   };
 
-  const controller = new PaymentsController(blink, new CatalogService(), notifications as never);
+  const billing = { recordCaptured: jest.fn() };
+  const controller = new PaymentsController(blink, new CatalogService(), notifications as never, billing as never);
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -83,7 +84,7 @@ describe("PaymentsController", () => {
         isActive: true,
       }),
     };
-    const monthlyController = new PaymentsController(blink, catalog as never, notifications as never);
+    const monthlyController = new PaymentsController(blink, catalog as never, notifications as never, { recordCaptured: jest.fn() } as never);
 
     await monthlyController.createInvoice({
       amount_cents: 25500,

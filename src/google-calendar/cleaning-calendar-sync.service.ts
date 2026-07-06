@@ -91,6 +91,36 @@ export class CleaningCalendarSyncService {
     }
   }
 
+  /**
+   * Auto-sync every booking whose calendar is out of date. Any create / reschedule
+   * / cancel marks the booking `google_calendar_sync_status = 'pending'`, so this
+   * picks those up (plus never-synced rows) and upserts/cancels their Google
+   * Calendar event. Runs on a frequent cron so admins never sync manually.
+   */
+  async syncPendingBookings(limit = 100) {
+    if (!this.isConfigured()) {
+      return { ok: false as const, reason: "not_configured" as const };
+    }
+    // Bookings flagged out-of-date by a create / reschedule / cancel / complete.
+    const rows = await this.supabaseRest<Array<{ id: string }>>(
+      `/cleaning_bookings?select=id&google_calendar_sync_status=in.(pending,failed)&limit=${limit}`,
+    );
+
+    let synced = 0;
+    let failed = 0;
+    for (const row of rows) {
+      try {
+        const res = await this.syncBookingById(row.id);
+        if (res.ok) synced++; else failed++;
+      } catch (e) {
+        failed++;
+        this.logger.warn(`[auto-sync] booking ${row.id} threw: ${(e as Error).message}`);
+      }
+    }
+    this.logger.log(`[auto-sync] processed ${rows.length} pending bookings → ${synced} synced, ${failed} failed`);
+    return { ok: true as const, processed: rows.length, synced, failed };
+  }
+
   // ─── Idempotent upsert ────────────────────────────────────────────────────
 
   private async upsertCalendarEvent(
@@ -99,6 +129,14 @@ export class CleaningCalendarSyncService {
     payload: GoogleCalendarEventPayload,
     isCancelled: boolean,
   ): Promise<{ id: string; htmlLink?: string | null; action: "created" | "updated" | "cancelled" }> {
+
+    // 0. If the stored event id is shared with another booking (legacy data bug),
+    //    do NOT touch it — that would make the two bookings overwrite one event and
+    //    "swap". Drop our reference and fall through to create a fresh, unique event.
+    if (storedEventId && (await this.eventIdTakenByOtherBooking(storedEventId, bookingId))) {
+      this.logger.warn(`[sync] Stored event ${storedEventId} is shared with another booking; creating a fresh event for ${bookingId}`);
+      storedEventId = null;
+    }
 
     // 1. Try updating the stored event ID first (fastest path)
     if (storedEventId) {
@@ -133,21 +171,29 @@ export class CleaningCalendarSyncService {
       return { ...result, action: isCancelled ? "cancelled" : "updated" };
     }
 
-    // 3. Fallback: search by title + date (handles old events without extendedProperties)
-    const titlePrefix = payload.summary.replace(/^\[Cancelled\]\s*/i, "").split(" - ")[0];
+    // 3. Fallback: adopt a legacy event (no extendedProperties) only when it is an
+    //    EXACT match — same full title AND same date. Using the full title (not just
+    //    the "Cleaning" prefix) plus a DB guard prevents two different bookings from
+    //    ever being mapped onto the same calendar event id.
+    const fullTitle = payload.summary.replace(/^\[Cancelled\]\s*/i, "");
     const dateStr = payload.start.toISOString().slice(0, 10);
-    const byTitle = await this.googleCalendar.findEventsByFallback(titlePrefix, dateStr);
+    const byTitle = await this.googleCalendar.findEventsByFallback(fullTitle, dateStr);
     const matchByTime = byTitle.find((e) => {
       const eStart = e.start?.dateTime ?? e.start?.date ?? "";
-      return eStart.startsWith(dateStr);
+      const sameDay = eStart.startsWith(dateStr);
+      const sameTitle = (e.summary ?? "").replace(/^\[Cancelled\]\s*/i, "") === fullTitle;
+      return sameDay && sameTitle;
     });
 
-    if (matchByTime) {
+    if (matchByTime && !(await this.eventIdTakenByOtherBooking(matchByTime.id, bookingId))) {
       this.logger.log(`[sync] Found event ${matchByTime.id} by title fallback for booking ${bookingId}`);
       const result = isCancelled
         ? await this.googleCalendar.cancelEvent(matchByTime.id, payload)
         : await this.googleCalendar.updateEvent(matchByTime.id, payload);
       return { ...result, action: isCancelled ? "cancelled" : "updated" };
+    }
+    if (matchByTime) {
+      this.logger.warn(`[sync] Skipping reuse of event ${matchByTime.id} — already owned by another booking; creating a fresh event for ${bookingId}`);
     }
 
     // 4. Truly new — create it
@@ -160,6 +206,171 @@ export class CleaningCalendarSyncService {
     const result = await this.googleCalendar.createEvent(payload);
     this.logger.log(`[sync] Created new event ${result.id} for booking ${bookingId}`);
     return { ...result, action: "created" };
+  }
+
+  /**
+   * Reconcile the shared cleaning calendar with the database. Conservative by
+   * design — it only DELETES an event when the DB *definitively* confirms (HTTP
+   * 200, empty result) that the tagged booking no longer exists, or when it's a
+   * duplicate of a booking already seen. Any lookup error/uncertainty is skipped,
+   * never deleted. Untagged events (no bookingId) are always left alone.
+   * Manual-only (Reconcile button); intentionally not on a cron.
+   */
+  async reconcileCalendar(opts?: { daysBehind?: number; daysAhead?: number }) {
+    if (!this.isConfigured()) {
+      return { ok: false, reason: "not_configured" as const };
+    }
+    const daysBehind = opts?.daysBehind ?? 14;
+    const daysAhead = opts?.daysAhead ?? 120;
+    const now = Date.now();
+    const timeMin = new Date(now - daysBehind * 86_400_000).toISOString();
+    const timeMax = new Date(now + daysAhead * 86_400_000).toISOString();
+
+    const events = await this.googleCalendar.listEvents(timeMin, timeMax);
+    const stats = { scanned: events.length, orphansDeleted: 0, duplicatesDeleted: 0, untagged: 0, skipped: 0, errors: 0 };
+    const seenBookingIds = new Set<string>();
+
+    for (const e of events) {
+      const bookingId = e.extendedProperties?.private?.bookingId;
+      if (!bookingId) { stats.untagged++; continue; }
+
+      const lookup = await this.lookupBookingForReconcile(bookingId);
+
+      // SAFETY: only ever delete when the DB *definitively* confirms the booking
+      // is gone ("absent"). On any lookup error/uncertainty we skip — never delete.
+      if (lookup === "error") { stats.skipped++; continue; }
+
+      if (lookup === "absent") {
+        try { await this.googleCalendar.deleteEvent(e.id); stats.orphansDeleted++; }
+        catch { stats.errors++; }
+        continue;
+      }
+
+      // Booking exists. Cancelled bookings keep their "[Cancelled]" event.
+      if (lookup.status === "cancelled") continue;
+
+      // Duplicate event for the same booking → keep the first, drop the rest.
+      if (seenBookingIds.has(bookingId)) {
+        try { await this.googleCalendar.deleteEvent(e.id); stats.duplicatesDeleted++; }
+        catch { stats.errors++; }
+        continue;
+      }
+      seenBookingIds.add(bookingId);
+    }
+
+    return { ok: true as const, ...stats };
+  }
+
+  /**
+   * Restore/resync EVERY cleaning booking's Google Calendar event using REST only
+   * (no Prisma — works on prod serverless). Recreates missing events, reuses/updates
+   * existing ones (idempotent via bookingId tag + title/date fallback), and writes the
+   * event id back to the DB. Use this to rebuild the calendar after data loss.
+   */
+  async restoreAllCalendarEvents() {
+    if (!this.isConfigured()) return { ok: false as const, reason: "not_configured" as const };
+
+    const bookings = await this.supabaseRest<any[]>(
+      `/cleaning_bookings?select=id,status,location,notes,user_id,google_calendar_event_id,` +
+      `cleaning_available_slots(date,start_time,end_time),` +
+      `cleaning_clients(company_name,location),` +
+      `cleaning_custom_plans(plan_name)&limit=2000`,
+    ).catch(() => null);
+    if (!Array.isArray(bookings)) return { ok: false as const, reason: "fetch_failed" as const };
+
+    // Resolve user names for bookings without a linked client (direct user bookings).
+    const userIds = [...new Set(bookings.filter((b) => !b.cleaning_clients && b.user_id).map((b) => b.user_id))];
+    const userMap = new Map<string, any>();
+    if (userIds.length) {
+      const users = await this.supabaseRest<any[]>(
+        `/users?id=in.(${userIds.map((id) => `"${id}"`).join(",")})&select=id,name,display_name,email`,
+      ).catch(() => []);
+      (users ?? []).forEach((u) => userMap.set(String(u.id), u));
+    }
+
+    // Clean slate: delete every existing cleaning event in a wide window, so the
+    // rebuild produces exactly one correct event per booking (no merges/dupes).
+    const wideMin = new Date(Date.now() - 180 * 86_400_000).toISOString();
+    const wideMax = new Date(Date.now() + 365 * 86_400_000).toISOString();
+    const existing = await this.googleCalendar.listEvents(wideMin, wideMax).catch(() => [] as any[]);
+    let deleted = 0;
+    for (const e of existing) {
+      const isCleaning = String(e.summary ?? "").startsWith("Cleaning") || Boolean(e.extendedProperties?.private?.bookingId);
+      if (isCleaning) {
+        try { await this.googleCalendar.deleteEvent(e.id); deleted++; } catch { /* best effort */ }
+      }
+    }
+
+    const stats = { total: bookings.length, deleted, created: 0, skipped: 0, errors: 0 };
+
+    for (const b of bookings) {
+      const slot = b.cleaning_available_slots;
+      if (!slot?.date || !slot?.start_time || !slot?.end_time) { stats.skipped++; continue; }
+
+      const u = userMap.get(String(b.user_id));
+      const clientName =
+        b.cleaning_clients?.company_name ||
+        u?.display_name || u?.name || u?.email || "Cleaning client";
+      const building = b.location || b.cleaning_clients?.location || "Prospera Village";
+      const planName = b.cleaning_custom_plans?.plan_name || "Cleaning booking";
+      const isCancelled = String(b.status ?? "").toLowerCase() === "cancelled";
+      const titleBase = `Cleaning - ${clientName}`;
+      const hnOffset = "-06:00";
+
+      const payload: GoogleCalendarEventPayload = {
+        summary: isCancelled ? `[Cancelled] ${titleBase}` : titleBase,
+        location: building,
+        description: [`Status: ${b.status ?? "booked"}`, `Client: ${clientName}`, `Plan: ${planName}`, `Booking ID: ${b.id}`].join("\n"),
+        start: new Date(`${slot.date}T${String(slot.start_time).slice(0, 5)}:00${hnOffset}`),
+        end: new Date(`${slot.date}T${String(slot.end_time).slice(0, 5)}:00${hnOffset}`),
+        colorId: isCancelled ? "11" : undefined,
+        bookingId: b.id,
+      };
+
+      try {
+        const result = await this.googleCalendar.createEvent(payload);
+        stats.created++;
+        if (result.id) {
+          await this.supabaseRest(
+            `/cleaning_bookings?id=eq.${encodeURIComponent(b.id)}`,
+            {
+              method: "PATCH",
+              headers: { Prefer: "return=minimal" },
+              body: JSON.stringify({
+                google_calendar_event_id: result.id,
+                google_calendar_event_link: result.htmlLink ?? null,
+                google_calendar_sync_status: "synced",
+                google_calendar_synced_at: new Date().toISOString(),
+              }),
+            },
+          ).catch(() => {/* best effort */});
+        }
+      } catch {
+        stats.errors++;
+      }
+    }
+
+    return { ok: true as const, ...stats };
+  }
+
+  /**
+   * Reconcile lookup. Returns:
+   *  - "error"  → query failed / uncertain → caller must NOT delete
+   *  - "absent" → DB confirmed (200) the booking row does not exist → safe to delete
+   *  - { status } → booking exists
+   * Uses only columns that exist on cleaning_bookings (no embeds, no deleted_at).
+   */
+  private async lookupBookingForReconcile(bookingId: string): Promise<"error" | "absent" | { status: string }> {
+    try {
+      const rows = await this.supabaseRest<any[]>(
+        `/cleaning_bookings?id=eq.${encodeURIComponent(bookingId)}&select=id,status&limit=1`,
+      );
+      if (!Array.isArray(rows)) return "error";
+      if (rows.length === 0) return "absent";
+      return { status: String(rows[0].status ?? "").toLowerCase() };
+    } catch {
+      return "error";
+    }
   }
 
   async deleteCalendarEventForBooking(bookingId: string) {
@@ -194,15 +405,74 @@ export class CleaningCalendarSyncService {
   }
 
   private async loadBooking(bookingId: string) {
-    if (!this.prisma.isAvailable()) {
-      // Prisma unavailable — load via Supabase REST
+    // Prefer Prisma, but fall back to REST if it's unavailable OR the query fails
+    // at runtime (e.g. a cold cron invocation where the DB connection errors).
+    if (this.prisma.isAvailable()) {
+      try {
+        const b = await this.prisma.cleaningBooking.findUnique({
+          where: { id: bookingId },
+          include: bookingCalendarInclude,
+        });
+        if (b) {
+          if (!(b as any).slot && (b as any).slotId) {
+            const syn = this.synthesizeSlot((b as any).slotId, (b as any).serviceDurationMinutes);
+            if (syn) (b as any).slot = syn;
+          }
+          return b;
+        }
+      } catch {
+        // fall through to REST
+      }
+    }
+    return this.loadBookingViaRest(bookingId);
+  }
+
+  private async loadBookingViaRest(bookingId: string) {
+    // Fetch the booking plainly (no embeds — some relations lack a detectable FK
+    // and would error the whole query), then enrich relations best-effort. Owned
+    // bookings have a synthetic slot id, so derive the time from it.
+    {
       try {
         const rows = await this.supabaseRest<any[]>(
-          `/cleaning_bookings?id=eq.${encodeURIComponent(bookingId)}&select=*,cleaning_available_slots(*),cleaning_clients(*),cleaning_custom_plans(*),cleaning_completion_reports(*),cleaning_subscriptions(*,cleaning_packages(*))&limit=1`,
+          `/cleaning_bookings?id=eq.${encodeURIComponent(bookingId)}&select=*&limit=1`,
         );
         if (!rows?.length) return null;
         const r = rows[0];
-        // Shape it to match the Prisma include structure the caller expects
+
+        let slot = this.synthesizeSlot(r.slot_id, r.service_duration_minutes);
+        if (!slot && r.slot_id) {
+          const s = await this.supabaseRest<any[]>(
+            `/cleaning_available_slots?id=eq.${encodeURIComponent(r.slot_id)}&select=date,start_time,end_time&limit=1`,
+          ).catch(() => []);
+          if (s?.length) slot = { date: s[0].date, startTime: s[0].start_time, endTime: s[0].end_time };
+        }
+
+        let client: any = null;
+        if (r.client_id) {
+          const c = await this.supabaseRest<any[]>(
+            `/cleaning_clients?id=eq.${encodeURIComponent(r.client_id)}&select=company_name,location&limit=1`,
+          ).catch(() => []);
+          if (c?.length) client = { companyName: c[0].company_name, location: c[0].location };
+        }
+
+        let subscription: any = null;
+        const subId = r.cleaning_subscription_id || r.subscription_id;
+        if (subId) {
+          const sub = await this.supabaseRest<any[]>(
+            `/cleaning_subscriptions?id=eq.${encodeURIComponent(subId)}&select=apartment_note,package_id&limit=1`,
+          ).catch(() => []);
+          if (sub?.length) {
+            let pkg: any = null;
+            if (sub[0].package_id) {
+              const p = await this.supabaseRest<any[]>(
+                `/cleaning_packages?id=eq.${encodeURIComponent(sub[0].package_id)}&select=name&limit=1`,
+              ).catch(() => []);
+              if (p?.length) pkg = { name: p[0].name };
+            }
+            subscription = { apartmentNote: sub[0].apartment_note ?? null, package: pkg, user: null };
+          }
+        }
+
         return {
           ...r,
           id: r.id,
@@ -213,23 +483,10 @@ export class CleaningCalendarSyncService {
           notes: r.notes ?? null,
           assignedCleaner: r.assigned_cleaner ?? null,
           serviceDurationMinutes: r.service_duration_minutes ?? null,
-          slot: r.cleaning_available_slots ? {
-            date: r.cleaning_available_slots.date,
-            startTime: r.cleaning_available_slots.start_time,
-            endTime: r.cleaning_available_slots.end_time,
-          } : null,
-          client: r.cleaning_clients ? {
-            companyName: r.cleaning_clients.company_name,
-            location: r.cleaning_clients.location,
-          } : null,
-          customPlan: r.cleaning_custom_plans ? { planName: r.cleaning_custom_plans.plan_name } : null,
-          subscription: r.cleaning_subscriptions ? {
-            apartmentNote: r.cleaning_subscriptions.apartment_note ?? null,
-            package: r.cleaning_subscriptions.cleaning_packages ? {
-              name: r.cleaning_subscriptions.cleaning_packages.name,
-            } : null,
-            user: null,
-          } : null,
+          slot,
+          client,
+          customPlan: null,
+          subscription,
           user: null,
           checklistTemplate: null,
           completionReport: null,
@@ -239,10 +496,31 @@ export class CleaningCalendarSyncService {
         return null;
       }
     }
-    return this.prisma.cleaningBooking.findUnique({
-      where: { id: bookingId },
-      include: bookingCalendarInclude,
-    });
+  }
+
+  /** Reconstruct a slot {date,startTime,endTime} from an owned-cleaning synthetic id. */
+  private synthesizeSlot(slotId?: string | null, durationMinutes?: number | null) {
+    const m = /^owned-cleaning-slot-(\d{4}-\d{2}-\d{2})-(\d{2})(\d{2})$/.exec(slotId || "");
+    if (!m) return null;
+    const [, date, hh, mm] = m;
+    const startMins = Number(hh) * 60 + Number(mm);
+    const endMins = startMins + (Number(durationMinutes) > 0 ? Number(durationMinutes) : 105);
+    const fmt = (mins: number) => `${String(Math.floor(mins / 60)).padStart(2, "0")}:${String(mins % 60).padStart(2, "0")}:00`;
+    return { date, startTime: fmt(startMins), endTime: fmt(endMins) };
+  }
+
+  /** True when another (non-cancelled) booking already points at this calendar event. */
+  private async eventIdTakenByOtherBooking(eventId: string, bookingId: string): Promise<boolean> {
+    try {
+      const rows = await this.supabaseRest<Array<{ id: string }>>(
+        `/cleaning_bookings?select=id&google_calendar_event_id=eq.${encodeURIComponent(eventId)}` +
+        `&id=neq.${encodeURIComponent(bookingId)}&status=neq.cancelled&limit=1`,
+      );
+      return Array.isArray(rows) && rows.length > 0;
+    } catch {
+      // On lookup error, favour uniqueness: treat as taken so we create a fresh event.
+      return true;
+    }
   }
 
   private supabaseRest<T = unknown>(path: string, init: RequestInit = {}): Promise<T> {

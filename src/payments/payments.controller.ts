@@ -4,6 +4,7 @@ import { IsInt, IsOptional, IsString, Min } from "class-validator";
 import { CatalogService, type CleaningPackageDto } from "../catalog/catalog.service";
 import { resolveMonthlyPriceCents } from "../catalog/cleaning-plan-pricing";
 import { NotificationsService } from "../notifications/notifications.service";
+import { BillingService } from "../billing/billing.service";
 import { BlinkService } from "./blink.service";
 
 class CreateLightningInvoiceDto {
@@ -147,7 +148,8 @@ export class PaymentsController {
   constructor(
     private readonly blink: BlinkService,
     private readonly catalog: CatalogService,
-    private readonly notifications: NotificationsService
+    private readonly notifications: NotificationsService,
+    private readonly billing: BillingService
   ) {}
 
   @ApiOperation({ summary: "Create a Blink USD Lightning invoice" })
@@ -237,6 +239,15 @@ export class PaymentsController {
         paymentStatus: "paid",
         paidAt: new Date()
       });
+
+      // Billing domain records the payment + emits billing.PaymentCaptured (idempotent).
+      await this.billing.recordCaptured({
+        method: "lightning",
+        provider: "blink",
+        providerRef: body.payment_hash,
+        subjectRef: body.booking_id ? `booking:${body.booking_id}` : undefined,
+        metadata: { serviceName: body.service_name ?? null, bookingId: body.booking_id ?? null }
+      });
     }
 
     return status;
@@ -263,5 +274,112 @@ export class PaymentsController {
       return `${body.billing_period_months} month${body.billing_period_months === 1 ? "" : "s"}`;
     }
     return null;
+  }
+}
+
+class PaymentMetaDto {
+  @ApiProperty({ required: false }) @IsOptional() @IsInt() @Min(1) amount_cents?: number;
+  @ApiProperty({ required: false }) @IsOptional() @IsString() service_name?: string;
+  @ApiProperty({ required: false }) @IsOptional() @IsString() client_name?: string;
+  @ApiProperty({ required: false }) @IsOptional() @IsString() client_email?: string;
+  @ApiProperty({ required: false }) @IsOptional() @IsString() client_phone?: string;
+  @ApiProperty({ required: false }) @IsOptional() @IsString() plan_name?: string;
+  @ApiProperty({ required: false }) @IsOptional() @IsString() duration?: string;
+  @ApiProperty({ required: false }) @IsOptional() @IsString() booking_id?: string;
+  @ApiProperty({ required: false }) @IsOptional() @IsString() admin_url?: string;
+  @ApiProperty({ required: false }) @IsOptional() @IsString() selected_date_time?: string;
+}
+
+class CreateOnchainAddressDto extends PaymentMetaDto {
+  @ApiProperty({ required: false, minimum: 1, example: 120000, description: "Expected amount in sats (used for verification)." })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  amount_sats?: number;
+
+  @ApiProperty({ required: false, example: "Cleaning subscription" })
+  @IsOptional()
+  @IsString()
+  description?: string;
+}
+
+class OnchainStatusDto {
+  @ApiProperty({ example: "bc1q…" })
+  @IsString()
+  address!: string;
+
+  @ApiProperty({ required: false, minimum: 1, example: 120000 })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  amount_sats?: number;
+}
+
+const ONCHAIN_PROVIDER = "blink-onchain";
+
+@ApiTags("Payments")
+@Controller("payments/onchain")
+export class OnchainPaymentsController {
+  constructor(
+    private readonly blink: BlinkService,
+    private readonly notifications: NotificationsService,
+    private readonly billing: BillingService
+  ) {}
+
+  @ApiOperation({ summary: "Create a Blink on-chain Bitcoin address" })
+  @ApiBody({ type: CreateOnchainAddressDto })
+  @ApiResponse({ status: 201, description: "On-chain address created." })
+  @ApiResponse({ status: 503, description: "Blink on-chain is not configured or returned an error." })
+  @Post("address")
+  async createAddress(@Body() body: CreateOnchainAddressDto) {
+    const result = await this.blink.createOnchainAddress({
+      amountSats: body.amount_sats,
+      memo: body.description
+    });
+
+    await this.notifications.recordCheckoutSession({
+      provider: ONCHAIN_PROVIDER,
+      providerPaymentId: result.address,
+      serviceName: body.service_name || body.description || "On-chain Bitcoin payment",
+      clientName: body.client_name ?? null,
+      clientEmail: body.client_email ?? null,
+      clientPhone: body.client_phone ?? null,
+      amountCents: body.amount_cents ?? null,
+      amountSats: body.amount_sats ?? null,
+      currency: "USD",
+      planName: body.plan_name ?? null,
+      duration: body.duration ?? null,
+      bookingId: body.booking_id ?? null,
+      adminUrl: body.admin_url ?? null,
+      selectedDateTime: body.selected_date_time ?? null,
+      description: body.description ?? null
+    });
+
+    return result;
+  }
+
+  @ApiOperation({ summary: "Check a Blink on-chain payment by address" })
+  @ApiBody({ type: OnchainStatusDto })
+  @ApiResponse({ status: 201, description: "Payment status returned." })
+  @ApiResponse({ status: 503, description: "Blink is not configured or returned an error." })
+  @Post("status")
+  async status(@Body() body: OnchainStatusDto) {
+    const result = await this.blink.getOnchainStatus(body.address, body.amount_sats);
+    if (result.paid) {
+      await this.notifications.notifyPaymentSucceededForProviderRef(ONCHAIN_PROVIDER, body.address, {
+        amountSats: body.amount_sats ?? null,
+        paymentStatus: "paid",
+        paidAt: new Date()
+      });
+
+      // Billing domain records the payment + emits billing.PaymentCaptured (idempotent).
+      await this.billing.recordCaptured({
+        method: "onchain",
+        provider: "blink",
+        providerRef: body.address,
+        metadata: { amountSats: body.amount_sats ?? null }
+      });
+    }
+    return result;
   }
 }

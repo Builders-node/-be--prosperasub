@@ -152,19 +152,19 @@ export class GoogleCalendarService {
     };
   }
 
-  async createEvent(payload: GoogleCalendarEventPayload): Promise<GoogleCalendarEventResult> {
-    const response = await this.request<{ id: string; htmlLink?: string }>("POST", `/events`, this.toGoogleEvent(payload));
+  async createEvent(payload: GoogleCalendarEventPayload, calendarId?: string): Promise<GoogleCalendarEventResult> {
+    const response = await this.request<{ id: string; htmlLink?: string }>("POST", `/events`, this.toGoogleEvent(payload), calendarId);
     return { id: response.id, htmlLink: response.htmlLink ?? null };
   }
 
-  async updateEvent(eventId: string, payload: GoogleCalendarEventPayload): Promise<GoogleCalendarEventResult> {
-    const response = await this.request<{ id: string; htmlLink?: string }>("PATCH", `/events/${encodeURIComponent(eventId)}`, this.toGoogleEvent(payload));
+  async updateEvent(eventId: string, payload: GoogleCalendarEventPayload, calendarId?: string): Promise<GoogleCalendarEventResult> {
+    const response = await this.request<{ id: string; htmlLink?: string }>("PATCH", `/events/${encodeURIComponent(eventId)}`, this.toGoogleEvent(payload), calendarId);
     return { id: response.id, htmlLink: response.htmlLink ?? null };
   }
 
-  async deleteEvent(eventId: string) {
+  async deleteEvent(eventId: string, calendarId?: string) {
     try {
-      await this.request<void>("DELETE", `/events/${encodeURIComponent(eventId)}`);
+      await this.request<void>("DELETE", `/events/${encodeURIComponent(eventId)}`, undefined, calendarId);
     } catch (error) {
       if (error instanceof Error && /Google Calendar request failed \(404\)|Google Calendar request failed \(410\)/.test(error.message)) {
         return;
@@ -207,6 +207,35 @@ export class GoogleCalendarService {
     } catch {
       return [];
     }
+  }
+
+  /**
+   * List all events in a time window (paginated, expands recurring instances).
+   * Used by the reconcile job to find orphaned/stale events.
+   */
+  async listEvents(timeMinISO: string, timeMaxISO: string, calendarId?: string): Promise<GoogleCalendarEventItem[]> {
+    const all: GoogleCalendarEventItem[] = [];
+    let pageToken: string | undefined;
+    do {
+      const params = new URLSearchParams({
+        timeMin: timeMinISO,
+        timeMax: timeMaxISO,
+        singleEvents: "true",
+        showDeleted: "true", // include cancellations so we can propagate deletes
+        maxResults: "250",
+        orderBy: "startTime",
+      });
+      if (pageToken) params.set("pageToken", pageToken);
+      const response = await this.request<{ items?: GoogleCalendarEventItem[]; nextPageToken?: string }>(
+        "GET",
+        `/events?${params.toString()}`,
+        undefined,
+        calendarId,
+      );
+      all.push(...(response.items ?? []));
+      pageToken = response.nextPageToken;
+    } while (pageToken && all.length < 2000);
+    return all;
   }
 
   /** Cancel (mark as cancelled) a Google Calendar event without deleting it. */
@@ -272,8 +301,8 @@ export class GoogleCalendarService {
 
   // ─── HTTP layer ────────────────────────────────────────────────────────────
 
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const calendarId = this.sharedAdminCleaningCalendarId;
+  private async request<T>(method: string, path: string, body?: unknown, calendarIdOverride?: string): Promise<T> {
+    const calendarId = calendarIdOverride?.trim() || this.sharedAdminCleaningCalendarId;
     if (!this.isConfigured() || !calendarId) {
       const status = this.getConfigurationStatus();
       throw new Error(

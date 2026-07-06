@@ -3,7 +3,12 @@ import { Prisma } from "@prisma/client";
 import { AccountNotificationsService } from "../account/account-notifications.service";
 import { CleaningReminderService } from "../account/cleaning-reminder.service";
 import { CleaningCalendarSyncService } from "../google-calendar/cleaning-calendar-sync.service";
+import { BeachCourtCalendarSyncService } from "../google-calendar/beach-court-calendar-sync.service";
 import { BlinkService } from "../payments/blink.service";
+import { SimpleFiService } from "../payments/simplefi.service";
+import { MailService } from "../mail/mail.service";
+import { BillingService } from "../billing/billing.service";
+import type { PaymentMethod } from "../billing/payment-provider.port";
 import { PrismaService } from "../prisma/prisma.service";
 import { AuthService } from "../auth/auth.service";
 import type {
@@ -77,7 +82,289 @@ export class AdminService {
     @Optional() private readonly blink?: BlinkService,
     @Optional() private readonly accountNotifications?: AccountNotificationsService,
     @Optional() private readonly cleaningReminders?: CleaningReminderService,
+    @Optional() private readonly mail?: MailService,
+    @Optional() private readonly beachCourtCalendarSync?: BeachCourtCalendarSyncService,
+    @Optional() private readonly simplefi?: SimpleFiService,
+    @Optional() private readonly billing?: BillingService,
   ) {}
+
+  /** Map a stored legacy payment_method to a Billing PaymentMethod (null = unsupported). */
+  private billingMethodOf(method?: string | null): PaymentMethod | null {
+    const m = String(method || "").toLowerCase();
+    if (m === "onchain") return "onchain";
+    if (m === "lightning" || m === "blink") return "lightning";
+    if (m === "infinita" || m === "crypto" || m === "lives") return "lives";
+    if (m === "paypal") return "paypal";
+    return null;
+  }
+
+  /** Best-effort captured amount for a reconciled subscription row, per table. */
+  private subAmountCents(table: string, sub: Record<string, any>): number | null {
+    if (table === "cleaning_subscriptions") return Number(sub.total_price_cents) || Number(sub.monthly_price_cents) || null;
+    if (table === "beach_club_subscriptions") return Number(sub.total_cents) || null;
+    if (table === "food_subscriptions") {
+      const weekly = Number(sub.weekly_price_cents) || 0;
+      const weeks = (Number(sub.commitment_weeks) || 1) * (Number(sub.periods_paid) || 1);
+      return weekly ? weekly * weeks : null;
+    }
+    return null;
+  }
+
+  // ── Beach Court → Google Calendar sync ─────────────────────────────────────
+
+  async syncBeachCourtBookingCreated(bookingId: string) {
+    if (!this.beachCourtCalendarSync?.isConfigured()) {
+      return { ok: false, skipped: true, reason: "not_configured" as const };
+    }
+    // Load booking + court in one round.
+    const rows = await this.supabaseRest<Array<Record<string, any>>>(
+      `/beach_club_court_bookings?id=eq.${encodeURIComponent(bookingId)}` +
+      `&select=id,court_id,date,start_hour,end_hour,member_name,notes,status&limit=1`,
+    );
+    const booking = rows?.[0];
+    if (!booking) return { ok: false, error: "Booking not found" };
+    if (booking.status !== "booked") return { ok: false, skipped: true, reason: "not_booked" as const };
+
+    const courts = await this.supabaseRest<Array<Record<string, any>>>(
+      `/beach_club_courts?id=eq.${encodeURIComponent(String(booking.court_id))}&select=id,name,google_calendar_id&limit=1`,
+    );
+    const court = courts?.[0];
+    if (!court) return { ok: false, error: "Court not found" };
+    if (!court.google_calendar_id) return { ok: false, skipped: true, reason: "no_calendar" as const };
+
+    const result = await this.beachCourtCalendarSync.syncCreated({
+      bookingId: String(booking.id),
+      courtId: String(court.id),
+      courtName: String(court.name),
+      courtGoogleCalendarId: String(court.google_calendar_id),
+      date: String(booking.date),
+      startHour: Number(booking.start_hour),
+      endHour: Number(booking.end_hour),
+      memberName: booking.member_name ?? null,
+      notes: booking.notes ?? null,
+    });
+
+    // Tag the booking row with sync outcome (best-effort — never fail).
+    await this.supabaseRest(`/beach_club_court_bookings?id=eq.${encodeURIComponent(bookingId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        google_calendar_event_id: result.eventId ?? null,
+        google_calendar_sync_status: result.error ? "failed" : result.skipped ? "skipped" : "synced",
+        google_calendar_sync_error: result.error ?? null,
+        updated_at: new Date().toISOString(),
+      }),
+    }).catch(() => { /* ignore */ });
+
+    return { ok: !result.error, eventId: result.eventId ?? null, error: result.error };
+  }
+
+  /** Pull Google Calendar events for a single court and mirror them into our DB. */
+  async pullBeachCourtFromGoogle(courtId: string) {
+    if (!this.beachCourtCalendarSync?.isConfigured()) {
+      return { ok: false, skipped: true, reason: "not_configured" as const };
+    }
+    const courts = await this.supabaseRest<Array<Record<string, any>>>(
+      `/beach_club_courts?id=eq.${encodeURIComponent(courtId)}&select=id,name,google_calendar_id&limit=1`,
+    );
+    const court = courts?.[0];
+    if (!court) return { ok: false, error: "Court not found" };
+    if (!court.google_calendar_id) return { ok: false, skipped: true, reason: "no_calendar" as const };
+    const result = await this.beachCourtCalendarSync.pullExternalBookings({
+      courtId: String(court.id),
+      courtName: String(court.name),
+      courtGoogleCalendarId: String(court.google_calendar_id),
+    });
+    await this.supabaseRest(`/beach_club_courts?id=eq.${encodeURIComponent(courtId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ google_last_synced_at: new Date().toISOString() }),
+    }).catch(() => { /* ignore */ });
+    return result;
+  }
+
+  /** Pull Google Calendar events for every court that has a calendar attached. */
+  async pullAllBeachCourtsFromGoogle() {
+    if (!this.beachCourtCalendarSync?.isConfigured()) {
+      return { ok: false, skipped: true, reason: "not_configured" as const };
+    }
+    const courts = await this.supabaseRest<Array<Record<string, any>>>(
+      `/beach_club_courts?is_active=eq.true&google_calendar_id=not.is.null&select=id`,
+    ).catch(() => []);
+    const results: Array<{ courtId: string } & Awaited<ReturnType<typeof this.pullBeachCourtFromGoogle>>> = [];
+    for (const c of courts ?? []) {
+      results.push({ courtId: String(c.id), ...(await this.pullBeachCourtFromGoogle(String(c.id))) });
+    }
+    return { ok: true, courts: results.length, results };
+  }
+
+  async syncBeachCourtBookingDeleted(input: { bookingId: string; courtId: string; eventId: string | null }) {
+    if (!this.beachCourtCalendarSync?.isConfigured()) return { ok: true, skipped: true };
+    if (!input.eventId) return { ok: true, skipped: true };
+    const courts = await this.supabaseRest<Array<Record<string, any>>>(
+      `/beach_club_courts?id=eq.${encodeURIComponent(input.courtId)}&select=google_calendar_id&limit=1`,
+    );
+    const calendarId = courts?.[0]?.google_calendar_id;
+    if (!calendarId) return { ok: true, skipped: true };
+    return this.beachCourtCalendarSync.syncDeleted({ eventId: input.eventId, courtGoogleCalendarId: calendarId });
+  }
+
+  // ── Payment reminders (in-app + email) ──────────────────────────────────────
+
+  /** Deliver one reminder via in-app notification (if the member has an account) and email (if on file). */
+  private async deliverPaymentReminder(opts: {
+    recipientUserId?: string | null;
+    email?: string | null;
+    name?: string | null;
+    serviceLabel: string;
+    amountCents?: number;
+    relatedType: string;
+    relatedId: string;
+  }): Promise<string[]> {
+    const methods: string[] = [];
+    const amount = (Number(opts.amountCents) || 0) / 100;
+    const amountStr = amount > 0 ? ` ($${amount.toFixed(2)})` : "";
+
+    if (opts.recipientUserId && this.accountNotifications) {
+      await this.accountNotifications.create({
+        recipientUserId: String(opts.recipientUserId),
+        category: "payment",
+        type: "payment_pending",
+        title: "Payment reminder",
+        body: `Your payment for ${opts.serviceLabel}${amountStr} is still pending. Please complete it to keep your subscription active.`,
+        relatedEntityType: opts.relatedType,
+        relatedEntityId: opts.relatedId,
+        actionUrl: "/my-subscriptions",
+      }).then(() => methods.push("in-app")).catch((e) => this.logger.warn(`reminder in-app failed: ${(e as Error).message}`));
+    }
+
+    if (opts.email && this.mail) {
+      const name = opts.name || "there";
+      await this.mail.sendMail({
+        to: opts.email,
+        subject: `Payment reminder — ${opts.serviceLabel}`,
+        text: `Hi ${name}, this is a friendly reminder that your payment for ${opts.serviceLabel}${amountStr} is still pending. Please complete it to keep your subscription active. — ProsperaSub`,
+        html: `<p>Hi ${name},</p><p>This is a friendly reminder that your payment for <strong>${opts.serviceLabel}</strong>${amountStr} is still pending. Please complete it to keep your subscription active.</p><p>Thank you,<br/>ProsperaSub</p>`,
+      }).then(() => methods.push("email")).catch((e) => this.logger.warn(`reminder email failed: ${(e as Error).message}`));
+    }
+
+    return methods;
+  }
+
+  private async loadUserContact(userId?: string | null): Promise<{ email?: string; name?: string; display_name?: string } | undefined> {
+    if (!userId) return undefined;
+    const rows = await this.supabaseRest<Array<Record<string, any>>>(
+      `/users?id=eq.${encodeURIComponent(String(userId))}&select=email,name,display_name&limit=1`,
+    ).catch(() => []);
+    return rows?.[0];
+  }
+
+  async sendFoodPaymentReminder(subscriptionId: string) {
+    const rows = await this.supabaseRest<Array<Record<string, any>>>(
+      `/food_subscriptions?id=eq.${encodeURIComponent(subscriptionId)}` +
+      `&select=id,user_id,customer_name,payment_status,status,provider_id,weekly_price_cents,commitment_weeks&limit=1`,
+    );
+    const sub = rows?.[0];
+    if (!sub) throw new NotFoundException("Subscription not found");
+    if ((sub.payment_status ?? "") === "paid") return { ok: false, skipped: true, reason: "already_paid" as const };
+
+    const user = await this.loadUserContact(sub.user_id);
+    const providerRows = sub.provider_id
+      ? await this.supabaseRest<Array<{ name: string }>>(`/food_providers?id=eq.${encodeURIComponent(String(sub.provider_id))}&select=name&limit=1`).catch(() => [])
+      : [];
+    const methods = await this.deliverPaymentReminder({
+      recipientUserId: sub.user_id,
+      email: user?.email,
+      name: user?.display_name || user?.name || sub.customer_name,
+      serviceLabel: providerRows?.[0]?.name ?? "your meal plan",
+      amountCents: (Number(sub.weekly_price_cents) || 0) * (Number(sub.commitment_weeks) || 1),
+      relatedType: "food_subscription",
+      relatedId: subscriptionId,
+    });
+    return methods.length ? { ok: true, methods } : { ok: false, skipped: true, reason: "no_channel" as const };
+  }
+
+  async sendCleaningPaymentReminder(subscriptionId: string) {
+    const rows = await this.supabaseRest<Array<Record<string, any>>>(
+      `/cleaning_subscriptions?id=eq.${encodeURIComponent(subscriptionId)}` +
+      `&select=id,user_id,client_id,package_id,payment_status,subscription_status,monthly_price_cents,total_price_cents&limit=1`,
+    );
+    const sub = rows?.[0];
+    if (!sub) throw new NotFoundException("Subscription not found");
+    if ((sub.payment_status ?? "") === "paid") return { ok: false, skipped: true, reason: "already_paid" as const };
+
+    let email: string | undefined;
+    let name: string | undefined;
+    const user = await this.loadUserContact(sub.user_id);
+    if (user) { email = user.email; name = user.display_name || user.name; }
+    if (!email && sub.client_id) {
+      const clients = await this.supabaseRest<Array<Record<string, any>>>(
+        `/cleaning_clients?id=eq.${encodeURIComponent(String(sub.client_id))}&select=email,company_name&limit=1`,
+      ).catch(() => []);
+      email = clients?.[0]?.email; name = name || clients?.[0]?.company_name;
+    }
+    const pkgRows = sub.package_id
+      ? await this.supabaseRest<Array<{ name: string }>>(`/cleaning_packages?id=eq.${encodeURIComponent(String(sub.package_id))}&select=name&limit=1`).catch(() => [])
+      : [];
+    const methods = await this.deliverPaymentReminder({
+      recipientUserId: sub.user_id,
+      email, name,
+      serviceLabel: pkgRows?.[0]?.name ? `${pkgRows[0].name} (cleaning)` : "your cleaning plan",
+      amountCents: Number(sub.total_price_cents) || Number(sub.monthly_price_cents) || 0,
+      relatedType: "cleaning_subscription",
+      relatedId: subscriptionId,
+    });
+    return methods.length ? { ok: true, methods } : { ok: false, skipped: true, reason: "no_channel" as const };
+  }
+
+  async sendBeachPaymentReminder(subscriptionId: string) {
+    const rows = await this.supabaseRest<Array<Record<string, any>>>(
+      `/beach_club_subscriptions?id=eq.${encodeURIComponent(subscriptionId)}` +
+      `&select=id,user_id,customer_name,customer_email,plan_name,total_cents,payment_status,status&limit=1`,
+    );
+    const sub = rows?.[0];
+    if (!sub) throw new NotFoundException("Subscription not found");
+    if ((sub.payment_status ?? "") === "paid") return { ok: false, skipped: true, reason: "already_paid" as const };
+
+    const user = await this.loadUserContact(sub.user_id);
+    const methods = await this.deliverPaymentReminder({
+      recipientUserId: sub.user_id,
+      email: user?.email || sub.customer_email,
+      name: user?.display_name || user?.name || sub.customer_name,
+      serviceLabel: sub.plan_name ? `${sub.plan_name} (Beach Club)` : "your Beach Club membership",
+      amountCents: Number(sub.total_cents) || 0,
+      relatedType: "beach_club_subscription",
+      relatedId: subscriptionId,
+    });
+    return methods.length ? { ok: true, methods } : { ok: false, skipped: true, reason: "no_channel" as const };
+  }
+
+  /** Send reminders to every unpaid (non-cancelled) subscription of a service. */
+  async remindAllUnpaid(service: "food" | "cleaning" | "beach", providerId?: string) {
+    let path: string;
+    let send: (id: string) => Promise<any>;
+    if (service === "food") {
+      path = `/food_subscriptions?select=id&payment_status=neq.paid&status=neq.cancelled`
+        + (providerId ? `&provider_id=eq.${encodeURIComponent(providerId)}` : "");
+      send = (id) => this.sendFoodPaymentReminder(id);
+    } else if (service === "cleaning") {
+      path = `/cleaning_subscriptions?select=id&payment_status=neq.paid&subscription_status=neq.cancelled&deleted_at=is.null`;
+      send = (id) => this.sendCleaningPaymentReminder(id);
+    } else {
+      path = `/beach_club_subscriptions?select=id&payment_status=neq.paid&status=neq.cancelled`;
+      send = (id) => this.sendBeachPaymentReminder(id);
+    }
+    const rows = await this.supabaseRest<Array<{ id: string }>>(path).catch(() => []);
+    let sent = 0, skipped = 0;
+    for (const r of rows ?? []) {
+      try {
+        const res = await send(r.id);
+        if (res?.ok) sent++; else skipped++;
+      } catch (e) {
+        skipped++;
+        this.logger.warn(`remindAllUnpaid ${service} ${r.id} failed: ${(e as Error).message}`);
+      }
+    }
+    return { ok: true, total: (rows ?? []).length, sent, skipped };
+  }
 
   async listUsers(): Promise<AdminUserDto[]> {
     // Always include every user the auth service knows about (Frorex + cached users).
@@ -135,16 +422,25 @@ export class AdminService {
 
   async listUsersFull() {
     if (this.shouldUseFallback()) {
-      const [users, legacyRoles, subscriptions, packages, clients] = await Promise.all([
+      const [users, legacyRoles, subscriptions, packages, clients, rbacUserRoles, rbacRoles] = await Promise.all([
         this.supabaseRest<Array<Record<string, any>>>("/users?select=id,email,name,display_name,auth_provider,avatar_url,created_at,last_login_at,banned_until&deleted_at=is.null&order=created_at.desc"),
         this.supabaseRest<Array<{ user_id: string; role: string }>>("/user_roles?select=user_id,role"),
         this.supabaseRest<Array<Record<string, any>>>("/cleaning_subscriptions?select=id,user_id,package_id,payment_status,subscription_status,is_active,monthly_price_cents&deleted_at=is.null"),
         this.supabaseRest<Array<{ id: string; name: string }>>("/cleaning_packages?select=id,name"),
         this.supabaseRest<Array<Record<string, any>>>("/cleaning_clients?select=id,company_name,email,status,user_id&deleted_at=is.null"),
+        this.supabaseRest<Array<{ user_id: string; role_id: string }>>("/rbac_user_roles?select=user_id,role_id").catch(() => []),
+        this.supabaseRest<Array<{ id: string; slug: string }>>("/rbac_roles?select=id,slug").catch(() => []),
       ]);
       const rolesByUser = new Map<string, string[]>();
       for (const role of legacyRoles) {
         rolesByUser.set(role.user_id, [...(rolesByUser.get(role.user_id) ?? []), String(role.role).toLowerCase()]);
+      }
+      const rbacSlugById = new Map((rbacRoles ?? []).map((r) => [String(r.id), r.slug]));
+      const rbacByUser = new Map<string, string[]>();
+      for (const ur of rbacUserRoles ?? []) {
+        const slug = rbacSlugById.get(String(ur.role_id));
+        if (!slug) continue;
+        rbacByUser.set(String(ur.user_id), [...(rbacByUser.get(String(ur.user_id)) ?? []), slug]);
       }
       const packageById = new Map(packages.map((pkg) => [pkg.id, pkg.name]));
       const subscriptionsByUser = new Map<string, Record<string, any>[]>();
@@ -179,6 +475,7 @@ export class AdminService {
         return {
           ...user,
           roles: rolesByUser.get(user.id) ?? ["user"],
+          rbacRoles: rbacByUser.get(String(user.id)) ?? [],
           subscriptions: subscriptionsByUser.get(user.id) ?? [],
           linkedClients: merged,
           isBlocked: user.banned_until ? new Date(user.banned_until).getTime() > Date.now() : false,
@@ -381,41 +678,93 @@ export class AdminService {
     return { ok: true };
   }
 
-  async listAdminSubscriptions() {
+  async listAdminSubscriptions(params: {
+    page?: number | string;
+    limit?: number | string;
+    status?: string;
+    q?: string;
+    sortBy?: string;
+    sortDir?: string;
+  } = {}) {
+    // Server-side pagination + filtering + sorting + stats in one round-trip.
+    // Row count comes from a window COUNT(*) OVER() so we don't need a second
+    // total query. Stats come from a single SELECT with FILTER clauses.
+    const page   = Math.max(0, Number(params.page ?? 0) | 0);
+    const limit  = Math.min(200, Math.max(1, Number(params.limit ?? 25) | 0));
+    const offset = page * limit;
+    const q      = String(params.q ?? "").trim();
+
+    const STATUS_WHERE: Record<string, string> = {
+      all:       ``,
+      active:    `AND cs.payment_status = 'paid' AND (cs.subscription_status = 'active' OR (cs.is_active AND (cs.subscription_status IS NULL OR cs.subscription_status NOT IN ('paused','cancelled','expired'))))`,
+      pending:   `AND cs.payment_status <> 'paid' AND (cs.subscription_status IS NULL OR cs.subscription_status NOT IN ('cancelled','expired'))`,
+      paused:    `AND cs.subscription_status = 'paused'`,
+      cancelled: `AND cs.subscription_status = 'cancelled'`,
+      expired:   `AND cs.subscription_status = 'expired'`,
+    };
+    const whereStatus = STATUS_WHERE[String(params.status ?? "all")] ?? "";
+
+    const SORT_COL: Record<string, string> = {
+      user:   `COALESCE(u.display_name, u.name, cc.company_name, u.email)`,
+      price:  `COALESCE(cs.monthly_price_cents, cs.total_price_cents, 0)`,
+      period: `COALESCE(cs.service_start_date, cs.start_date)`,
+      status: `CASE WHEN cs.payment_status <> 'paid' AND (cs.subscription_status IS NULL OR cs.subscription_status NOT IN ('cancelled','expired')) THEN 'pending' ELSE COALESCE(cs.subscription_status, CASE WHEN cs.is_active THEN 'active' ELSE 'inactive' END) END`,
+    };
+    const orderCol = SORT_COL[String(params.sortBy ?? "user")] ?? SORT_COL.user;
+    const orderDir = String(params.sortDir ?? "asc").toLowerCase() === "desc" ? "DESC" : "ASC";
+
+    // Fallback path (test / DB-less envs) — return a simple slice without
+    // server-side filter/sort. Prod always uses Prisma.
     if (this.shouldUseFallback()) {
-      const [subscriptions, users, packages, clients] = await Promise.all([
-        this.supabaseRest<Array<Record<string, any>>>("/cleaning_subscriptions?select=*&deleted_at=is.null&order=created_at.desc"),
-        this.supabaseRest<Array<Record<string, any>>>("/users?select=id,name,display_name,email"),
-        this.supabaseRest<Array<{ id: string; name: string }>>("/cleaning_packages?select=id,name"),
-        this.supabaseRest<Array<Record<string, any>>>("/cleaning_clients?select=id,company_name,email&deleted_at=is.null"),
-      ]);
-      const userById = new Map(users.map((user) => [String(user.id), user]));
-      const packageById = new Map(packages.map((pkg) => [pkg.id, pkg.name]));
-      const clientById = new Map(clients.map((c) => [String(c.id), c]));
-      return subscriptions.map((subscription) => {
-        const client = subscription.client_id ? clientById.get(String(subscription.client_id)) : null;
-        return {
-          ...subscription,
-          user: userById.get(String(subscription.user_id)) ?? null,
-          client_name: client?.company_name ?? null,
-          client_email: client?.email ?? null,
-          package_name: packageById.get(subscription.package_id) ?? "Unknown",
-        };
-      });
+      const rows = await this.supabaseRest<Array<Record<string, any>>>(
+        `/cleaning_subscriptions?select=*&deleted_at=is.null&order=created_at.desc&limit=${limit}&offset=${offset}`,
+      );
+      return {
+        rows,
+        total: rows.length,
+        stats: { total: rows.length, active: 0, pending: 0, paused: 0, cancelled: 0, expired: 0 },
+      };
     }
-    return this.prisma.$queryRawUnsafe(
-      `SELECT cs.*,
+
+    const rowsSql = `
+      SELECT cs.*,
         row_to_json(u.*) AS "user",
-        cc.company_name AS client_name,
-        cc.email AS client_email,
-        COALESCE(cp.name, 'Unknown') AS package_name
-       FROM public.cleaning_subscriptions cs
-       LEFT JOIN public.users u ON u.id::text = cs.user_id::text
-       LEFT JOIN public.cleaning_clients cc ON cc.id::text = cs.client_id::text
-       LEFT JOIN public.cleaning_packages cp ON cp.id = cs.package_id
-       WHERE cs.deleted_at IS NULL
-       ORDER BY cs.created_at DESC`,
-    );
+        cc.company_name  AS client_name,
+        cc.email         AS client_email,
+        COALESCE(cp.name, 'Unknown') AS package_name,
+        COUNT(*) OVER() AS __total__
+      FROM public.cleaning_subscriptions cs
+      LEFT JOIN public.users             u  ON u.id::text  = cs.user_id::text
+      LEFT JOIN public.cleaning_clients  cc ON cc.id::text = cs.client_id::text
+      LEFT JOIN public.cleaning_packages cp ON cp.id       = cs.package_id
+      WHERE cs.deleted_at IS NULL
+        ${whereStatus}
+        ${q ? `AND (u.name ILIKE $1 OR u.display_name ILIKE $1 OR u.email ILIKE $1 OR cp.name ILIKE $1 OR cc.company_name ILIKE $1)` : ""}
+      ORDER BY ${orderCol} ${orderDir} NULLS LAST, cs.created_at DESC
+      LIMIT ${limit} OFFSET ${offset}
+    `;
+    const statsSql = `
+      SELECT
+        COUNT(*)::int AS total,
+        COUNT(*) FILTER (WHERE cs.payment_status = 'paid' AND (cs.subscription_status = 'active' OR (cs.is_active AND (cs.subscription_status IS NULL OR cs.subscription_status NOT IN ('paused','cancelled','expired')))))::int AS active,
+        COUNT(*) FILTER (WHERE cs.payment_status <> 'paid' AND (cs.subscription_status IS NULL OR cs.subscription_status NOT IN ('cancelled','expired')))::int AS pending,
+        COUNT(*) FILTER (WHERE cs.subscription_status = 'paused')::int    AS paused,
+        COUNT(*) FILTER (WHERE cs.subscription_status = 'cancelled')::int AS cancelled,
+        COUNT(*) FILTER (WHERE cs.subscription_status = 'expired')::int   AS expired
+      FROM public.cleaning_subscriptions cs
+      WHERE cs.deleted_at IS NULL
+    `;
+
+    const [rawRows, statsRows] = await Promise.all([
+      q
+        ? this.prisma.$queryRawUnsafe<any[]>(rowsSql, `%${q}%`)
+        : this.prisma.$queryRawUnsafe<any[]>(rowsSql),
+      this.prisma.$queryRawUnsafe<any[]>(statsSql),
+    ]);
+    const total = rawRows.length > 0 ? Number(rawRows[0].__total__ ?? 0) : 0;
+    const rows = rawRows.map(({ __total__, ...r }) => r);
+    const stats = statsRows[0] ?? { total: 0, active: 0, pending: 0, paused: 0, cancelled: 0, expired: 0 };
+    return { rows, total, stats };
   }
 
   async listAdminCleaningPackages() {
@@ -447,7 +796,7 @@ export class AdminService {
     if (!allFields.user_id && !allFields.client_id) {
       throw new BadRequestException("User or client is required.");
     }
-    if (!allFields.package_id) {
+    if (!allFields.package_id && !input.one_time) {
       throw new BadRequestException("Plan is required.");
     }
     // Remove null/undefined values — let DB defaults handle them
@@ -999,36 +1348,85 @@ export class AdminService {
    * ones. Runs from a cron so activation happens without any manual action.
    */
   async reconcilePendingPayments(): Promise<{ checked: number; activated: number }> {
-    if (!this.blink) return { checked: 0, activated: 0 };
+    // Reconcile pending payments across cleaning / food / beach subscriptions,
+    // dispatching to the right provider (Blink Lightning/on-chain OR SimpleFi
+    // for LIVES). PayPal is captured client-side at checkout and does not need
+    // background reconciliation. Runs from cron so activation is automatic.
+    const scopes = [
+      { table: "cleaning_subscriptions", statusCol: "subscription_status", extraFilters: "&deleted_at=is.null" },
+      { table: "food_subscriptions",     statusCol: "status",              extraFilters: "" },
+      { table: "beach_club_subscriptions", statusCol: "status",            extraFilters: "" },
+    ] as const;
 
-    let rows: Array<Record<string, any>> = [];
-    try {
-      rows = await this.supabaseRest<Array<Record<string, any>>>(
-        `/cleaning_subscriptions?select=*&payment_status=neq.paid&payment_reference=not.is.null&subscription_status=neq.cancelled&deleted_at=is.null&limit=200`,
-      );
-    } catch {
-      return { checked: 0, activated: 0 };
-    }
+    const checkPaid = async (sub: Record<string, any>): Promise<boolean> => {
+      const method = String(sub.payment_method || "");
+      const ref = String(sub.payment_reference || "");
+      if (!ref) return false;
+      if (method === "onchain" && this.blink) return (await this.blink.getOnchainStatus(ref)).paid;
+      if ((method === "lightning" || method === "blink") && this.blink) return (await this.blink.getPaymentStatus(ref)).paid;
+      if ((method === "infinita" || method === "crypto") && this.simplefi) {
+        const s = await this.simplefi.getPaymentStatus(ref);
+        return s.status === "paid";
+      }
+      return false;
+    };
 
+    let totalChecked = 0;
     let activated = 0;
-    for (const sub of rows) {
-      try {
-        const paid = sub.payment_method === "onchain"
-          ? (await this.blink.getOnchainStatus(sub.payment_reference)).paid
-          : (await this.blink.getPaymentStatus(sub.payment_reference)).paid;
-        if (!paid) continue;
 
-        await this.supabaseRest(
-          `/cleaning_subscriptions?id=eq.${encodeURIComponent(sub.id)}`,
-          { method: "PATCH", body: JSON.stringify({ payment_status: "paid", subscription_status: "active", is_active: true, updated_at: new Date().toISOString() }) },
+    for (const scope of scopes) {
+      let rows: Array<Record<string, any>> = [];
+      try {
+        rows = await this.supabaseRest<Array<Record<string, any>>>(
+          `/${scope.table}?select=*&payment_status=neq.paid&payment_reference=not.is.null&${scope.statusCol}=neq.cancelled${scope.extraFilters}&limit=200`,
         );
-        void this.notifySubscriptionUpdated(sub, { payment_status: "paid" }, sub.id);
-        activated++;
       } catch {
-        // skip this sub, continue with the rest
+        continue;
+      }
+      totalChecked += rows.length;
+
+      for (const sub of rows) {
+        try {
+          const paid = await checkPaid(sub);
+          if (!paid) continue;
+
+          const patch: Record<string, any> = {
+            payment_status: "paid",
+            updated_at: new Date().toISOString(),
+          };
+          if (scope.table === "cleaning_subscriptions") {
+            patch.subscription_status = "active";
+            patch.is_active = true;
+          } else {
+            patch.status = "active";
+          }
+
+          await this.supabaseRest(
+            `/${scope.table}?id=eq.${encodeURIComponent(sub.id)}`,
+            { method: "PATCH", body: JSON.stringify(patch) },
+          );
+          void this.notifySubscriptionUpdated(sub, { payment_status: "paid" }, sub.id);
+
+          // Billing domain: record + emit billing.PaymentCaptured from the same
+          // single place as interactive checkouts (idempotent per provider+ref).
+          const billingMethod = this.billingMethodOf(sub.payment_method);
+          if (billingMethod && this.billing) {
+            await this.billing.recordCaptured({
+              method: billingMethod,
+              provider: billingMethod === "lives" ? "simplefi" : "blink",
+              providerRef: String(sub.payment_reference),
+              amountCents: this.subAmountCents(scope.table, sub),
+              subjectRef: `subscription:${sub.id}`,
+              metadata: { table: scope.table, reconciled: true },
+            }).catch((e) => this.logger.warn(`billing.recordCaptured failed for ${sub.id}: ${(e as Error).message}`));
+          }
+          activated++;
+        } catch {
+          // skip this sub, continue with the rest of the scan
+        }
       }
     }
-    return { checked: rows.length, activated };
+    return { checked: totalChecked, activated };
   }
 
   async createSubscriptionInvoice(subscriptionId: string, method: "lightning" | "onchain" = "lightning") {
@@ -1207,12 +1605,22 @@ export class AdminService {
     "category_cars_visible",
     "category_cleaning_visible",
     "category_beach_visible",
+    "category_massage_visible",
+  ] as const;
+
+  private static readonly BOOLEAN_FLAG_KEYS = [
+    "lives_direct_enabled",
   ] as const;
 
   async getPlatformSettings() {
     const keys = [
       "min_subscription_weeks", "max_subscription_weeks", "platform_fee_percent",
+      "finance_cleaning_cost_cents", "finance_beach_extra_cents",
+      "finance_car_commission_pct", "finance_food_commission_pct",
+      "finance_cleaning_type", "finance_beach_type",
+      "finance_car_type", "finance_food_type",
       ...AdminService.CATEGORY_KEYS,
+      ...AdminService.BOOLEAN_FLAG_KEYS,
     ];
     const keyList = keys.map((k) => `'${k}'`).join(", ");
 
@@ -1239,6 +1647,18 @@ export class AdminService {
       category_cars_visible: bool(values.get("category_cars_visible")),
       category_cleaning_visible: bool(values.get("category_cleaning_visible")),
       category_beach_visible: bool(values.get("category_beach_visible")),
+      category_massage_visible: bool(values.get("category_massage_visible")),
+      // Financial / profit configuration (cents and whole-percent values).
+      finance_cleaning_cost_cents: Number(values.get("finance_cleaning_cost_cents") ?? 75000),
+      finance_beach_extra_cents: Number(values.get("finance_beach_extra_cents") ?? 1000),
+      finance_car_commission_pct: Number(values.get("finance_car_commission_pct") ?? 10),
+      finance_food_commission_pct: Number(values.get("finance_food_commission_pct") ?? 10),
+      // How each source's value is interpreted: "percent" | "fixed" | "person".
+      finance_cleaning_type: String(values.get("finance_cleaning_type") ?? "fixed"),
+      finance_beach_type: String(values.get("finance_beach_type") ?? "person"),
+      finance_car_type: String(values.get("finance_car_type") ?? "percent"),
+      finance_food_type: String(values.get("finance_food_type") ?? "percent"),
+      lives_direct_enabled: bool(values.get("lives_direct_enabled")),
     };
   }
 
@@ -1246,10 +1666,23 @@ export class AdminService {
     // Only persist the keys actually provided — this keeps partial updates safe
     // (e.g. toggling category visibility must not reset the subscription-week settings).
     const updates: Record<string, unknown> = {};
-    for (const key of ["min_subscription_weeks", "max_subscription_weeks", "platform_fee_percent"]) {
+    for (const key of [
+      "min_subscription_weeks", "max_subscription_weeks", "platform_fee_percent",
+      "finance_cleaning_cost_cents", "finance_beach_extra_cents",
+      "finance_car_commission_pct", "finance_food_commission_pct",
+    ]) {
       if (input[key] !== undefined) updates[key] = Number(input[key]);
     }
+    for (const key of [
+      "finance_cleaning_type", "finance_beach_type",
+      "finance_car_type", "finance_food_type",
+    ]) {
+      if (input[key] !== undefined) updates[key] = String(input[key]);
+    }
     for (const key of AdminService.CATEGORY_KEYS) {
+      if (input[key] !== undefined) updates[key] = Boolean(input[key]);
+    }
+    for (const key of AdminService.BOOLEAN_FLAG_KEYS) {
       if (input[key] !== undefined) updates[key] = Boolean(input[key]);
     }
     if (Object.keys(updates).length === 0) return this.getPlatformSettings();
@@ -1394,12 +1827,14 @@ export class AdminService {
       this.prisma.cleaningClient.findMany({
         where: { deletedAt: null },
         orderBy: { createdAt: "desc" },
+        take: AdminService.ADMIN_LIST_HARD_CAP,
         include: {
           customPlans: true,
           recurringSchedules: true,
           bookings: {
             include: { slot: true },
             orderBy: { slot: { date: "desc" } },
+            take: 50,
           },
         },
       }),
@@ -1499,13 +1934,19 @@ export class AdminService {
     });
   }
 
+  // Safety cap: unbounded findMany on a growing table is a scalability
+  // trap. 2000 rows fits the current admin UI comfortably; when we outgrow
+  // it, add a `?before=<date>` cursor and stream older rows on demand.
+  private static readonly ADMIN_LIST_HARD_CAP = 2000;
+
   async listCleaningBookings() {
     if (this.shouldUseFallback()) {
       return [];
     }
 
     return this.prisma.cleaningBooking.findMany({
-      orderBy: { slot: { date: "asc" } },
+      orderBy: { slot: { date: "desc" } },
+      take: AdminService.ADMIN_LIST_HARD_CAP,
       include: {
         slot: true,
         client: true,
@@ -1532,6 +1973,7 @@ export class AdminService {
 
     return this.prisma.cleaningCompletionReport.findMany({
       orderBy: { completedAt: "desc" },
+      take: AdminService.ADMIN_LIST_HARD_CAP,
       include: {
         client: true,
         customPlan: true,
@@ -1916,12 +2358,31 @@ export class AdminService {
       let result: { id: string; htmlLink?: string | null };
       let action: string;
 
+      // 0. If the passed event id is already owned by ANOTHER booking (legacy dup
+      //    bug), don't touch it — otherwise the two bookings overwrite one event and
+      //    "swap". Drop it so we fall through to the bookingId tag / fresh create.
+      let storedEventId = data.googleCalendarEventId;
+      if (storedEventId) {
+        try {
+          const others = await this.supabaseRest<Array<{ id: string }>>(
+            `/cleaning_bookings?select=id&google_calendar_event_id=eq.${encodeURIComponent(storedEventId)}` +
+            `&id=neq.${encodeURIComponent(bookingId)}&status=neq.cancelled&limit=1`,
+          );
+          if (Array.isArray(others) && others.length > 0) {
+            this.logger.warn(`[sync-direct] Event ${storedEventId} shared with another booking; creating fresh for ${bookingId}`);
+            storedEventId = undefined;
+          }
+        } catch {
+          storedEventId = undefined; // on lookup error, favour uniqueness
+        }
+      }
+
       // 1. Try stored event ID first
-      if (data.googleCalendarEventId) {
+      if (storedEventId) {
         try {
           result = isCancelled
-            ? await gc.cancelEvent(data.googleCalendarEventId, payload)
-            : await gc.updateEvent(data.googleCalendarEventId, payload);
+            ? await gc.cancelEvent(storedEventId, payload)
+            : await gc.updateEvent(storedEventId, payload);
           action = "updated";
         } catch (err) {
           if (!/404|410/.test((err as Error).message ?? "")) throw err;
@@ -1982,6 +2443,21 @@ export class AdminService {
       const message = error instanceof Error ? error.message : "Google Calendar sync failed";
       return { ok: false, bookingId, error: message };
     }
+  }
+
+  /** Reconcile the shared cleaning calendar with the DB (remove orphans, fix dates, sync pending). */
+  async reconcileCleaningCalendar() {
+    return this.cleaningCalendarSync.reconcileCalendar();
+  }
+
+  /** Auto-sync all out-of-date bookings to Google Calendar (cron-driven). */
+  async syncPendingCleaningCalendar() {
+    return this.cleaningCalendarSync.syncPendingBookings();
+  }
+
+  /** Rebuild Google Calendar events for every cleaning booking (REST-only, prod-safe). */
+  async restoreCleaningCalendar() {
+    return this.cleaningCalendarSync.restoreAllCalendarEvents();
   }
 
   async syncAllCleaningBookingsCalendar() {

@@ -6,6 +6,7 @@ import { AccountNotificationsService } from "./account-notifications.service";
 import { AccountPasswordService } from "./account-password.service";
 import { AccountPreferencesService } from "./account-preferences.service";
 import { AccountPaymentService } from "./account-payment.service";
+import { AccountCleaningService } from "./account-cleaning.service";
 import { CleaningReminderService } from "./cleaning-reminder.service";
 
 class ChangePasswordDto {
@@ -17,6 +18,12 @@ class ChangePasswordDto {
   @IsString()
   @MinLength(8)
   new_password!: string;
+}
+
+class RescheduleBookingDto {
+  @ApiProperty()
+  @IsString()
+  slot_id!: string;
 }
 
 class UpdatePreferencesDto {
@@ -53,7 +60,26 @@ export class AccountController {
     private readonly preferences: AccountPreferencesService,
     private readonly reminders: CleaningReminderService,
     private readonly payment: AccountPaymentService,
+    private readonly cleaning: AccountCleaningService,
   ) {}
+
+  // ── Cleaning self-service ────────────────────────────────────────────────────
+
+  @ApiOperation({ summary: "Reschedule one of the user's own cleaning bookings to another slot" })
+  @Post("cleaning/bookings/:id/reschedule")
+  rescheduleCleaningBooking(
+    @Req() req: AccountRequest,
+    @Param("id") id: string,
+    @Body() body: RescheduleBookingDto,
+  ) {
+    return this.cleaning.rescheduleBooking(req.authUser!.id, id, body.slot_id);
+  }
+
+  @ApiOperation({ summary: "Sync one of the user's own cleaning bookings to Google Calendar" })
+  @Post("cleaning/bookings/:id/sync")
+  syncCleaningBooking(@Req() req: AccountRequest, @Param("id") id: string) {
+    return this.cleaning.syncOwnBooking(req.authUser!.id, id);
+  }
 
   // ── Notifications ──────────────────────────────────────────────────────────
 

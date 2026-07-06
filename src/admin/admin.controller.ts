@@ -1,4 +1,16 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, UseGuards } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, UseGuards, UsePipes, ValidationPipe } from "@nestjs/common";
+
+// Lenient pipe for the subscription mutation endpoints. The global pipe uses
+// `forbidNonWhitelisted: true` which would 400 on any extra field, but the
+// service already runs its own SUBSCRIPTION_WRITE_COLUMNS allow-list — we just
+// want *typed* fields validated (dates parse, numbers non-negative, enums
+// correct) and everything else to pass through unchanged.
+const AdminSubscriptionValidation = new ValidationPipe({
+  whitelist: false,
+  forbidNonWhitelisted: false,
+  transform: true,
+  skipMissingProperties: true,
+});
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from "@nestjs/swagger";
 import { CatalogService } from "../catalog/catalog.service";
 import { GoogleCalendarService } from "../google-calendar/google-calendar.service";
@@ -17,6 +29,11 @@ import {
   UpdateRecurringScheduleStatusDto,
 } from "./admin-cleaning.dto";
 import { AdminService } from "./admin.service";
+import {
+  CreateAdminSubscriptionDto,
+  CreateSubscriptionWithReservationsDto,
+  UpdateAdminSubscriptionRequestDto,
+} from "./dto/admin-subscription.dto";
 
 @ApiTags("Admin")
 @ApiBearerAuth()
@@ -105,18 +122,25 @@ export class AdminController {
     return this.admin.getAdminPaymentStats();
   }
 
-  @ApiOperation({ summary: "List admin cleaning subscriptions" })
+  @ApiOperation({ summary: "List admin cleaning subscriptions (paginated)" })
   @Get("subscriptions")
   @RequireAdminPermission(AdminPermission.SubscriptionsRead)
-  listAdminSubscriptions() {
-    return this.admin.listAdminSubscriptions();
+  listAdminSubscriptions(@Query() query: Record<string, string>) {
+    return this.admin.listAdminSubscriptions({
+      page: query.page, limit: query.limit,
+      status: query.status, q: query.q,
+      sortBy: query.sortBy, sortDir: query.sortDir,
+    });
   }
 
   @ApiOperation({ summary: "Create an admin cleaning subscription" })
   @Post("subscriptions")
   @RequireAdminPermission(AdminPermission.SubscriptionsWrite)
-  createAdminSubscription(@Body() body: Record<string, unknown>, @Req() request: AdminRequest) {
-    return this.admin.createAdminSubscription(body, request.adminUser!.id);
+  createAdminSubscription(
+    @Body(AdminSubscriptionValidation) body: CreateAdminSubscriptionDto,
+    @Req() request: AdminRequest,
+  ) {
+    return this.admin.createAdminSubscription(body as unknown as Record<string, unknown>, request.adminUser!.id);
   }
 
   @ApiOperation({ summary: "Get bookings/reservations for a subscription" })
@@ -129,8 +153,14 @@ export class AdminController {
   @ApiOperation({ summary: "Create subscription with optional slot reservations" })
   @Post("subscriptions/with-reservations")
   @RequireAdminPermission(AdminPermission.SubscriptionsWrite)
-  createSubscriptionWithReservations(@Body() body: Record<string, unknown>, @Req() request: AdminRequest) {
-    return this.admin.createSubscriptionWithReservations(body, request.adminUser!.id);
+  createSubscriptionWithReservations(
+    @Body(AdminSubscriptionValidation) body: CreateSubscriptionWithReservationsDto,
+    @Req() request: AdminRequest,
+  ) {
+    return this.admin.createSubscriptionWithReservations(
+      body as unknown as Record<string, unknown>,
+      request.adminUser!.id,
+    );
   }
 
   @ApiOperation({ summary: "Update an admin cleaning subscription" })
@@ -138,10 +168,15 @@ export class AdminController {
   @RequireAdminPermission(AdminPermission.SubscriptionsWrite)
   updateAdminSubscription(
     @Param("id") id: string,
-    @Body() body: { fields?: Record<string, unknown>; action?: string },
+    @Body(AdminSubscriptionValidation) body: UpdateAdminSubscriptionRequestDto,
     @Req() request: AdminRequest,
   ) {
-    return this.admin.updateAdminSubscription(id, body.fields ?? {}, body.action, request.adminUser!.id);
+    return this.admin.updateAdminSubscription(
+      id,
+      (body.fields ?? {}) as unknown as Record<string, unknown>,
+      body.action,
+      request.adminUser!.id,
+    );
   }
 
   @ApiOperation({ summary: "Cancel a subscription and all its future bookings (removes Google Calendar events)" })
@@ -158,12 +193,73 @@ export class AdminController {
     return this.admin.deleteSubscription(id, request.adminUser!.id);
   }
 
-  @ApiOperation({ summary: "Generate a Lightning payment invoice for a subscription" })
-  @ApiResponse({ status: 201, description: "Lightning invoice created for the subscription." })
+  @ApiOperation({ summary: "Generate a payment invoice (Lightning or on-chain) for a subscription" })
+  @ApiResponse({ status: 201, description: "Invoice created for the subscription." })
   @Post("subscriptions/:id/invoice")
   @RequireAdminPermission(AdminPermission.SubscriptionsWrite)
-  createSubscriptionInvoice(@Param("id") id: string) {
-    return this.admin.createSubscriptionInvoice(id);
+  createSubscriptionInvoice(@Param("id") id: string, @Body() body: { method?: "lightning" | "onchain" }) {
+    return this.admin.createSubscriptionInvoice(id, body?.method === "onchain" ? "onchain" : "lightning");
+  }
+
+  @ApiOperation({ summary: "Send a payment reminder for a food subscription (in-app + email)" })
+  @ApiResponse({ status: 201, description: "Reminder dispatched." })
+  @Post("food/subscriptions/:id/payment-reminder")
+  @RequireAdminPermission(AdminPermission.SubscriptionsWrite)
+  sendFoodPaymentReminder(@Param("id") id: string) {
+    return this.admin.sendFoodPaymentReminder(id);
+  }
+
+  @ApiOperation({ summary: "Send a payment reminder for a cleaning subscription (in-app + email)" })
+  @Post("cleaning/subscriptions/:id/payment-reminder")
+  @RequireAdminPermission(AdminPermission.SubscriptionsWrite)
+  sendCleaningPaymentReminder(@Param("id") id: string) {
+    return this.admin.sendCleaningPaymentReminder(id);
+  }
+
+  @ApiOperation({ summary: "Send a payment reminder for a beach club subscription (in-app + email)" })
+  @Post("beach-club/subscriptions/:id/payment-reminder")
+  @RequireAdminPermission(AdminPermission.SubscriptionsWrite)
+  sendBeachPaymentReminder(@Param("id") id: string) {
+    return this.admin.sendBeachPaymentReminder(id);
+  }
+
+  @ApiOperation({ summary: "Send payment reminders to all unpaid subscriptions of a service" })
+  @Post(":service/payment-reminders/remind-unpaid")
+  @RequireAdminPermission(AdminPermission.SubscriptionsWrite)
+  remindAllUnpaid(@Param("service") service: string, @Body() body: { providerId?: string }) {
+    const svc = service === "cleaning" ? "cleaning" : service === "beach-club" ? "beach" : "food";
+    return this.admin.remindAllUnpaid(svc, body?.providerId);
+  }
+
+  @ApiOperation({ summary: "Pull external bookings from Google Calendar into a beach court" })
+  @Post("beach-club/courts/:id/pull-google")
+  @RequireAdminPermission(AdminPermission.SubscriptionsWrite)
+  pullBeachCourtFromGoogle(@Param("id") id: string) {
+    return this.admin.pullBeachCourtFromGoogle(id);
+  }
+
+  @ApiOperation({ summary: "Pull all beach courts from their Google Calendars (used by cron)" })
+  @Post("beach-club/courts/pull-google-all")
+  @RequireAdminPermission(AdminPermission.SubscriptionsWrite)
+  pullAllBeachCourtsFromGoogle() {
+    return this.admin.pullAllBeachCourtsFromGoogle();
+  }
+
+  @ApiOperation({ summary: "Sync a beach court booking to its court's Google Calendar" })
+  @Post("beach-club/court-bookings/:id/sync-google")
+  @RequireAdminPermission(AdminPermission.SubscriptionsWrite)
+  syncBeachCourtBooking(@Param("id") id: string) {
+    return this.admin.syncBeachCourtBookingCreated(id);
+  }
+
+  @ApiOperation({ summary: "Remove a beach court booking's Google Calendar event" })
+  @Post("beach-club/court-bookings/:id/unsync-google")
+  @RequireAdminPermission(AdminPermission.SubscriptionsWrite)
+  unsyncBeachCourtBooking(
+    @Param("id") id: string,
+    @Body() body: { courtId: string; eventId: string | null },
+  ) {
+    return this.admin.syncBeachCourtBookingDeleted({ bookingId: id, courtId: body.courtId, eventId: body.eventId });
   }
 
   @ApiOperation({ summary: "List cleaning packages for admin forms" })
@@ -398,6 +494,14 @@ export class AdminController {
   @RequireAdminPermission(AdminPermission.BookingsWrite)
   syncAllCleaningBookingsCalendar() {
     return this.admin.syncAllCleaningBookingsCalendar();
+  }
+
+  @ApiOperation({ summary: "Reconcile the shared cleaning calendar (remove orphaned events, fix dates, sync pending)" })
+  @ApiResponse({ status: 201, description: "Reconcile summary: orphans deleted, mismatches re-synced, pending synced." })
+  @Post("cleaning/calendar/reconcile")
+  @RequireAdminPermission(AdminPermission.BookingsWrite)
+  reconcileCleaningCalendar() {
+    return this.admin.reconcileCleaningCalendar();
   }
 
   @ApiOperation({ summary: "Sync a booking to Google Calendar using data provided directly (no DB needed)" })

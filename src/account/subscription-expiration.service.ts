@@ -48,6 +48,10 @@ export class SubscriptionExpirationService {
     const stats: ProcessStats = { scanned: 0, due: 0, sent: 0, skipped: 0, failed: 0 };
     const todayStr = this.businessDateStr(new Date());
 
+    // Lifecycle sweep: flip any overdue food subscriptions to "expired" before
+    // sending reminders, so admin views + access checks stay correct.
+    await this.expireOverdueFoodSubscriptions(todayStr);
+
     let pending: PendingReminder[] = [];
     try {
       pending = [
@@ -98,9 +102,21 @@ export class SubscriptionExpirationService {
 
   // ─── Collectors ─────────────────────────────────────────────────────────────
 
+  /** Mark food subscriptions whose end_date has passed as expired. */
+  private async expireOverdueFoodSubscriptions(todayStr: string): Promise<void> {
+    try {
+      await this.supabaseRest(
+        `/food_subscriptions?status=eq.active&end_date=lt.${todayStr}`,
+        { method: "PATCH", body: JSON.stringify({ status: "expired", updated_at: new Date().toISOString() }) },
+      );
+    } catch (err) {
+      this.logger.warn(`Food expiry sweep failed: ${(err as Error).message}`);
+    }
+  }
+
   private async collectFoodReminders(todayStr: string): Promise<PendingReminder[]> {
     const subs = await this.supabaseRest<any[]>(
-      `/food_subscriptions?status=eq.active&select=id,user_id,meal_plan_id,started_at,commitment_weeks&limit=500`,
+      `/food_subscriptions?status=eq.active&select=id,user_id,meal_plan_id,started_at,end_date,commitment_weeks&limit=500`,
     );
     if (!subs?.length) return [];
 
@@ -111,10 +127,14 @@ export class SubscriptionExpirationService {
 
     const out: PendingReminder[] = [];
     for (const s of subs) {
-      if (!s.user_id || !s.started_at) continue;
-      const weeks = s.commitment_weeks || 1;
-      const expMs = Date.parse(`${s.started_at}T00:00:00Z`) + weeks * 7 * DAY_MS;
-      const expirationStr = new Date(expMs).toISOString().slice(0, 10);
+      if (!s.user_id) continue;
+      // Prefer the authoritative end_date; fall back to started_at + weeks*7.
+      let expirationStr: string | null = s.end_date ? String(s.end_date).slice(0, 10) : null;
+      if (!expirationStr) {
+        if (!s.started_at) continue;
+        const weeks = s.commitment_weeks || 1;
+        expirationStr = new Date(Date.parse(`${s.started_at}T00:00:00Z`) + weeks * 7 * DAY_MS).toISOString().slice(0, 10);
+      }
       const stage = this.stageFor(expirationStr, todayStr);
       if (!stage) continue;
       out.push({

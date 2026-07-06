@@ -21,6 +21,22 @@
     {
       "path": "/reminders/subscriptions/process",
       "schedule": "0 13 * * *"
+    },
+    {
+      "path": "/cron/sync-calendar",
+      "schedule": "0 7 * * *"
+    },
+    {
+      "path": "/cron/beach-courts/pull-google",
+      "schedule": "0 8 * * *"
+    },
+    {
+      "path": "/cron/dispatch-events",
+      "schedule": "30 6 * * *"
+    },
+    {
+      "path": "/cron/expire-holds",
+      "schedule": "45 6 * * *"
     }
   ]
 }
