@@ -50,6 +50,53 @@ export class AccountCleaningService {
     return this.calendarSync.syncBookingById(bookingId);
   }
 
+  /**
+   * Sync every booking of the user's own cleaning subscription to Google
+   * Calendar. Used right after checkout so the just-created recurring bookings
+   * land on the shared admin calendar without waiting for the daily cron.
+   * Best effort per row — individual failures are captured, never thrown.
+   */
+  async syncOwnSubscriptionBookings(userId: string, subscriptionId: string) {
+    const enc = encodeURIComponent;
+    const [subscription] = await this.supabaseRest<any[]>(
+      `/cleaning_subscriptions?id=eq.${enc(subscriptionId)}&select=id,user_id&limit=1`,
+    );
+    if (!subscription) throw new NotFoundException("Subscription not found.");
+    if (String(subscription.user_id) !== String(userId)) {
+      throw new ForbiddenException("Not your subscription.");
+    }
+
+    const bookings = await this.supabaseRest<any[]>(
+      `/cleaning_bookings?or=(subscription_id.eq.${enc(subscriptionId)},cleaning_subscription_id.eq.${enc(subscriptionId)})&select=id&order=created_at.desc&limit=200`,
+    );
+
+    if (!bookings?.length) {
+      return { ok: true, subscriptionId, total: 0, synced: 0, failed: 0, results: [] };
+    }
+
+    const results = await Promise.all(
+      bookings.map(async (b: any) => {
+        try {
+          const r = await this.calendarSync.syncBookingById(String(b.id));
+          return { bookingId: String(b.id), ok: (r as any)?.ok !== false };
+        } catch (e) {
+          this.logger.warn(`Sync failed for booking ${b.id}: ${(e as Error).message}`);
+          return { bookingId: String(b.id), ok: false, error: (e as Error).message };
+        }
+      }),
+    );
+
+    const synced = results.filter((r) => r.ok).length;
+    return {
+      ok: true,
+      subscriptionId,
+      total: results.length,
+      synced,
+      failed: results.length - synced,
+      results,
+    };
+  }
+
   async rescheduleBooking(userId: string, bookingId: string, newSlotId: string) {
     if (!newSlotId) throw new BadRequestException("Pick a new time slot.");
 

@@ -81,6 +81,16 @@ export class AccountController {
     return this.cleaning.syncOwnBooking(req.authUser!.id, id);
   }
 
+  @ApiOperation({
+    summary: "Sync all of the user's own cleaning-subscription bookings to Google Calendar",
+    description:
+      "Called right after checkout so recurring bookings land on the shared admin calendar without waiting for the daily cron.",
+  })
+  @Post("cleaning/subscriptions/:id/sync-bookings")
+  syncCleaningSubscriptionBookings(@Req() req: AccountRequest, @Param("id") id: string) {
+    return this.cleaning.syncOwnSubscriptionBookings(req.authUser!.id, id);
+  }
+
   // ── Notifications ──────────────────────────────────────────────────────────
 
   @ApiOperation({ summary: "Get user notifications" })

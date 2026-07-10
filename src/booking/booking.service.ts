@@ -41,8 +41,22 @@ export class BookingService {
     }
     const type = await this.resources.getType(resource.type);
     const bookingModel = type?.booking_model ?? "time_slot";
-    const schedule = normalizeSchedule(await this.loadBookingSettings(resource.provider_id));
-    const slots = generateSlots(bookingModel, schedule, dateISO, resource.capacity ?? undefined);
+    const schedule = normalizeSchedule(
+      await this.loadEffectiveBookingSettings(resource.provider_id, resource),
+    );
+    const raw = generateSlots(bookingModel, schedule, dateISO, resource.capacity ?? undefined);
+    // Enforce temporal cutoffs — silently dropped before, now applied server-side
+    // so `minNoticeHours` and `maxAdvanceDays` from the provider config actually
+    // gate what buyers see and hold. Kept alongside slot generation so callers
+    // that read availability get a single, already-filtered list.
+    const nowMs = Date.now();
+    const noticeCutoffMs = nowMs + schedule.minNoticeHours * 3600_000;
+    const advanceCutoffMs = nowMs + schedule.maxAdvanceDays * 86400_000;
+    const slots = raw.filter((s) => {
+      const startMs = new Date(`${dateISO}T${s.from}:00`).getTime();
+      if (Number.isNaN(startMs)) return true;
+      return startMs >= noticeCutoffMs && startMs <= advanceCutoffMs;
+    });
     return { resourceId, date: dateISO, bookingModel, slots };
   }
 
@@ -211,6 +225,28 @@ export class BookingService {
       `providers?select=booking_settings&id=eq.${encodeURIComponent(providerId)}&limit=1`,
     );
     return rows?.[0]?.booking_settings ?? null;
+  }
+
+  /**
+   * Effective booking calendar for a resource — mirrors the frontend
+   * `resolvePlanBookingSettings` precedence: resource-level override wins,
+   * then provider default. Currently we only look up per-resource overrides
+   * for beach courts (`beach_club_courts.booking_settings`); other services'
+   * plan-level overrides live at the plan (subscription) layer, not the
+   * resource layer.
+   */
+  private async loadEffectiveBookingSettings(
+    providerId: string | null,
+    resource: { source_service_key?: string | null; source_resource_id?: string | null },
+  ): Promise<unknown> {
+    if (resource?.source_service_key === "beach" && resource.source_resource_id) {
+      const rows = await this.rest<Array<{ booking_settings: unknown }>>(
+        `beach_club_courts?select=booking_settings&id=eq.${encodeURIComponent(resource.source_resource_id)}&limit=1`,
+      );
+      const override = rows?.[0]?.booking_settings;
+      if (override) return override;
+    }
+    return this.loadBookingSettings(providerId);
   }
 
   private async rest<T>(path: string): Promise<T | null> {

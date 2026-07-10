@@ -26,4 +26,8 @@ export interface ResourceRow {
   hours: unknown;
   metadata: Record<string, unknown> | null;
   status: string | null;
+  /** Bridge to the legacy per-service table (e.g. "beach", "cars"). */
+  source_service_key?: string | null;
+  /** Legacy record id in the source table (beach_club_courts.id, rental_vehicles.id …). */
+  source_resource_id?: string | null;
 }

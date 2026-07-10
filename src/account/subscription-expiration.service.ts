@@ -48,9 +48,13 @@ export class SubscriptionExpirationService {
     const stats: ProcessStats = { scanned: 0, due: 0, sent: 0, skipped: 0, failed: 0 };
     const todayStr = this.businessDateStr(new Date());
 
-    // Lifecycle sweep: flip any overdue food subscriptions to "expired" before
+    // Lifecycle sweep: flip any overdue subscriptions to "expired" before
     // sending reminders, so admin views + access checks stay correct.
+    // Front-end reads also derive expired-vs-active from end_date on the fly,
+    // so this sweep is defense-in-depth (keeps DB truth, not the only guard).
     await this.expireOverdueFoodSubscriptions(todayStr);
+    await this.expireOverdueCleaningSubscriptions(todayStr);
+    await this.expireOverdueBeachSubscriptions(todayStr);
 
     let pending: PendingReminder[] = [];
     try {
@@ -111,6 +115,35 @@ export class SubscriptionExpirationService {
       );
     } catch (err) {
       this.logger.warn(`Food expiry sweep failed: ${(err as Error).message}`);
+    }
+  }
+
+  /** Mark cleaning subscriptions whose service_end_date has passed as expired. */
+  private async expireOverdueCleaningSubscriptions(todayStr: string): Promise<void> {
+    try {
+      await this.supabaseRest(
+        `/cleaning_subscriptions?subscription_status=eq.active&service_end_date=lt.${todayStr}`,
+        { method: "PATCH", body: JSON.stringify({ subscription_status: "expired", is_active: false, updated_at: new Date().toISOString() }) },
+      );
+      // Fall back to end_date for rows that never populated service_end_date.
+      await this.supabaseRest(
+        `/cleaning_subscriptions?subscription_status=eq.active&service_end_date=is.null&end_date=lt.${todayStr}`,
+        { method: "PATCH", body: JSON.stringify({ subscription_status: "expired", is_active: false, updated_at: new Date().toISOString() }) },
+      );
+    } catch (err) {
+      this.logger.warn(`Cleaning expiry sweep failed: ${(err as Error).message}`);
+    }
+  }
+
+  /** Mark beach-club subscriptions whose end_date has passed as expired. */
+  private async expireOverdueBeachSubscriptions(todayStr: string): Promise<void> {
+    try {
+      await this.supabaseRest(
+        `/beach_club_subscriptions?status=eq.active&end_date=lt.${todayStr}`,
+        { method: "PATCH", body: JSON.stringify({ status: "expired", updated_at: new Date().toISOString() }) },
+      );
+    } catch (err) {
+      this.logger.warn(`Beach expiry sweep failed: ${(err as Error).message}`);
     }
   }
 

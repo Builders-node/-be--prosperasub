@@ -2,7 +2,10 @@ import { Injectable, ServiceUnavailableException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 
 const SIMPLEFI_API = "https://api.simplefi.tech";
-const MERCHANT_ID = "6a2b674f53d0c31cce8c7557";
+// Fallback used only when SIMPLEFI_MERCHANT_ID is missing — the ID that
+// SimpleFi routes funds to must match the wallet you want credited. If yours
+// doesn't match this constant, override via env var. See merchantId() below.
+const MERCHANT_ID_FALLBACK = "6a2b674f53d0c31cce8c7557";
 
 type CreateInvoiceInput = {
   amountCents: number;
@@ -20,7 +23,7 @@ export class SimpleFiService {
     const payload = {
       amount: input.amountCents / 100,
       currency: "USD",
-      merchant_id: MERCHANT_ID,
+      merchant_id: this.merchantId(),
       reference: {
         description: input.description,
         ...(input.reference || {}),
@@ -81,7 +84,7 @@ export class SimpleFiService {
       amount: input.amount,
       currency: input.currency || "USD",
       card_payment: input.cardPayment ?? false,
-      merchant_id: MERCHANT_ID,
+      merchant_id: this.merchantId(),
       reference: {
         ...(input.description ? { description: input.description } : {}),
         ...(input.reference || {}),
@@ -150,5 +153,18 @@ export class SimpleFiService {
 
   private get apiToken() {
     return this.config.get<string>("SIMPLEFI_API_TOKEN") || "";
+  }
+
+  /** SimpleFi merchant id — determines which wallet receives funds. Set
+   *  `SIMPLEFI_MERCHANT_ID` in env to override the platform default. */
+  private merchantId(): string {
+    const fromEnv = this.config.get<string>("SIMPLEFI_MERCHANT_ID");
+    if (fromEnv && fromEnv.trim()) return fromEnv.trim();
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[SimpleFi] SIMPLEFI_MERCHANT_ID is not set. Falling back to hardcoded ID (${MERCHANT_ID_FALLBACK}). ` +
+      `Funds will route to whichever wallet owns that merchant. Set SIMPLEFI_MERCHANT_ID in env to your own.`,
+    );
+    return MERCHANT_ID_FALLBACK;
   }
 }

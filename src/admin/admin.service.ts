@@ -6,6 +6,7 @@ import { CleaningCalendarSyncService } from "../google-calendar/cleaning-calenda
 import { BeachCourtCalendarSyncService } from "../google-calendar/beach-court-calendar-sync.service";
 import { BlinkService } from "../payments/blink.service";
 import { SimpleFiService } from "../payments/simplefi.service";
+import { PayPalService } from "../payments/paypal.service";
 import { MailService } from "../mail/mail.service";
 import { BillingService } from "../billing/billing.service";
 import type { PaymentMethod } from "../billing/payment-provider.port";
@@ -86,6 +87,7 @@ export class AdminService {
     @Optional() private readonly beachCourtCalendarSync?: BeachCourtCalendarSyncService,
     @Optional() private readonly simplefi?: SimpleFiService,
     @Optional() private readonly billing?: BillingService,
+    @Optional() private readonly paypal?: PayPalService,
   ) {}
 
   /** Map a stored legacy payment_method to a Billing PaymentMethod (null = unsupported). */
@@ -700,13 +702,21 @@ export class AdminService {
     const offset = page * limit;
     const q      = String(params.q ?? "").trim();
 
+    // Honduras business date — the expire-sweep cron flips subscription_status
+    // once end_date has passed but that lag can be up to 24h. Derive the
+    // effective state at query time so admins never see a "still active" row
+    // whose end_date has actually passed.
+    const HN_TODAY = `(now() AT TIME ZONE 'America/Tegucigalpa')::date`;
+    const EXPIRY_COL = `COALESCE(cs.service_end_date, cs.end_date, cs.paid_until)`;
+    const IS_PAST_EXPIRY = `${EXPIRY_COL} IS NOT NULL AND ${EXPIRY_COL} < ${HN_TODAY}`;
+
     const STATUS_WHERE: Record<string, string> = {
       all:       ``,
-      active:    `AND cs.payment_status = 'paid' AND (cs.subscription_status = 'active' OR (cs.is_active AND (cs.subscription_status IS NULL OR cs.subscription_status NOT IN ('paused','cancelled','expired'))))`,
+      active:    `AND cs.payment_status = 'paid' AND NOT (${IS_PAST_EXPIRY}) AND (cs.subscription_status = 'active' OR (cs.is_active AND (cs.subscription_status IS NULL OR cs.subscription_status NOT IN ('paused','cancelled','expired'))))`,
       pending:   `AND cs.payment_status <> 'paid' AND (cs.subscription_status IS NULL OR cs.subscription_status NOT IN ('cancelled','expired'))`,
       paused:    `AND cs.subscription_status = 'paused'`,
       cancelled: `AND cs.subscription_status = 'cancelled'`,
-      expired:   `AND cs.subscription_status = 'expired'`,
+      expired:   `AND (cs.subscription_status = 'expired' OR (cs.subscription_status = 'active' AND ${IS_PAST_EXPIRY}))`,
     };
     const whereStatus = STATUS_WHERE[String(params.status ?? "all")] ?? "";
 
@@ -714,7 +724,11 @@ export class AdminService {
       user:   `COALESCE(u.display_name, u.name, cc.company_name, u.email)`,
       price:  `COALESCE(cs.monthly_price_cents, cs.total_price_cents, 0)`,
       period: `COALESCE(cs.service_start_date, cs.start_date)`,
-      status: `CASE WHEN cs.payment_status <> 'paid' AND (cs.subscription_status IS NULL OR cs.subscription_status NOT IN ('cancelled','expired')) THEN 'pending' ELSE COALESCE(cs.subscription_status, CASE WHEN cs.is_active THEN 'active' ELSE 'inactive' END) END`,
+      status: `CASE
+        WHEN cs.payment_status <> 'paid' AND (cs.subscription_status IS NULL OR cs.subscription_status NOT IN ('cancelled','expired')) THEN 'pending'
+        WHEN cs.subscription_status = 'active' AND ${IS_PAST_EXPIRY} THEN 'expired'
+        ELSE COALESCE(cs.subscription_status, CASE WHEN cs.is_active THEN 'active' ELSE 'inactive' END)
+      END`,
     };
     const orderCol = SORT_COL[String(params.sortBy ?? "user")] ?? SORT_COL.user;
     const orderDir = String(params.sortDir ?? "asc").toLowerCase() === "desc" ? "DESC" : "ASC";
@@ -752,11 +766,11 @@ export class AdminService {
     const statsSql = `
       SELECT
         COUNT(*)::int AS total,
-        COUNT(*) FILTER (WHERE cs.payment_status = 'paid' AND (cs.subscription_status = 'active' OR (cs.is_active AND (cs.subscription_status IS NULL OR cs.subscription_status NOT IN ('paused','cancelled','expired')))))::int AS active,
+        COUNT(*) FILTER (WHERE cs.payment_status = 'paid' AND NOT (${IS_PAST_EXPIRY}) AND (cs.subscription_status = 'active' OR (cs.is_active AND (cs.subscription_status IS NULL OR cs.subscription_status NOT IN ('paused','cancelled','expired')))))::int AS active,
         COUNT(*) FILTER (WHERE cs.payment_status <> 'paid' AND (cs.subscription_status IS NULL OR cs.subscription_status NOT IN ('cancelled','expired')))::int AS pending,
         COUNT(*) FILTER (WHERE cs.subscription_status = 'paused')::int    AS paused,
         COUNT(*) FILTER (WHERE cs.subscription_status = 'cancelled')::int AS cancelled,
-        COUNT(*) FILTER (WHERE cs.subscription_status = 'expired')::int   AS expired
+        COUNT(*) FILTER (WHERE cs.subscription_status = 'expired' OR (cs.subscription_status = 'active' AND ${IS_PAST_EXPIRY}))::int   AS expired
       FROM public.cleaning_subscriptions cs
       WHERE cs.deleted_at IS NULL
     `;
@@ -1374,6 +1388,12 @@ export class AdminService {
         const s = await this.simplefi.getPaymentStatus(ref);
         return s.status === "paid";
       }
+      if (method === "paypal" && this.paypal) {
+        // captureOrder is idempotent — an already-captured order resolves paid,
+        // so a stray browser death after checkout still lands here.
+        const s = await this.paypal.captureOrder(ref).catch(() => null);
+        return !!s?.paid;
+      }
       return false;
     };
 
@@ -1419,7 +1439,7 @@ export class AdminService {
           if (billingMethod && this.billing) {
             await this.billing.recordCaptured({
               method: billingMethod,
-              provider: billingMethod === "lives" ? "simplefi" : "blink",
+              provider: billingMethod === "lives" ? "simplefi" : billingMethod === "paypal" ? "paypal" : "blink",
               providerRef: String(sub.payment_reference),
               amountCents: this.subAmountCents(scope.table, sub),
               subjectRef: `subscription:${sub.id}`,

@@ -33,9 +33,13 @@ const PAYMENT_METHODS = [
 ] as const;
 
 export class AdminSubscriptionFieldsDto {
-  @IsOptional() @IsUUID() user_id?: string;
-  @IsOptional() @IsUUID() client_id?: string;
-  @IsOptional() @IsUUID() package_id?: string;
+  // Legacy id columns on cleaning_/food_/beach_ subscription tables are `text`
+  // (see CLAUDE.md) — they may hold either a UUID or a legacy slug ("pkg-standard",
+  // Google-sub strings, etc). Validate as bounded strings, not strict UUIDs,
+  // so admin edits on legacy rows don't fail the pipe.
+  @IsOptional() @IsString() @MaxLength(120) user_id?: string;
+  @IsOptional() @IsString() @MaxLength(120) client_id?: string;
+  @IsOptional() @IsString() @MaxLength(120) package_id?: string;
 
   @IsOptional() @IsDateString() start_date?: string;
   @IsOptional() @IsDateString() end_date?: string;
@@ -98,4 +102,7 @@ export class CreateSubscriptionWithReservationsDto extends AdminSubscriptionFiel
   @IsOptional() @IsBoolean() one_time?: boolean;
   @IsOptional() @ValidateNested() @Type(() => ReservationsDto)
   reservations?: ReservationsDto;
+  // Internal flag: when set, skip creating a new subscription row and attach
+  // the reservations to this existing subscription id instead.
+  @IsOptional() @IsUUID() _existing_subscription_id?: string;
 }

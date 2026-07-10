@@ -10,14 +10,16 @@ import { AccountPasswordService } from "./account-password.service";
 import { AccountPreferencesService } from "./account-preferences.service";
 import { AccountPaymentService } from "./account-payment.service";
 import { AccountCleaningService } from "./account-cleaning.service";
+import { AccountRenewalsService } from "./account-renewals.service";
 import { AccountController } from "./account.controller";
+import { AccountRenewalsController } from "./account-renewals.controller";
 import { CleaningReminderService } from "./cleaning-reminder.service";
 import { SubscriptionExpirationService } from "./subscription-expiration.service";
 import { RemindersController } from "./reminders.controller";
 
 @Module({
   imports: [PrismaModule, AuthModule, MailModule, PaymentsModule, GoogleCalendarModule],
-  controllers: [AccountController, RemindersController],
+  controllers: [AccountController, AccountRenewalsController, RemindersController],
   providers: [
     AccountAuthGuard,
     AccountNotificationsService,
@@ -25,6 +27,7 @@ import { RemindersController } from "./reminders.controller";
     AccountPreferencesService,
     AccountPaymentService,
     AccountCleaningService,
+    AccountRenewalsService,
     CleaningReminderService,
     SubscriptionExpirationService,
   ],

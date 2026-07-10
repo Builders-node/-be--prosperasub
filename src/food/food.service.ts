@@ -1,5 +1,9 @@
-import { ForbiddenException, Injectable, Logger, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+import {
+  RenewalPaymentMethod,
+  SubscriptionRenewalService,
+} from "../payments/subscription-renewal.service";
 
 const TZ = "America/Tegucigalpa";
 const DAY_MS = 86_400_000;
@@ -34,7 +38,10 @@ interface FoodSubRow {
 export class FoodService {
   private readonly logger = new Logger(FoodService.name);
 
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    private readonly renewals: SubscriptionRenewalService,
+  ) {}
 
   // ─── Date helpers (date-only, Honduras local) ────────────────────────────────
 
@@ -63,12 +70,19 @@ export class FoodService {
     return Math.max(Number(sub.commitment_weeks ?? 1) || 1, 1);
   }
 
-  /** Authoritative period end: stored end_date, else started_at(+created_at) + weeks*7. */
+  /**
+   * Authoritative period end: stored end_date, else derived from started_at.
+   *
+   * Inclusive semantics: "1 week" = 7 days of access counting the start_date.
+   * Formula: end = start + (weeks*7) - 1. So buying Mon for 1 week gives access
+   * Mon–Sun; the next Monday is expired. This matches user expectation of "7
+   * days" and gives the renewal a clean handoff (next_start = end + 1).
+   */
   private endDateOf(sub: FoodSubRow): string {
     const stored = this.toDateStr(sub.end_date);
     if (stored) return stored;
     const start = this.toDateStr(sub.started_at) || this.toDateStr(sub.created_at) || this.today();
-    return this.addDays(start, this.weeksOf(sub) * 7);
+    return this.addDays(start, this.weeksOf(sub) * 7 - 1);
   }
 
   /**
@@ -165,32 +179,100 @@ export class FoodService {
    * Renew: continuous period with no gap/overlap.
    *   next_start = max(today, previous_end + 1)
    *   end_date   = next_start + plan_duration
+   *
+   * Now hardened:
+   *   - Requires payment_method + payment_reference; verifies with the actual
+   *     provider (Blink / SimpleFi / PayPal) so a stolen JWT can't extend a
+   *     subscription for free.
+   *   - Requires idempotency_key; retries within the same key return the same
+   *     result without double-extending or double-billing.
+   *   - Emits a `subscription_renewals` audit row for every renewal so we can
+   *     answer "who / when / how much / paid with what".
    */
-  async renewSubscription(userId: string, subId: string) {
+  async renewSubscription(
+    userId: string,
+    subId: string,
+    payload: {
+      payment_method: RenewalPaymentMethod;
+      payment_reference: string;
+      amount_cents: number;
+      idempotency_key: string;
+    },
+  ) {
     const sub = await this.fetchOwnedSub(userId, subId);
     if (String(sub.status).toLowerCase() === "cancelled") {
       throw new ForbiddenException("Cancelled subscriptions cannot be renewed.");
     }
 
-    const today = this.today();
-    const prevEndPlus1 = this.addDays(this.endDateOf(sub), 1);
-    const nextStart = this.dayDiff(today, prevEndPlus1) > 0 ? prevEndPlus1 : today;
-    const newEnd = this.addDays(nextStart, this.weeksOf(sub) * 7);
+    if (!payload?.idempotency_key) {
+      throw new BadRequestException("idempotency_key is required");
+    }
+    if (!payload?.amount_cents || payload.amount_cents < 0) {
+      throw new BadRequestException("amount_cents must be a non-negative integer");
+    }
 
+    // 1) Verify the payment before we touch the subscription. Throws 403 on a
+    //    reference the provider doesn't confirm as paid.
+    await this.renewals.verifyPayment({
+      method: payload.payment_method,
+      reference: payload.payment_reference,
+      amountCents: payload.amount_cents,
+    });
+
+    const previousEnd = this.endDateOf(sub);
+    const today = this.today();
+    const prevEndPlus1 = this.addDays(previousEnd, 1);
+    const nextStart = this.dayDiff(today, prevEndPlus1) > 0 ? prevEndPlus1 : today;
+    // Inclusive period end (see endDateOf comment): -1 so N weeks = N*7 days.
+    const newEnd = this.addDays(nextStart, this.weeksOf(sub) * 7 - 1);
+
+    // 2) Idempotency guard. If this exact idempotency_key already renewed this
+    //    subscription, `existing` returns the original audit row and we short-
+    //    circuit — no double-extension.
+    const record = await this.renewals.recordRenewal({
+      service: "food",
+      subscriptionId: subId,
+      previousEnd,
+      newStart: nextStart,
+      newEnd,
+      amountCents: payload.amount_cents,
+      method: payload.payment_method,
+      reference: payload.payment_reference,
+      idempotencyKey: payload.idempotency_key,
+      userId,
+    });
+
+    if (record.status === "existing") {
+      return {
+        ok: true,
+        idempotent: true,
+        started_at: record.row.new_start,
+        end_date: record.row.new_end,
+        status: "active" as const,
+      };
+    }
+
+    // 3) Extend the subscription now that the audit trail exists.
     await this.patch(`food_subscriptions?id=eq.${subId}`, {
       started_at: nextStart,
       end_date: newEnd,
       status: "active",
-      // Renew is only reached after a successful checkout payment, so the new
-      // period is paid — and count it toward total revenue.
       payment_status: "paid",
+      payment_method: payload.payment_method,
+      payment_reference: payload.payment_reference,
       periods_paid: (Number(sub.periods_paid) || 1) + 1,
       paused_at: null,
       cancelled_at: null,
       updated_at: new Date().toISOString(),
     });
 
-    return { ok: true, started_at: nextStart, end_date: newEnd, status: "active" };
+    return {
+      ok: true,
+      idempotent: false,
+      started_at: nextStart,
+      end_date: newEnd,
+      status: "active" as const,
+    };
   }
 
   private reasonFor(status: FoodEffectiveStatus, daysLeft: number): string {
