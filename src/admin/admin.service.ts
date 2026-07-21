@@ -109,6 +109,7 @@ export class AdminService {
       const weeks = (Number(sub.commitment_weeks) || 1) * (Number(sub.periods_paid) || 1);
       return weekly ? weekly * weeks : null;
     }
+    if (table === "rental_bookings") return Number(sub.total_cents) || null;
     return null;
   }
 
@@ -1376,6 +1377,11 @@ export class AdminService {
       { table: "cleaning_subscriptions", statusCol: "subscription_status", extraFilters: "&deleted_at=is.null" },
       { table: "food_subscriptions",     statusCol: "status",              extraFilters: "" },
       { table: "beach_club_subscriptions", statusCol: "status",            extraFilters: "" },
+      // Cars use booking model (rental_bookings), soft-deleted. Same reconcile
+      // path — earlier the row was missing so on-chain / Infinita / PayPal car
+      // payments never auto-flipped to paid, leaving revenue math wrong and
+      // customers stuck on "Awaiting payment".
+      { table: "rental_bookings",        statusCol: "status",              extraFilters: "&deleted_at=is.null" },
     ] as const;
 
     const checkPaid = async (sub: Record<string, any>): Promise<boolean> => {
@@ -1423,6 +1429,9 @@ export class AdminService {
           if (scope.table === "cleaning_subscriptions") {
             patch.subscription_status = "active";
             patch.is_active = true;
+          } else if (scope.table === "rental_bookings") {
+            // Cars use booking verbs — "confirmed" = the rental will happen.
+            patch.status = "confirmed";
           } else {
             patch.status = "active";
           }
