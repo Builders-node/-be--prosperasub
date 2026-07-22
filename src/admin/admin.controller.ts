@@ -71,6 +71,17 @@ export class AdminController {
     return this.admin.updateUser(id, body, request.adminUser!.id);
   }
 
+  @ApiOperation({ summary: "Upsert a user's profile row (address / whatsapp / prefs) — service-role bypass of RLS" })
+  @Patch("users/:id/profile")
+  @RequireAdminPermission(AdminPermission.UsersWrite)
+  updateUserProfile(
+    @Param("id") id: string,
+    @Body() body: Record<string, unknown>,
+    @Req() request: AdminRequest,
+  ) {
+    return this.admin.updateUserProfile(id, body ?? {}, request.adminUser!.id);
+  }
+
   @ApiOperation({ summary: "Block or unblock a platform user" })
   @Patch("users/:id/block")
   @RequireAdminPermission(AdminPermission.UsersWrite)

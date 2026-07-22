@@ -651,6 +651,66 @@ export class AdminService {
     return { ok: true };
   }
 
+  /**
+   * Upsert a user's `user_profiles` row on behalf of an admin. Admin editing
+   * another user's profile can't go through `supabaseDb` (anon key) because
+   * user_profiles' RLS restricts writes to the row's owner — the write silently
+   * fails, no data lands. This endpoint runs with the service-role REST client
+   * (or Prisma raw fallback) so RLS is bypassed and audit is recorded.
+   */
+  async updateUserProfile(
+    userId: string,
+    input: Record<string, unknown>,
+    actorUserId: string,
+  ) {
+    // Whitelist writable columns so callers can't smuggle in arbitrary fields.
+    const ALLOWED = new Set([
+      "address_street", "address_house", "address_apartment",
+      "address_area", "address_notes", "default_delivery_address",
+      "whatsapp", "food_preferences",
+    ]);
+    const patch: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(input || {})) {
+      if (ALLOWED.has(k)) patch[k] = v;
+    }
+    if (!Object.keys(patch).length) return { ok: true, changed: 0 };
+
+    const upsertBody = JSON.stringify({
+      user_id: userId,
+      ...patch,
+      updated_at: new Date().toISOString(),
+    });
+
+    // PostgREST upsert via Prefer: resolution=merge-duplicates on the unique
+    // (user_id) constraint. Falls back to Prisma raw when REST is unavailable.
+    try {
+      await this.supabaseRest("/user_profiles", {
+        method: "POST",
+        body: upsertBody,
+        headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+      });
+    } catch (err) {
+      if (this.prisma.isAvailable()) {
+        const cols = Object.keys(patch);
+        const vals = cols.map((c) => patch[c]);
+        const insertCols = ["user_id", ...cols].join(", ");
+        const insertVals = ["$1", ...cols.map((_, i) => `$${i + 2}`)].join(", ");
+        const setClause = cols.map((c, i) => `${c} = $${i + 2}`).join(", ");
+        await this.prisma.$executeRawUnsafe(
+          `INSERT INTO public.user_profiles (${insertCols})
+           VALUES (${insertVals})
+           ON CONFLICT (user_id) DO UPDATE SET ${setClause}, updated_at = now()`,
+          userId, ...vals,
+        );
+      } else {
+        this.logger.error(`updateUserProfile failed: ${(err as Error).message}`);
+        throw err;
+      }
+    }
+    await this.auditAdminEvent(actorUserId, "edit", "user", userId, { profile: patch });
+    return { ok: true };
+  }
+
   async setUserBlocked(userId: string, block: boolean, actorUserId: string) {
     const bannedUntil = block ? "2099-12-31T23:59:59Z" : null;
     if (this.shouldUseFallback()) {
