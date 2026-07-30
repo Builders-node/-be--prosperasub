@@ -18,6 +18,7 @@ import { BookingModule } from "./booking/booking.module";
 import { OrderModule } from "./order/order.module";
 import { AnalyticsModule } from "./analytics/analytics.module";
 import { NotificationEventsModule } from "./notification/notification-events.module";
+import { IntegrationsModule } from "./integrations/integrations.module";
 
 @Module({
   imports: [
@@ -42,6 +43,7 @@ import { NotificationEventsModule } from "./notification/notification-events.mod
     AccountModule,
     VerifyModule,
     FoodModule,
+    IntegrationsModule,
   ],
   controllers: [HealthController]
 })
