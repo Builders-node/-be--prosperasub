@@ -4,6 +4,10 @@ import { BuildersNodeGuard } from "./builders-node.guard";
 import { ProvisionSubscriptionDto, type ProvisionSubscriptionResponse } from "./dto/provision-subscription.dto";
 import { AccessQrRequestDto, type AccessQrResponse } from "./dto/access-qr.dto";
 import { BookingsRequestDto, type BookingsResponse } from "./dto/bookings.dto";
+import {
+  CreateCleaningBookingDto,
+  type CreateCleaningBookingResponse,
+} from "./dto/create-cleaning-booking.dto";
 
 /**
  * Partner integration surface — narrow by design.
@@ -51,5 +55,16 @@ export class IntegrationsController {
   @UsePipes(new ValidationPipe({ whitelist: true, transform: true, forbidNonWhitelisted: true }))
   listBookings(@Body() body: BookingsRequestDto): Promise<BookingsResponse> {
     return this.integrations.listBookings(body);
+  }
+
+  /**
+   * Book one cleaning visit for a user with an active paid subscription.
+   * Called by Builders Node's UI after their customer picks date + time.
+   */
+  @Post("cleaning-booking")
+  @HttpCode(200)
+  @UsePipes(new ValidationPipe({ whitelist: true, transform: true, forbidNonWhitelisted: true }))
+  createCleaningBooking(@Body() body: CreateCleaningBookingDto): Promise<CreateCleaningBookingResponse> {
+    return this.integrations.createCleaningBooking(body);
   }
 }

@@ -16,6 +16,10 @@ import type {
   IntegrationBooking,
   IntegrationServiceKey,
 } from "./dto/bookings.dto";
+import type {
+  CreateCleaningBookingDto,
+  CreateCleaningBookingResponse,
+} from "./dto/create-cleaning-booking.dto";
 
 /**
  * Builders Node → ProsperaSub subscription mirror.
@@ -220,6 +224,139 @@ export class IntegrationsService {
       .sort((a, b) => a.start_at.localeCompare(b.start_at));
 
     return { user_id: userId, from, to, bookings };
+  }
+
+  /**
+   * Book one cleaning visit for a user with an active paid subscription.
+   * Called by Builders Node's UI after their customer picks date + time.
+   *
+   * Contract:
+   *  - User must have at least one paid+active cleaning subscription. If
+   *    they have several, `subscription_id` picks one; otherwise we take
+   *    the first one (ordered by most recent).
+   *  - `date` must be today HN or later (no back-dating from partners).
+   *  - The visit slot is created on-demand if none exists at the exact
+   *    date/start/end combo — same `ensureCleaningSlot` behaviour as our
+   *    admin `NewCleaningBookingDialog`.
+   *  - Bumps `cleaning_available_slots.current_bookings` so the slot's
+   *    capacity accounting stays honest (a hand-added booking counts).
+   *  - Google Calendar sync is marked `pending`; the daily calendar cron
+   *    (or an admin's manual Sync) picks it up.
+   */
+  async createCleaningBooking(body: CreateCleaningBookingDto): Promise<CreateCleaningBookingResponse> {
+    if (!body.email && !body.user_id) {
+      throw new BadRequestException("Provide `email` or `user_id`");
+    }
+
+    const rest = this.restBase();
+    if (!rest) {
+      throw new ServiceUnavailableException("Supabase is not configured on the server");
+    }
+
+    // 1. Resolve user
+    let userId = body.user_id ?? null;
+    if (!userId) {
+      const email = (body.email as string).trim().toLowerCase();
+      const rows = await this.rest<Array<{ id: string }>>(
+        `users?select=id&email=eq.${encodeURIComponent(email)}&limit=1`,
+      );
+      userId = rows?.[0]?.id ?? null;
+      if (!userId) throw new NotFoundException(`No ProsperaSub user for email ${email}`);
+    }
+
+    // 2. Find an eligible subscription — paid + active/pending_schedule.
+    //    Rejecting free bookings is the whole point of this filter: without
+    //    it, anyone with a valid partner token could book cleanings for a
+    //    user who hasn't paid.
+    let subQuery = `cleaning_subscriptions?select=id,user_id,package_id,payment_status,subscription_status,apartment_note` +
+      `&user_id=eq.${userId}&payment_status=eq.paid` +
+      `&subscription_status=in.(active,pending_schedule)` +
+      `&order=created_at.desc`;
+    if (body.subscription_id) {
+      subQuery += `&id=eq.${body.subscription_id}`;
+    }
+    const subs = await this.rest<Array<{
+      id: string; user_id: string; package_id: string | null;
+      apartment_note: string | null;
+    }>>(subQuery);
+    const sub = (subs ?? [])[0];
+    if (!sub) {
+      throw new BadRequestException(
+        body.subscription_id
+          ? `No paid+active cleaning subscription matches subscription_id ${body.subscription_id}`
+          : "User has no paid+active cleaning subscription",
+      );
+    }
+
+    // 3. Validate the date is today or later (HN).
+    if (body.date < this.todayHN()) {
+      throw new BadRequestException("`date` must be today or in the future");
+    }
+
+    // 4. ensureCleaningSlot: look up by exact date + start + end, seed if missing.
+    const start = `${body.start_time}:00`;
+    const end = `${body.end_time || body.start_time}:00`;
+    const existing = await this.rest<Array<{
+      id: string; current_bookings: number | null; max_bookings: number | null; is_active: boolean;
+    }>>(
+      `cleaning_available_slots?select=id,current_bookings,max_bookings,is_active` +
+        `&date=eq.${body.date}&start_time=eq.${start}&end_time=eq.${end}&limit=1`,
+    );
+    let slot = existing?.[0] ?? null;
+    if (!slot) {
+      const seededRows = await this.insertReturning<{
+        id: string; current_bookings: number | null; max_bookings: number | null; is_active: boolean;
+      }>("cleaning_available_slots", {
+        // Match the id shape used elsewhere in the admin flow so cross-team
+        // debugging tools can eyeball it (`slot-YYYY-MM-DD-HHMM`).
+        id: `slot-${body.date}-${body.start_time.replace(":", "")}`,
+        date: body.date,
+        start_time: start,
+        end_time: end,
+        max_bookings: 3,
+        current_bookings: 0,
+        is_active: true,
+      });
+      slot = seededRows[0];
+    }
+    if (!slot.is_active) {
+      throw new BadRequestException("That slot is not accepting bookings");
+    }
+    if ((slot.current_bookings ?? 0) >= (slot.max_bookings ?? 0)) {
+      throw new BadRequestException("That slot is full — pick another time");
+    }
+
+    // 5. Insert the booking, then bump the slot's counter.
+    const bookingRows = await this.insertReturning<{ id: string }>("cleaning_bookings", {
+      user_id: userId,
+      subscription_id: sub.id,
+      cleaning_subscription_id: sub.id,
+      slot_id: slot.id,
+      status: "booked",
+      reservation_type: "booking_reserved",
+      source: "builders_node",
+      notes: (body.notes?.trim() || sub.apartment_note || null),
+      google_calendar_sync_status: "pending",
+    });
+    const bookingId = bookingRows[0]?.id;
+    if (!bookingId) throw new Error("cleaning_bookings insert returned no id");
+
+    // 6. Bump slot capacity (single PATCH — no need to re-select before the +1
+    //    since we just fetched current_bookings and no other writer holds it).
+    await this.patch(`cleaning_available_slots?id=eq.${encodeURIComponent(slot.id)}`, {
+      current_bookings: (slot.current_bookings ?? 0) + 1,
+      updated_at: new Date().toISOString(),
+    });
+
+    return {
+      booking_id: bookingId,
+      subscription_id: sub.id,
+      slot_id: slot.id,
+      date: body.date,
+      start_time: body.start_time,
+      end_time: body.end_time || body.start_time,
+      status: "booked",
+    };
   }
 
   // ─── Per-service aggregators ───────────────────────────────────────────────
@@ -638,6 +775,25 @@ export class IntegrationsService {
       throw new Error(`${table} insert failed (${res.status}): ${text || "no body"}`);
     }
     return (await res.json()) as T[];
+  }
+
+  private async patch(path: string, body: Record<string, unknown>): Promise<void> {
+    const cfg = this.restBase();
+    if (!cfg) throw new Error("Supabase is not configured");
+    const res = await fetch(`${cfg.base}/rest/v1/${path}`, {
+      method: "PATCH",
+      headers: {
+        apikey: cfg.key,
+        Authorization: `Bearer ${cfg.key}`,
+        "Content-Type": "application/json",
+        Prefer: "return=minimal",
+      },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`PATCH ${path} failed (${res.status}): ${text || "no body"}`);
+    }
   }
 
   private async rpc<T>(name: string, args: Record<string, unknown>): Promise<T | null> {
