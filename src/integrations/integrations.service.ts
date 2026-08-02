@@ -1,12 +1,21 @@
-import { BadRequestException, Injectable, Logger, ServiceUnavailableException } from "@nestjs/common";
+import { BadRequestException, Injectable, Logger, NotFoundException, ServiceUnavailableException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { randomBytes } from "node:crypto";
+import * as QRCode from "qrcode";
+import { SessionService } from "../auth/session.service";
 import type {
   CleaningSubscriptionDto,
   FoodSubscriptionDto,
   ProvisionSubscriptionDto,
   ProvisionSubscriptionResponse,
 } from "./dto/provision-subscription.dto";
+import type { AccessQrRequestDto, AccessQrResponse } from "./dto/access-qr.dto";
+import type {
+  BookingsRequestDto,
+  BookingsResponse,
+  IntegrationBooking,
+  IntegrationServiceKey,
+} from "./dto/bookings.dto";
 
 /**
  * Builders Node → ProsperaSub subscription mirror.
@@ -30,7 +39,10 @@ import type {
 export class IntegrationsService {
   private readonly logger = new Logger(IntegrationsService.name);
 
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    private readonly sessions: SessionService,
+  ) {}
 
   async provisionSubscription(body: ProvisionSubscriptionDto): Promise<ProvisionSubscriptionResponse> {
     if (!body.food && !body.cleaning) {
@@ -81,6 +93,354 @@ export class IntegrationsService {
       cleaning_subscription_id: cleaningSubscriptionId,
       warnings,
     };
+  }
+
+  /**
+   * Mint a short-lived signed access token + a rendered QR-code SVG for a
+   * user identified by email or user_id. Builders Node embeds the SVG on
+   * their profile page; anyone (staff, provider, kiosk) scans it and lands
+   * on `/verify?token=…` which returns GREEN/RED against ALL the user's
+   * ProsperaSub subscriptions.
+   *
+   * User resolution: prefer `user_id` if present, else look up by email.
+   * Never creates a user here — this endpoint is for showing status of an
+   * EXISTING user. If Builders Node needs to onboard a new customer they
+   * should call POST /integrations/builders-node/subscription first (which
+   * upserts) and then use the returned `user_id` here.
+   */
+  async mintAccessQr(body: AccessQrRequestDto): Promise<AccessQrResponse> {
+    if (!body.email && !body.user_id) {
+      throw new BadRequestException("Provide `email` or `user_id`");
+    }
+
+    const rest = this.restBase();
+    if (!rest) {
+      throw new ServiceUnavailableException("Supabase is not configured on the server");
+    }
+
+    // ── 1. Resolve user_id ────────────────────────────────────────────────
+    let userId = body.user_id ?? null;
+    if (!userId) {
+      const email = (body.email as string).trim().toLowerCase();
+      const rows = await this.rest<Array<{ id: string }>>(
+        `users?select=id&email=eq.${encodeURIComponent(email)}&limit=1`,
+      );
+      userId = rows?.[0]?.id ?? null;
+      if (!userId) {
+        throw new NotFoundException(`No ProsperaSub user for email ${email}`);
+      }
+    } else {
+      // Sanity-check the id exists — otherwise the QR mints fine but the
+      // scanner would just get "User not found" with no explanation.
+      const rows = await this.rest<Array<{ id: string }>>(
+        `users?select=id&id=eq.${encodeURIComponent(userId)}&limit=1`,
+      );
+      if (!rows?.[0]) throw new NotFoundException(`user_id ${userId} not found`);
+    }
+
+    // ── 2. Mint the same verify-token our own QR uses ──────────────────────
+    const ttl = Math.min(3600, Math.max(30,
+      body.ttl_seconds ?? Number(this.config.get("VERIFY_TOKEN_TTL_SECONDS") ?? 300),
+    ));
+    const { token, expiresIn } = this.sessions.createVerifyToken(userId, ttl);
+
+    // ── 3. Compose the URL scanners will land on ───────────────────────────
+    const publicUrl = (this.config.get<string>("PUBLIC_APP_URL") ?? "https://prosperasub.com").replace(/\/$/, "");
+    const verifyUrl = `${publicUrl}/verify?token=${encodeURIComponent(token)}`;
+
+    // ── 4. Render the QR to SVG server-side ────────────────────────────────
+    // qrcode.toString('svg', {...}) returns a self-contained <svg> string that
+    // Builders Node can drop into their HTML with no runtime deps.
+    const qrSvg = await QRCode.toString(verifyUrl, {
+      type: "svg",
+      errorCorrectionLevel: "M",
+      margin: 1,
+      width: 320,
+      color: { dark: "#000000", light: "#FFFFFF" },
+    });
+    const qrDataUrl = `data:image/svg+xml;base64,${Buffer.from(qrSvg).toString("base64")}`;
+
+    return {
+      user_id: userId,
+      token,
+      verify_url: verifyUrl,
+      qr_svg: qrSvg,
+      qr_data_url: qrDataUrl,
+      expires_in: expiresIn,
+    };
+  }
+
+  /**
+   * List every scheduled event for a user across ProsperaSub services,
+   * normalised to a common shape. Returns cleaning visits (one row per
+   * booked slot), beach court reservations, rental periods, and food
+   * subscriptions (one row per subscription — its active window).
+   *
+   * Bounded by `from`/`to` (defaults today → +90 days HN) so a response is
+   * always finite regardless of how much history the user has. Optional
+   * `service` filter restricts to one type.
+   */
+  async listBookings(body: BookingsRequestDto): Promise<BookingsResponse> {
+    if (!body.email && !body.user_id) {
+      throw new BadRequestException("Provide `email` or `user_id`");
+    }
+
+    const rest = this.restBase();
+    if (!rest) {
+      throw new ServiceUnavailableException("Supabase is not configured on the server");
+    }
+
+    // Resolve user
+    let userId = body.user_id ?? null;
+    if (!userId) {
+      const email = (body.email as string).trim().toLowerCase();
+      const rows = await this.rest<Array<{ id: string }>>(
+        `users?select=id&email=eq.${encodeURIComponent(email)}&limit=1`,
+      );
+      userId = rows?.[0]?.id ?? null;
+      if (!userId) throw new NotFoundException(`No ProsperaSub user for email ${email}`);
+    }
+
+    // Date window
+    const from = body.from || this.todayHN();
+    const to = body.to || this.addDaysISO(from, 90);
+    if (to < from) throw new BadRequestException("`to` must be >= `from`");
+
+    // Fan out — each service is independent; failures on one leg surface as
+    // empty arrays, not a whole-response 500.
+    const only = body.service as IntegrationServiceKey | undefined;
+    const [cleaning, food, beach, rental] = await Promise.all([
+      !only || only === "cleaning" ? this.listCleaningBookings(userId, from, to).catch(() => []) : Promise.resolve([]),
+      !only || only === "food"     ? this.listFoodSubscriptions(userId, from, to).catch(() => []) : Promise.resolve([]),
+      !only || only === "beach"    ? this.listBeachBookings(userId, from, to).catch(() => [])    : Promise.resolve([]),
+      !only || only === "rental"   ? this.listRentalBookings(userId, from, to).catch(() => [])   : Promise.resolve([]),
+    ]);
+
+    const bookings = [...cleaning, ...food, ...beach, ...rental]
+      .sort((a, b) => a.start_at.localeCompare(b.start_at));
+
+    return { user_id: userId, from, to, bookings };
+  }
+
+  // ─── Per-service aggregators ───────────────────────────────────────────────
+
+  private async listCleaningBookings(userId: string, from: string, to: string): Promise<IntegrationBooking[]> {
+    // Subs the user owns (payment status is a UI concern; here we just list
+    // every scheduled visit regardless of paid/unpaid so the partner can
+    // show unpaid-pending bookings too).
+    const subs = await this.rest<Array<{ id: string; package_id: string | null }>>(
+      `cleaning_subscriptions?select=id,package_id&user_id=eq.${userId}`,
+    );
+    const subIds = (subs ?? []).map((s) => s.id);
+    if (subIds.length === 0) return [];
+
+    const bookings = await this.rest<Array<{
+      id: string; subscription_id: string; status: string; notes: string | null; location: string | null;
+      cleaning_available_slots: { date: string; start_time: string; end_time: string | null } | null;
+    }>>(
+      `cleaning_bookings?select=id,subscription_id,status,notes,location,` +
+        `cleaning_available_slots!inner(date,start_time,end_time)` +
+        `&subscription_id=in.(${subIds.join(",")})` +
+        `&cleaning_available_slots.date=gte.${from}&cleaning_available_slots.date=lte.${to}` +
+        `&order=cleaning_available_slots(date).asc`,
+    );
+    const rows = bookings ?? [];
+    if (rows.length === 0) return [];
+
+    // Batch plan + provider name lookups
+    const pkgIds = Array.from(new Set(
+      (subs ?? []).filter((s) => rows.some((b) => b.subscription_id === s.id))
+        .map((s) => s.package_id).filter((id): id is string => !!id),
+    ));
+    const [pkgs, subMap] = await Promise.all([
+      pkgIds.length
+        ? this.rest<Array<{ id: string; name: string; provider_id: string | null }>>(
+            `cleaning_packages?select=id,name,provider_id&id=in.(${pkgIds.join(",")})`)
+        : Promise.resolve([] as Array<{ id: string; name: string; provider_id: string | null }>),
+      Promise.resolve(new Map((subs ?? []).map((s) => [s.id, s.package_id]))),
+    ]);
+    const pkgMap = new Map((pkgs ?? []).map((p) => [p.id, p]));
+    const providerIds = Array.from(new Set((pkgs ?? []).map((p) => p.provider_id).filter((id): id is string => !!id)));
+    const providers = providerIds.length
+      ? await this.rest<Array<{ id: string; name: string }>>(
+          `cleaning_providers?select=id,name&id=in.(${providerIds.join(",")})`)
+      : [];
+    const providerMap = new Map((providers ?? []).map((p) => [p.id, p.name]));
+
+    return rows.map((r) => {
+      const slot = r.cleaning_available_slots;
+      const pkgId = subMap.get(r.subscription_id) ?? null;
+      const pkg = pkgId ? pkgMap.get(pkgId) : null;
+      const startAt = slot?.date && slot?.start_time
+        ? this.toHNOffsetISO(slot.date, slot.start_time)
+        : `${slot?.date ?? from}T00:00:00-06:00`;
+      const endAt = slot?.date && slot?.end_time
+        ? this.toHNOffsetISO(slot.date, slot.end_time)
+        : null;
+      return {
+        service: "cleaning",
+        id: r.id,
+        plan_name: pkg?.name ?? null,
+        provider_name: pkg?.provider_id ? providerMap.get(pkg.provider_id) ?? null : null,
+        start_at: startAt,
+        end_at: endAt,
+        status: r.status,
+        notes: r.notes ?? r.location ?? null,
+      };
+    });
+  }
+
+  private async listFoodSubscriptions(userId: string, from: string, to: string): Promise<IntegrationBooking[]> {
+    // Food is a date-range product — return one row per subscription whose
+    // window overlaps [from, to]. Partners can display "Meal plan active
+    // until Aug 20" without pretending each delivery is a discrete booking.
+    const subs = await this.rest<Array<{
+      id: string; meal_plan_id: string | null; provider_id: string | null;
+      started_at: string; end_date: string; status: string;
+      delivery_address: string | null; notes: string | null;
+    }>>(
+      `food_subscriptions?select=id,meal_plan_id,provider_id,started_at,end_date,status,delivery_address,notes` +
+        `&user_id=eq.${userId}` +
+        `&started_at=lte.${to}&end_date=gte.${from}` +
+        `&order=started_at.asc`,
+    );
+    const rows = subs ?? [];
+    if (rows.length === 0) return [];
+
+    const planIds = Array.from(new Set(rows.map((r) => r.meal_plan_id).filter((id): id is string => !!id)));
+    const providerIds = Array.from(new Set(rows.map((r) => r.provider_id).filter((id): id is string => !!id)));
+    const [plans, providers] = await Promise.all([
+      planIds.length
+        ? this.rest<Array<{ id: string; name: string }>>(`food_meal_plans?select=id,name&id=in.(${planIds.join(",")})`)
+        : Promise.resolve([] as Array<{ id: string; name: string }>),
+      providerIds.length
+        ? this.rest<Array<{ id: string; name: string }>>(`food_providers?select=id,name&id=in.(${providerIds.join(",")})`)
+        : Promise.resolve([] as Array<{ id: string; name: string }>),
+    ]);
+    const planMap = new Map((plans ?? []).map((p) => [p.id, p.name]));
+    const providerMap = new Map((providers ?? []).map((p) => [p.id, p.name]));
+
+    return rows.map((r) => ({
+      service: "food",
+      id: r.id,
+      plan_name: r.meal_plan_id ? planMap.get(r.meal_plan_id) ?? null : null,
+      provider_name: r.provider_id ? providerMap.get(r.provider_id) ?? null : null,
+      start_at: this.toHNOffsetISO(r.started_at, "00:00"),
+      end_at: this.toHNOffsetISO(r.end_date, "23:59"),
+      status: r.status,
+      notes: r.notes ?? r.delivery_address ?? null,
+    }));
+  }
+
+  private async listBeachBookings(userId: string, from: string, to: string): Promise<IntegrationBooking[]> {
+    // Legacy court bookings (beach_club_court_bookings) — book by user_id.
+    // The DDD engine's `bookings` table also holds beach court reservations
+    // with subject_ref="user:<id>"; include those too so the response covers
+    // both pre- and post-cutover data.
+    const [legacy, ddd] = await Promise.all([
+      this.rest<Array<{
+        id: string; court_id: string | null; date: string;
+        start_time: string; end_time: string | null; status: string; notes: string | null;
+      }>>(
+        `beach_club_court_bookings?select=id,court_id,date,start_time,end_time,status,notes` +
+          `&user_id=eq.${userId}&date=gte.${from}&date=lte.${to}&order=date.asc,start_time.asc`,
+      ),
+      this.rest<Array<{
+        id: string; resource_id: string; start_at: string; end_at: string;
+        status: string; notes: string | null;
+      }>>(
+        `bookings?select=id,resource_id,start_at,end_at,status,notes` +
+          `&subject_ref=eq.user:${userId}` +
+          `&start_at=gte.${from}T00:00:00&start_at=lte.${to}T23:59:59` +
+          `&order=start_at.asc`,
+      ),
+    ]);
+
+    // Court name lookup for both sources
+    const legacyCourtIds = Array.from(new Set((legacy ?? []).map((r) => r.court_id).filter((id): id is string => !!id)));
+    const dddResourceIds = Array.from(new Set((ddd ?? []).map((r) => r.resource_id)));
+
+    const [courts, resources] = await Promise.all([
+      legacyCourtIds.length
+        ? this.rest<Array<{ id: string; name: string }>>(`beach_club_courts?select=id,name&id=in.(${legacyCourtIds.join(",")})`)
+        : Promise.resolve([] as Array<{ id: string; name: string }>),
+      dddResourceIds.length
+        ? this.rest<Array<{ id: string; name: string; source_resource_id: string | null }>>(
+            `bookable_resources?select=id,name,source_resource_id&id=in.(${dddResourceIds.join(",")})&source_service_key=eq.beach`)
+        : Promise.resolve([] as Array<{ id: string; name: string; source_resource_id: string | null }>),
+    ]);
+    const courtMap = new Map((courts ?? []).map((c) => [c.id, c.name]));
+    const resourceMap = new Map((resources ?? []).map((r) => [r.id, r.name]));
+
+    const fromLegacy: IntegrationBooking[] = (legacy ?? []).map((r) => ({
+      service: "beach",
+      id: r.id,
+      plan_name: r.court_id ? courtMap.get(r.court_id) ?? null : null,
+      provider_name: "Beach Club",
+      start_at: this.toHNOffsetISO(r.date, r.start_time),
+      end_at: r.end_time ? this.toHNOffsetISO(r.date, r.end_time) : null,
+      status: r.status,
+      notes: r.notes,
+    }));
+
+    // Filter DDD rows to beach only — subject_ref queries are user-scoped
+    // but resource_id could theoretically be non-beach; the resource lookup
+    // above already scoped to source_service_key=beach so we drop unknowns.
+    const fromDdd: IntegrationBooking[] = (ddd ?? [])
+      .filter((r) => resourceMap.has(r.resource_id))
+      .map((r) => ({
+        service: "beach",
+        id: r.id,
+        plan_name: resourceMap.get(r.resource_id) ?? null,
+        provider_name: "Beach Club",
+        start_at: this.dateToHNOffsetISO(r.start_at),
+        end_at: this.dateToHNOffsetISO(r.end_at),
+        status: r.status,
+        notes: r.notes,
+      }));
+
+    return [...fromLegacy, ...fromDdd];
+  }
+
+  private async listRentalBookings(userId: string, from: string, to: string): Promise<IntegrationBooking[]> {
+    const rows = await this.rest<Array<{
+      id: string; vehicle_id: string | null;
+      start_date: string; end_date: string;
+      status: string; notes: string | null; delivery_address: string | null;
+    }>>(
+      `rental_bookings?select=id,vehicle_id,start_date,end_date,status,notes,delivery_address` +
+        `&user_id=eq.${userId}` +
+        `&start_date=lte.${to}&end_date=gte.${from}&order=start_date.asc`,
+    );
+    const bookings = rows ?? [];
+    if (bookings.length === 0) return [];
+
+    const vehicleIds = Array.from(new Set(bookings.map((r) => r.vehicle_id).filter((id): id is string => !!id)));
+    const vehicles = vehicleIds.length
+      ? await this.rest<Array<{ id: string; name: string; provider_id: string | null }>>(
+          `rental_vehicles?select=id,name,provider_id&id=in.(${vehicleIds.join(",")})`)
+      : [];
+    const vehicleMap = new Map((vehicles ?? []).map((v) => [v.id, v]));
+    const providerIds = Array.from(new Set((vehicles ?? []).map((v) => v.provider_id).filter((id): id is string => !!id)));
+    const providers = providerIds.length
+      ? await this.rest<Array<{ id: string; name: string }>>(
+          `rental_providers?select=id,name&id=in.(${providerIds.join(",")})`)
+      : [];
+    const providerMap = new Map((providers ?? []).map((p) => [p.id, p.name]));
+
+    return bookings.map((r) => {
+      const vehicle = r.vehicle_id ? vehicleMap.get(r.vehicle_id) : null;
+      return {
+        service: "rental",
+        id: r.id,
+        plan_name: vehicle?.name ?? null,
+        provider_name: vehicle?.provider_id ? providerMap.get(vehicle.provider_id) ?? null : null,
+        start_at: this.toHNOffsetISO(r.start_date, "00:00"),
+        end_at: this.toHNOffsetISO(r.end_date, "23:59"),
+        status: r.status,
+        notes: r.notes ?? r.delivery_address ?? null,
+      };
+    });
   }
 
   // ─── User upsert ───────────────────────────────────────────────────────────
@@ -318,5 +678,26 @@ export class IntegrationsService {
     const d = new Date(`${isoDate}T00:00:00Z`);
     d.setUTCMonth(d.getUTCMonth() + months);
     return d.toISOString().slice(0, 10);
+  }
+
+  /** YYYY-MM-DD + HH:MM → "YYYY-MM-DDTHH:MM:00-06:00" (Honduras, no DST). */
+  private toHNOffsetISO(dateISO: string, hhmm: string): string {
+    const time = String(hhmm).slice(0, 5);
+    return `${dateISO}T${time}:00-06:00`;
+  }
+
+  /** Postgres timestamp / ISO → HN-offset ISO, safe for missing tz. */
+  private dateToHNOffsetISO(value: string): string {
+    // Postgres returns "YYYY-MM-DDTHH:MM:SS(.mmm)?(+00:00)?" — normalise.
+    const d = new Date(value);
+    if (isNaN(d.getTime())) return value;
+    const shifted = new Date(d.getTime() - 6 * 60 * 60 * 1000);
+    const yyyy = shifted.getUTCFullYear();
+    const mm = String(shifted.getUTCMonth() + 1).padStart(2, "0");
+    const dd = String(shifted.getUTCDate()).padStart(2, "0");
+    const HH = String(shifted.getUTCHours()).padStart(2, "0");
+    const MI = String(shifted.getUTCMinutes()).padStart(2, "0");
+    const SS = String(shifted.getUTCSeconds()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd}T${HH}:${MI}:${SS}-06:00`;
   }
 }
