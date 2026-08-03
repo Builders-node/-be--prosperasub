@@ -553,6 +553,23 @@ export class AdminController {
     return this.rbac.listPermissions();
   }
 
+  /**
+   * The caller's own effective permissions. Deliberately carries NO
+   * @RequireAdminPermission — any authenticated admin may ask what they
+   * themselves can do, and gating it behind a permission would make the
+   * frontend guard un-bootstrappable (you'd need a permission to learn your
+   * permissions). Returns ["*"] for owner/super-admin.
+   */
+  @ApiOperation({ summary: "Permissions held by the authenticated admin" })
+  @Get("me/permissions")
+  async myPermissions(@Req() request: AdminRequest) {
+    const permissions = await this.rbac.effectivePermissions(
+      request.adminUser!.id,
+      request.adminUser!.roles,
+    );
+    return { permissions };
+  }
+
   @ApiOperation({ summary: "Create a role" })
   @Post("roles")
   @RequireAdminPermission(AdminPermission.RoleManagementWrite)

@@ -68,6 +68,39 @@ export class AdminRbacService {
     }
   }
 
+  /**
+   * Every permission key the user effectively holds, flattened across all their
+   * active admin roles. Owner/super-admin short-circuits to "*" — the caller
+   * treats that as "everything" rather than enumerating the catalogue, so a
+   * newly-added permission is granted to owners automatically.
+   *
+   * Powers the frontend route guard + sidebar filtering. Without it the SPA
+   * showed every admin page to anyone holding any admin role and only failed
+   * at the API call, which reads as a broken page rather than "no access".
+   */
+  async effectivePermissions(userId: string, tokenRoles: string[]): Promise<string[]> {
+    if (tokenRoles.some((role) => OWNER_ADMIN_ROLES.has(role))) return ["*"];
+    if (!this.prisma.isAvailable()) {
+      try { await this.prisma.$connect(); } catch { /* continue */ }
+    }
+    try {
+      const rows = await this.prisma.$queryRawUnsafe<Array<{ permission_key: string }>>(
+        `SELECT DISTINCT rp.permission_key
+           FROM public.rbac_user_roles ur
+           JOIN public.rbac_roles r ON r.id = ur.role_id
+           JOIN public.rbac_role_permissions rp ON rp.role_id = r.id
+          WHERE ur.user_id = $1
+            AND ur.removed_at IS NULL
+            AND r.status = 'active'`,
+        userId,
+      );
+      return rows.map((r) => r.permission_key);
+    } catch {
+      // Fail closed: no permissions rather than accidental full access.
+      return [];
+    }
+  }
+
   async listPermissions() {
     if (!this.prisma.isAvailable()) {
       return this.supabaseRest(
