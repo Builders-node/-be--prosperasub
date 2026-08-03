@@ -288,6 +288,14 @@ class PaymentMetaDto {
   @ApiProperty({ required: false }) @IsOptional() @IsString() booking_id?: string;
   @ApiProperty({ required: false }) @IsOptional() @IsString() admin_url?: string;
   @ApiProperty({ required: false }) @IsOptional() @IsString() selected_date_time?: string;
+  // Cleaning-checkout spreads these into every payment call (Lightning +
+  // on-chain). The Lightning DTO declares them independently, so before
+  // hoisting them here the on-chain DTO 400'd with
+  // "property package_id should not exist" — the global ValidationPipe has
+  // forbidNonWhitelisted:true. Keep both current + future payment methods
+  // accepting the same meta shape.
+  @ApiProperty({ required: false }) @IsOptional() @IsString() package_id?: string;
+  @ApiProperty({ required: false, minimum: 1 }) @IsOptional() @IsInt() @Min(1) billing_period_months?: number;
 }
 
 class CreateOnchainAddressDto extends PaymentMetaDto {
