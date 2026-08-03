@@ -10,12 +10,13 @@ import { PrismaModule } from "../prisma/prisma.module";
 import { AdminAuthGuard } from "./admin-auth.guard";
 import { AdminController } from "./admin.controller";
 import { CronController } from "./cron.controller";
+import { AdminContentService } from "./admin-content.service";
 import { AdminRbacService } from "./admin-rbac.service";
 import { AdminService } from "./admin.service";
 
 @Module({
   imports: [AuthModule, CatalogModule, PrismaModule, GoogleCalendarModule, MailModule, NotificationsModule, PaymentsModule, AccountModule],
   controllers: [AdminController, CronController],
-  providers: [AdminAuthGuard, AdminRbacService, AdminService],
+  providers: [AdminAuthGuard, AdminRbacService, AdminService, AdminContentService],
 })
 export class AdminModule {}

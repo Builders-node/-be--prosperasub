@@ -16,6 +16,7 @@ import { CatalogService } from "../catalog/catalog.service";
 import { GoogleCalendarService } from "../google-calendar/google-calendar.service";
 import { NotificationsService } from "../notifications/notifications.service";
 import { AdminAuthGuard, type AdminRequest } from "./admin-auth.guard";
+import { AdminContentService } from "./admin-content.service";
 import { AdminPermission, RequireAdminPermission } from "./admin-permissions";
 import { AdminRbacService } from "./admin-rbac.service";
 import { AssignUserRolesDto, CreateRoleDto, UpdateRoleDto } from "./admin-roles.dto";
@@ -46,6 +47,7 @@ export class AdminController {
     private readonly rbac: AdminRbacService,
     private readonly notifications: NotificationsService,
     private readonly googleCalendar: GoogleCalendarService,
+    private readonly content: AdminContentService,
   ) {}
 
   @ApiOperation({ summary: "Get platform overview metrics" })
@@ -568,6 +570,97 @@ export class AdminController {
       request.adminUser!.roles,
     );
     return { permissions };
+  }
+
+  // ─── Ads (promo banners) ────────────────────────────────────────────────
+  // These used to be written straight from the browser with the anon key under
+  // permissive RLS, which put them outside RBAC entirely — no server in the
+  // path meant nothing could refuse the write.
+
+  @ApiOperation({ summary: "List promo banners" })
+  @Get("ads")
+  @RequireAdminPermission(AdminPermission.AdminSettingsRead)
+  listAds() {
+    return this.content.listAds();
+  }
+
+  @ApiOperation({ summary: "Create a promo banner" })
+  @Post("ads")
+  @RequireAdminPermission(AdminPermission.AdminSettingsWrite)
+  createAd(@Body() body: Record<string, unknown>, @Req() req: AdminRequest) {
+    return this.content.createAd(body, req.adminUser!.id);
+  }
+
+  @ApiOperation({ summary: "Update a promo banner" })
+  @Patch("ads/:id")
+  @RequireAdminPermission(AdminPermission.AdminSettingsWrite)
+  updateAd(@Param("id") id: string, @Body() body: Record<string, unknown>, @Req() req: AdminRequest) {
+    return this.content.updateAd(id, body, req.adminUser!.id);
+  }
+
+  @ApiOperation({ summary: "Delete a promo banner" })
+  @Delete("ads/:id")
+  @RequireAdminPermission(AdminPermission.AdminSettingsWrite)
+  deleteAd(@Param("id") id: string, @Req() req: AdminRequest) {
+    return this.content.deleteAd(id, req.adminUser!.id);
+  }
+
+  // ─── Locations (residences) ─────────────────────────────────────────────
+
+  @ApiOperation({ summary: "List locations" })
+  @Get("locations")
+  @RequireAdminPermission(AdminPermission.AdminSettingsRead)
+  listResidences() {
+    return this.content.listResidences();
+  }
+
+  @ApiOperation({ summary: "Create a location" })
+  @Post("locations")
+  @RequireAdminPermission(AdminPermission.AdminSettingsWrite)
+  createResidence(@Body() body: Record<string, unknown>, @Req() req: AdminRequest) {
+    return this.content.createResidence(body, req.adminUser!.id);
+  }
+
+  @ApiOperation({ summary: "Update a location" })
+  @Patch("locations/:id")
+  @RequireAdminPermission(AdminPermission.AdminSettingsWrite)
+  updateResidence(@Param("id") id: string, @Body() body: Record<string, unknown>, @Req() req: AdminRequest) {
+    return this.content.updateResidence(id, body, req.adminUser!.id);
+  }
+
+  @ApiOperation({ summary: "Delete a location" })
+  @Delete("locations/:id")
+  @RequireAdminPermission(AdminPermission.AdminSettingsWrite)
+  deleteResidence(@Param("id") id: string, @Req() req: AdminRequest) {
+    return this.content.deleteResidence(id, req.adminUser!.id);
+  }
+
+  // ─── Audit logs ─────────────────────────────────────────────────────────
+
+  @ApiOperation({ summary: "Filtered audit log (server-side paging)" })
+  @Get("audit-logs")
+  @RequireAdminPermission(AdminPermission.AdminSettingsRead)
+  listAuditLogs(
+    @Query("entityType") entityType?: string,
+    @Query("action") action?: string,
+    @Query("from") from?: string,
+    @Query("to") to?: string,
+    @Query("q") q?: string,
+    @Query("limit") limit?: string,
+    @Query("offset") offset?: string,
+  ) {
+    return this.content.listAuditLogs({
+      entityType, action, from, to, q,
+      limit: limit ? Number(limit) : undefined,
+      offset: offset ? Number(offset) : undefined,
+    });
+  }
+
+  @ApiOperation({ summary: "Distinct entity types + actions for audit filters" })
+  @Get("audit-logs/facets")
+  @RequireAdminPermission(AdminPermission.AdminSettingsRead)
+  auditFacets() {
+    return this.content.auditFacets();
   }
 
   @ApiOperation({ summary: "Create a role" })
