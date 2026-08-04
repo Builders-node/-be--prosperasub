@@ -1,6 +1,6 @@
 import { Body, Controller, Get, Param, Post, Req, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiBody, ApiOperation, ApiProperty, ApiResponse, ApiTags } from "@nestjs/swagger";
-import { IsIn, IsInt, IsString, IsUUID, Min } from "class-validator";
+import { IsIn, IsInt, IsOptional, IsString, IsUUID, Min } from "class-validator";
 import { AccountAuthGuard, type AccountRequest } from "../account/account-auth.guard";
 import { FoodService } from "./food.service";
 import type { RenewalPaymentMethod } from "../payments/subscription-renewal.service";
@@ -22,6 +22,18 @@ class RenewSubscriptionDto {
   @IsInt()
   @Min(0)
   amount_cents!: number;
+
+  @ApiProperty({
+    required: false,
+    minimum: 0,
+    example: 395,
+    description:
+      "Payment-method processing fee charged on top of amount_cents. Charged = amount_cents + surcharge_cents. Defaults to 0.",
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  surcharge_cents?: number;
 
   @ApiProperty({ description: "Client-generated UUID; retries with the same key are safe.", example: "550e8400-e29b-41d4-a716-446655440000" })
   @IsUUID()

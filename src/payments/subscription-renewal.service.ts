@@ -20,6 +20,12 @@ interface RecordInput {
   newStart: string;
   newEnd: string;
   amountCents: number;
+  /**
+   * Payment-method processing fee charged on top of amountCents. The customer
+   * paid amountCents + surchargeCents; amountCents alone is the service price.
+   * Kept separate so provider revenue and processing cost don't get mixed.
+   */
+  surchargeCents?: number;
   method: string;
   reference: string | null;
   idempotencyKey: string;
@@ -128,6 +134,7 @@ export class SubscriptionRenewalService {
       new_start: input.newStart,
       new_end: input.newEnd,
       amount_cents: input.amountCents,
+      surcharge_cents: input.surchargeCents ?? 0,
       payment_method: input.method,
       payment_reference: input.reference,
       idempotency_key: input.idempotencyKey,
@@ -182,7 +189,9 @@ export class SubscriptionRenewalService {
       rental: "Vehicle rental",
     };
     const label = SERVICE_LABEL[input.service] ?? "Subscription";
-    const dollars = (row.amount_cents / 100).toFixed(2);
+    // What the customer actually paid, not just the service price — quoting the
+    // base here made the renewal notification disagree with their statement.
+    const dollars = ((row.amount_cents + (input.surchargeCents ?? 0)) / 100).toFixed(2);
     const actionUrl =
       input.service === "food"
         ? `/services/food/subscription/${input.subscriptionId}`

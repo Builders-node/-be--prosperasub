@@ -196,6 +196,8 @@ export class FoodService {
       payment_method: RenewalPaymentMethod;
       payment_reference: string;
       amount_cents: number;
+      /** Processing fee charged on top of amount_cents (0 when the method is free). */
+      surcharge_cents?: number;
       idempotency_key: string;
     },
   ) {
@@ -236,6 +238,7 @@ export class FoodService {
       newStart: nextStart,
       newEnd,
       amountCents: payload.amount_cents,
+      surchargeCents: payload.surcharge_cents ?? 0,
       method: payload.payment_method,
       reference: payload.payment_reference,
       idempotencyKey: payload.idempotency_key,
