@@ -4,6 +4,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { EventBusService } from "../events/event-bus.service";
 import { ResourceService } from "../resource/resource.service";
 import { generateSlots, type Slot } from "./slot-engine";
+import { zonedDayRange, zonedWallClockToInstant } from "./zoned-time";
 import { normalizeSchedule } from "./schedule";
 
 export interface AvailabilityResult {
@@ -53,7 +54,10 @@ export class BookingService {
     const noticeCutoffMs = nowMs + schedule.minNoticeHours * 3600_000;
     const advanceCutoffMs = nowMs + schedule.maxAdvanceDays * 86400_000;
     const slots = raw.filter((s) => {
-      const startMs = new Date(`${dateISO}T${s.from}:00`).getTime();
+      // Slot times are wall clock in the schedule's zone — resolve to a real
+      // instant before comparing against `now`, or the notice window is off by
+      // the zone offset.
+      const startMs = zonedWallClockToInstant(dateISO, s.from, schedule.timezone).getTime();
       if (Number.isNaN(startMs)) return true;
       return startMs >= noticeCutoffMs && startMs <= advanceCutoffMs;
     });
@@ -66,8 +70,14 @@ export class BookingService {
    */
   async listBookings(resourceId: string, dateISO: string) {
     if (!this.prisma.isAvailable()) return [];
-    const start = new Date(`${dateISO}T00:00:00.000Z`);
-    const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
+    // A calendar day as LIVED at the resource, not a UTC day: with a UTC window
+    // an 18:00 Honduras booking (00:00Z the next day) fell outside its own date
+    // and the evening slots looked free.
+    const resource = await this.resources.getResource(resourceId);
+    const schedule = normalizeSchedule(
+      await this.loadEffectiveBookingSettings(resource?.provider_id ?? null, resource ?? {}),
+    );
+    const { start, end } = zonedDayRange(dateISO, schedule.timezone);
     const rows = await this.prisma.booking.findMany({
       where: {
         resourceId,
@@ -100,9 +110,16 @@ export class BookingService {
     if (!slot) throw new BadRequestException("slot_unavailable");
 
     const resource = await this.resources.getResource(input.resourceId);
+    const schedule = normalizeSchedule(
+      await this.loadEffectiveBookingSettings(resource?.provider_id ?? null, resource ?? {}),
+    );
     const slotKey = `${input.resourceId}|${input.date}|${input.from}`;
-    const startAt = new Date(`${input.date}T${input.from}:00`);
-    const endAt = new Date(`${input.date}T${slot.to}:00`);
+    // `new Date("...T18:00:00")` with no offset is parsed in the PROCESS's
+    // timezone — UTC on Vercel. An 18:00 Honduras slot was therefore stored as
+    // 18:00Z = 12:00 Honduras: the customer tapped one time and got another,
+    // and the row's own slot_key disagreed with its start_at.
+    const startAt = zonedWallClockToInstant(input.date, input.from, schedule.timezone);
+    const endAt = zonedWallClockToInstant(input.date, slot.to, schedule.timezone);
     const now = new Date();
 
     // Free any expired holds on this slot so a stale hold can't block it.
