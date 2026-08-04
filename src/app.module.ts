@@ -16,6 +16,7 @@ import { MembershipModule } from "./membership/membership.module";
 import { ResourceModule } from "./resource/resource.module";
 import { BookingModule } from "./booking/booking.module";
 import { OrderModule } from "./order/order.module";
+import { SupportModule } from "./support/support.module";
 import { AnalyticsModule } from "./analytics/analytics.module";
 import { NotificationEventsModule } from "./notification/notification-events.module";
 import { IntegrationsModule } from "./integrations/integrations.module";
@@ -35,6 +36,7 @@ import { LeadconnectorModule } from "./integrations/leadconnector/leadconnector.
     BookingModule,
     OrderModule,
     AnalyticsModule,
+    SupportModule,
     NotificationEventsModule,
     AuthModule,
     MailModule,
