@@ -324,26 +324,42 @@ export class FoodService {
   }
 
   private async fetchWeeklyMenu(sub: FoodSubRow) {
-    let menu: { id: string; week_start_date: string } | null = null;
+    let menu: { id: string; week_start_date: string; hide_dishes?: boolean } | null = null;
 
     if (sub.meal_plan_id) {
-      const rows = await this.rest<Array<{ id: string; week_start_date: string }>>(
-        `food_weekly_menus?select=id,week_start_date&meal_plan_id=eq.${encodeURIComponent(sub.meal_plan_id)}&is_published=eq.true&order=week_start_date.desc&limit=1`,
+      const rows = await this.rest<Array<{ id: string; week_start_date: string; hide_dishes?: boolean }>>(
+        `food_weekly_menus?select=id,week_start_date,hide_dishes&meal_plan_id=eq.${encodeURIComponent(sub.meal_plan_id)}&is_published=eq.true&order=week_start_date.desc&limit=1`,
       );
       menu = rows?.[0] ?? null;
     }
     if (!menu && sub.provider_id) {
-      const rows = await this.rest<Array<{ id: string; week_start_date: string }>>(
-        `food_weekly_menus?select=id,week_start_date&provider_id=eq.${encodeURIComponent(sub.provider_id)}&meal_plan_id=is.null&is_published=eq.true&order=week_start_date.desc&limit=1`,
+      const rows = await this.rest<Array<{ id: string; week_start_date: string; hide_dishes?: boolean }>>(
+        `food_weekly_menus?select=id,week_start_date,hide_dishes&provider_id=eq.${encodeURIComponent(sub.provider_id)}&meal_plan_id=is.null&is_published=eq.true&order=week_start_date.desc&limit=1`,
       );
       menu = rows?.[0] ?? null;
     }
     if (!menu) return null;
 
+    // A "surprise" week tells the subscriber WHICH meals land on which day and
+    // nothing more. The dish columns are left out of the select, so the names
+    // never travel — redacting them in the UI would still ship them in this
+    // response for anyone reading the network tab.
+    const hidden = !!menu.hide_dishes;
+    const columns = hidden
+      ? "id,menu_id,day_of_week,meal_type,sort_order,created_at"
+      : "*";
     const meals = await this.rest<Array<Record<string, unknown>>>(
-      `food_menu_meals?select=*&menu_id=eq.${encodeURIComponent(menu.id)}&order=sort_order.asc`,
+      `food_menu_meals?select=${columns}&menu_id=eq.${encodeURIComponent(menu.id)}&order=sort_order.asc`,
     );
-    return { week_start_date: menu.week_start_date, meals: meals ?? [] };
+    // Collapse to one entry per day+meal_type: "three unnamed dinner items"
+    // would leak the course count.
+    const rows = meals ?? [];
+    const deduped = hidden
+      ? rows.filter((m, i) => rows.findIndex(
+          (o) => o.day_of_week === m.day_of_week && o.meal_type === m.meal_type,
+        ) === i)
+      : rows;
+    return { week_start_date: menu.week_start_date, hide_dishes: hidden, meals: deduped };
   }
 
   private restBase(): { base: string; key: string } | null {
