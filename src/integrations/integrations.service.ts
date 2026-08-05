@@ -3,6 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import { randomBytes } from "node:crypto";
 import * as QRCode from "qrcode";
 import { SessionService } from "../auth/session.service";
+import { CleaningCalendarSyncService } from "../google-calendar/cleaning-calendar-sync.service";
 import type {
   CleaningSubscriptionDto,
   FoodSubscriptionDto,
@@ -47,6 +48,7 @@ export class IntegrationsService {
   constructor(
     private readonly config: ConfigService,
     private readonly sessions: SessionService,
+    private readonly cleaningCalendarSync: CleaningCalendarSyncService,
   ) {}
 
   async provisionSubscription(body: ProvisionSubscriptionDto): Promise<ProvisionSubscriptionResponse> {
@@ -236,13 +238,15 @@ export class IntegrationsService {
    *    they have several, `subscription_id` picks one; otherwise we take
    *    the first one (ordered by most recent).
    *  - `date` must be today HN or later (no back-dating from partners).
-   *  - The visit slot is created on-demand if none exists at the exact
-   *    date/start/end combo — same `ensureCleaningSlot` behaviour as our
-   *    admin `NewCleaningBookingDialog`.
+   *  - `start_time` must match a published slot for that date. A time that
+   *    isn't on the grid is rejected with a 400 listing the open times; it
+   *    used to seed a slot instead, producing visits nobody was rostered for.
    *  - Bumps `cleaning_available_slots.current_bookings` so the slot's
    *    capacity accounting stays honest (a hand-added booking counts).
-   *  - Google Calendar sync is marked `pending`; the daily calendar cron
-   *    (or an admin's manual Sync) picks it up.
+   *  - The visit is pushed to Google Calendar in this call. If that fails the
+   *    booking still stands and stays `pending` for the cron — the response
+   *    says so via `calendar_synced` rather than failing the request, because
+   *    a partner retrying a committed booking would double-book it.
    */
   async createCleaningBooking(body: CreateCleaningBookingDto): Promise<CreateCleaningBookingResponse> {
     if (!body.email && !body.user_id) {
@@ -294,35 +298,36 @@ export class IntegrationsService {
       throw new BadRequestException("`date` must be today or in the future");
     }
 
-    // 4. ensureCleaningSlot: look up by exact date + start + end, seed if missing.
+    // 4. Find the published slot for this date + start time.
+    //    Matched on start_time alone, NOT start+end: `end_time` is optional in
+    //    the DTO, and the old lookup defaulted a missing one to the start time,
+    //    so a partner sending only `start_time` never matched a real slot. That
+    //    was survivable while a miss seeded a slot; now that a miss is a 400 it
+    //    would reject every well-formed request. The grid owns the duration —
+    //    the slot's own end_time is what the visit gets.
     const start = `${body.start_time}:00`;
-    const end = `${body.end_time || body.start_time}:00`;
     const existing = await this.rest<Array<{
-      id: string; current_bookings: number | null; max_bookings: number | null; is_active: boolean;
+      id: string; end_time: string | null;
+      current_bookings: number | null; max_bookings: number | null; is_active: boolean;
     }>>(
-      `cleaning_available_slots?select=id,current_bookings,max_bookings,is_active` +
-        `&date=eq.${body.date}&start_time=eq.${start}&end_time=eq.${end}&limit=1`,
+      `cleaning_available_slots?select=id,end_time,current_bookings,max_bookings,is_active` +
+        `&date=eq.${body.date}&start_time=eq.${start}&limit=1`,
     );
-    let slot = existing?.[0] ?? null;
-    // Whether we matched the published schedule or invented a slot. Surfaced in
-    // the response so a partner can SEE that a guessed time produced an
-    // off-schedule visit — this used to happen silently.
-    const slotExisted = !!slot;
+    const slot = existing?.[0] ?? null;
     if (!slot) {
-      const seededRows = await this.insertReturning<{
-        id: string; current_bookings: number | null; max_bookings: number | null; is_active: boolean;
-      }>("cleaning_available_slots", {
-        // Match the id shape used elsewhere in the admin flow so cross-team
-        // debugging tools can eyeball it (`slot-YYYY-MM-DD-HHMM`).
-        id: `slot-${body.date}-${body.start_time.replace(":", "")}`,
-        date: body.date,
-        start_time: start,
-        end_time: end,
-        max_bookings: 3,
-        current_bookings: 0,
-        is_active: true,
+      // Previously this seeded a slot on demand and returned a `warning` the
+      // partner was free to ignore — which produced visits at times no cleaner
+      // is scheduled to work. The published grid is the schedule, so a time
+      // that isn't on it is a bad request, and we say which times are.
+      const available = await this.listCleaningSlots({
+        from: body.date, to: body.date, only_available: true,
       });
-      slot = seededRows[0];
+      const times = available.slots.map((s) => s.start_time);
+      throw new BadRequestException(
+        times.length
+          ? `No cleaning slot at ${body.start_time} on ${body.date}. Available: ${times.join(", ")}.`
+          : `No cleaning slots available on ${body.date}. Call /cleaning-slots for a date with openings.`,
+      );
     }
     if (!slot.is_active) {
       throw new BadRequestException("That slot is not accepting bookings");
@@ -353,19 +358,46 @@ export class IntegrationsService {
       updated_at: new Date().toISOString(),
     });
 
+    // 7. Put it on the cleaners' calendar now, not on the next daily cron.
+    //    Best-effort: the booking is already committed, and the row stays
+    //    `google_calendar_sync_status = 'pending'` on failure so the cron and
+    //    the admin's manual Sync still pick it up. Failing the request here
+    //    would tell the partner the booking didn't happen when it did.
+    let calendarSynced = false;
+    let calendarError: string | undefined;
+    try {
+      if (this.cleaningCalendarSync.isConfigured()) {
+        const result = await this.cleaningCalendarSync.syncBookingById(bookingId);
+        calendarSynced = result.ok === true;
+        if (!calendarSynced) calendarError = result.error;
+      } else {
+        calendarError = "Google Calendar is not configured on this environment";
+      }
+    } catch (err) {
+      calendarError = err instanceof Error ? err.message : "Calendar sync failed";
+    }
+    if (!calendarSynced) {
+      this.logger.warn(
+        `[builders-node] booking ${bookingId} created but not on the calendar yet: ${calendarError}`,
+      );
+    }
+
     return {
       booking_id: bookingId,
       subscription_id: sub.id,
       slot_id: slot.id,
       date: body.date,
       start_time: body.start_time,
-      end_time: body.end_time || body.start_time,
+      // The published slot's end, not what the caller guessed — a partner that
+      // sent no end_time used to be told the visit ended when it started.
+      end_time: (slot.end_time ?? `${body.start_time}:00`).slice(0, 5),
       status: "booked",
-      slot_existed: slotExisted,
-      ...(slotExisted ? {} : {
-        warning:
-          "No published slot at this time — one was created. Call /cleaning-slots first and book a listed start_time.",
-      }),
+      // Always true now — a time off the published grid is rejected above
+      // rather than quietly given a slot of its own. Kept in the response so
+      // partners reading it don't break.
+      slot_existed: true,
+      calendar_synced: calendarSynced,
+      ...(calendarSynced ? {} : { calendar_warning: calendarError }),
     };
   }
 

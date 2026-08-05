@@ -61,6 +61,16 @@ export class IntegrationsController {
   /**
    * Book one cleaning visit for a user with an active paid subscription.
    * Called by Builders Node's UI after their customer picks date + time.
+   *
+   * `start_time` must be one the published grid actually offers — call
+   * `/cleaning-slots` first and pass a listed value back. Anything else is a
+   * 400 whose message lists that day's open times. `end_time` is ignored if
+   * sent; the slot's own duration wins.
+   *
+   * The visit is pushed to the cleaners' Google Calendar during this call.
+   * `calendar_synced: false` in the response means the booking is committed
+   * but hasn't reached the calendar yet — the sync cron retries, so do NOT
+   * re-issue the booking.
    */
   @Post("cleaning-booking")
   @HttpCode(200)
@@ -72,9 +82,10 @@ export class IntegrationsController {
   /**
    * Which cleaning times exist, and which are still free.
    *
-   * Must be called before `cleaning-booking`: that endpoint takes an exact
-   * date + start_time and will CREATE a slot if none matches, so a guessed
-   * time produces a visit outside the real schedule rather than an error.
+   * Must be called before `cleaning-booking`: that endpoint only accepts a
+   * start_time listed here, and rejects anything else with a 400. It used to
+   * create a slot for a guessed time instead, which produced visits at hours
+   * no cleaner is scheduled to work.
    */
   @HttpCode(200)
   @Post("cleaning-slots")

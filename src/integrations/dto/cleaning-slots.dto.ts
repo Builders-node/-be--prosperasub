@@ -3,11 +3,12 @@ import { IsBoolean, IsOptional, IsString, Matches } from "class-validator";
 /**
  * Request body for `POST /integrations/builders-node/cleaning-slots`.
  *
- * The missing half of the cleaning flow. `POST /cleaning-booking` has always
- * required an exact `date` + `start_time`, but nothing told the partner which
- * times exist — so their UI had to guess, and because the booking endpoint
- * creates a slot on demand when nothing matches, a guessed 09:37 quietly
- * succeeded and produced a visit outside the real schedule.
+ * The other half of the cleaning flow. `POST /cleaning-booking` requires an
+ * exact `date` + `start_time`, and nothing told the partner which times exist —
+ * so their UI had to guess, and a guessed 09:37 quietly succeeded, producing a
+ * visit outside the real schedule. Booking now rejects any start_time not
+ * listed here, which makes calling this endpoint first mandatory rather than
+ * merely advisable.
  *
  * `from` / `to` — YYYY-MM-DD, Honduras local. Defaults to today → +30 days.
  */

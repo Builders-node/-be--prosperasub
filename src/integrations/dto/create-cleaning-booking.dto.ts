@@ -43,12 +43,19 @@ export interface CreateCleaningBookingResponse {
   start_time: string;
   end_time: string;
   /**
-   * True when the time matched a slot already on the schedule. False means one
-   * was created for it — i.e. the visit sits outside the published grid. Call
-   * `/cleaning-slots` and book a listed start_time to keep this true.
+   * Always true. A `start_time` that isn't on the published grid is now
+   * rejected with 400 (the message lists that day's open times) instead of
+   * quietly getting a slot of its own, so a booking can only exist on a real
+   * published slot. Retained so existing partner code reading it keeps working.
    */
   slot_existed?: boolean;
-  /** Present only when slot_existed is false. */
-  warning?: string;
+  /**
+   * Whether the visit reached the cleaners' Google Calendar during this call.
+   * False doesn't mean the booking failed — it's committed either way, and the
+   * calendar cron retries. It means nobody has been told to show up *yet*.
+   */
+  calendar_synced?: boolean;
+  /** Why the calendar sync didn't happen. Present only when calendar_synced is false. */
+  calendar_warning?: string;
   status: "booked";
 }
