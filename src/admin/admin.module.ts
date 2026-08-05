@@ -18,5 +18,10 @@ import { AdminService } from "./admin.service";
   imports: [AuthModule, CatalogModule, PrismaModule, GoogleCalendarModule, MailModule, NotificationsModule, PaymentsModule, AccountModule],
   controllers: [AdminController, CronController],
   providers: [AdminAuthGuard, AdminRbacService, AdminService, AdminContentService],
+  // AdminAuthGuard is used by controllers in OTHER modules (support, …). It
+  // injects AdminRbacService, so both have to leave this module or Nest
+  // fails to resolve the guard and the whole app refuses to boot — which
+  // takes down every route, not just the borrowing one.
+  exports: [AdminAuthGuard, AdminRbacService],
 })
 export class AdminModule {}
