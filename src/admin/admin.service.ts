@@ -72,6 +72,16 @@ const SUBSCRIPTION_WRITE_COLUMNS = new Set([
   "is_active",
 ]);
 
+/**
+ * How far ahead the cleaning slot grid is kept published.
+ *
+ * Comfortably past the longest plan on sale (3 months), so a customer buying
+ * one today can schedule every visit in it — the old hand-seeded grid ended
+ * mid-plan, which is exactly the hole this closes. Roughly 620 slots at four
+ * visits a day, Mon–Sat.
+ */
+const SLOT_GRID_DAYS_AHEAD = 180;
+
 @Injectable()
 export class AdminService {
   private readonly logger = new Logger(AdminService.name);
@@ -2769,6 +2779,32 @@ export class AdminService {
       entityId,
       JSON.stringify(details ?? {}),
     ).catch(() => undefined);
+  }
+
+  /**
+   * Keep the cleaning slot grid stretching into the future.
+   *
+   * The grid was seeded once by hand and ran out on 2026-09-30 — a 3-month
+   * plan bought in August had nowhere to put its later visits, and a partner
+   * asking `/cleaning-slots` about October got an empty list, which reads as
+   * "fully booked" rather than "we never published those days".
+   *
+   * The work is a Postgres function so the whole grid is one statement and one
+   * transaction; this just triggers it. Idempotent — existing slots, including
+   * their counters and any an admin switched off, are left untouched.
+   */
+  async seedCleaningSlots(daysAhead = SLOT_GRID_DAYS_AHEAD) {
+    const rows = await this.supabaseRest<Array<{
+      created: number; seeded_from: string; seeded_to: string;
+    }>>("/rpc/seed_cleaning_slots", {
+      method: "POST",
+      body: JSON.stringify({ p_days_ahead: daysAhead }),
+    });
+    const result = rows?.[0] ?? { created: 0, seeded_from: "", seeded_to: "" };
+    this.logger.log(
+      `[slot-grid] +${result.created} slots, published through ${result.seeded_to}`,
+    );
+    return { ok: true, ...result, days_ahead: daysAhead };
   }
 
   private async supabaseRest<T = unknown>(path: string, init: RequestInit = {}): Promise<T> {

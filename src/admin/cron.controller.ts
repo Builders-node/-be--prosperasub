@@ -58,6 +58,18 @@ export class CronController {
     return this.admin.restoreCleaningCalendar();
   }
 
+  @Get("seed-cleaning-slots")
+  seedSlotsGet(@Req() req: Request) {
+    this.assertSecret(req);
+    return this.admin.seedCleaningSlots();
+  }
+
+  @Post("seed-cleaning-slots")
+  seedSlotsPost(@Req() req: Request) {
+    this.assertSecret(req);
+    return this.admin.seedCleaningSlots();
+  }
+
   @Get("beach-courts/pull-google")
   pullBeachCourtsGet(@Req() req: Request) {
     this.assertSecret(req);

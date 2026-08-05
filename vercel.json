@@ -15,6 +15,10 @@
   ],
   "crons": [
     {
+      "path": "/cron/seed-cleaning-slots",
+      "schedule": "0 5 * * *"
+    },
+    {
       "path": "/cron/reconcile-payments",
       "schedule": "0 6 * * *"
     },
