@@ -42,5 +42,13 @@ export interface CreateCleaningBookingResponse {
   date: string;
   start_time: string;
   end_time: string;
+  /**
+   * True when the time matched a slot already on the schedule. False means one
+   * was created for it — i.e. the visit sits outside the published grid. Call
+   * `/cleaning-slots` and book a listed start_time to keep this true.
+   */
+  slot_existed?: boolean;
+  /** Present only when slot_existed is false. */
+  warning?: string;
   status: "booked";
 }

@@ -20,6 +20,7 @@ import type {
   CreateCleaningBookingDto,
   CreateCleaningBookingResponse,
 } from "./dto/create-cleaning-booking.dto";
+import type { CleaningSlotsResponse } from "./dto/cleaning-slots.dto";
 
 /**
  * Builders Node → ProsperaSub subscription mirror.
@@ -303,6 +304,10 @@ export class IntegrationsService {
         `&date=eq.${body.date}&start_time=eq.${start}&end_time=eq.${end}&limit=1`,
     );
     let slot = existing?.[0] ?? null;
+    // Whether we matched the published schedule or invented a slot. Surfaced in
+    // the response so a partner can SEE that a guessed time produced an
+    // off-schedule visit — this used to happen silently.
+    const slotExisted = !!slot;
     if (!slot) {
       const seededRows = await this.insertReturning<{
         id: string; current_bookings: number | null; max_bookings: number | null; is_active: boolean;
@@ -356,10 +361,72 @@ export class IntegrationsService {
       start_time: body.start_time,
       end_time: body.end_time || body.start_time,
       status: "booked",
+      slot_existed: slotExisted,
+      ...(slotExisted ? {} : {
+        warning:
+          "No published slot at this time — one was created. Call /cleaning-slots first and book a listed start_time.",
+      }),
     };
   }
 
   // ─── Per-service aggregators ───────────────────────────────────────────────
+
+  /**
+   * Bookable cleaning slots for a date window.
+   *
+   * The half of the cleaning flow that was missing. `createCleaningBooking`
+   * has always required an exact `date` + `start_time`, but nothing told the
+   * partner which times exist — and since that endpoint creates a slot on
+   * demand when nothing matches, a guessed time silently produced a visit
+   * outside the real schedule instead of being rejected.
+   *
+   * Times are Honduras local, in the same `HH:MM` shape `cleaning-booking`
+   * accepts, so a partner can feed a slot straight back without reformatting.
+   * `start_at`/`end_at` carry the same instant with an explicit offset for
+   * calendar use.
+   */
+  async listCleaningSlots(input: {
+    from?: string; to?: string; only_available?: boolean;
+  }): Promise<CleaningSlotsResponse> {
+    const from = input.from || this.todayHN();
+    const to = input.to || this.addDaysISO(from, 30);
+    const onlyAvailable = input.only_available !== false;
+
+    const rows = await this.rest<Array<{
+      id: string; date: string; start_time: string; end_time: string | null;
+      max_bookings: number | null; current_bookings: number | null; is_active: boolean | null;
+    }>>(
+      `cleaning_available_slots?select=id,date,start_time,end_time,max_bookings,current_bookings,is_active` +
+        `&date=gte.${from}&date=lte.${to}` +
+        `&order=date.asc,start_time.asc`,
+    );
+
+    const slots = (rows ?? []).map((r) => {
+      const capacity = Number(r.max_bookings ?? 0);
+      const booked = Number(r.current_bookings ?? 0);
+      const remaining = Math.max(capacity - booked, 0);
+      const start = String(r.start_time).slice(0, 5);
+      const end = String(r.end_time ?? "").slice(0, 5) || start;
+      return {
+        id: r.id,
+        date: r.date,
+        start_time: start,
+        end_time: end,
+        start_at: this.toHNOffsetISO(r.date, start),
+        end_at: this.toHNOffsetISO(r.date, end),
+        capacity,
+        booked,
+        remaining,
+        available: r.is_active !== false && remaining > 0,
+      };
+    });
+
+    return {
+      from,
+      to,
+      slots: onlyAvailable ? slots.filter((s) => s.available) : slots,
+    };
+  }
 
   private async listCleaningBookings(userId: string, from: string, to: string): Promise<IntegrationBooking[]> {
     // Subs the user owns (payment status is a UI concern; here we just list

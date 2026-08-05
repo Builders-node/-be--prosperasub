@@ -8,6 +8,7 @@ import {
   CreateCleaningBookingDto,
   type CreateCleaningBookingResponse,
 } from "./dto/create-cleaning-booking.dto";
+import { CleaningSlotsRequestDto, type CleaningSlotsResponse } from "./dto/cleaning-slots.dto";
 
 /**
  * Partner integration surface — narrow by design.
@@ -66,5 +67,18 @@ export class IntegrationsController {
   @UsePipes(new ValidationPipe({ whitelist: true, transform: true, forbidNonWhitelisted: true }))
   createCleaningBooking(@Body() body: CreateCleaningBookingDto): Promise<CreateCleaningBookingResponse> {
     return this.integrations.createCleaningBooking(body);
+  }
+
+  /**
+   * Which cleaning times exist, and which are still free.
+   *
+   * Must be called before `cleaning-booking`: that endpoint takes an exact
+   * date + start_time and will CREATE a slot if none matches, so a guessed
+   * time produces a visit outside the real schedule rather than an error.
+   */
+  @HttpCode(200)
+  @Post("cleaning-slots")
+  listCleaningSlots(@Body() body: CleaningSlotsRequestDto): Promise<CleaningSlotsResponse> {
+    return this.integrations.listCleaningSlots(body);
   }
 }
