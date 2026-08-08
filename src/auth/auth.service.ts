@@ -5,6 +5,7 @@ import { MailService } from "../mail/mail.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { PasswordService } from "./password.service";
 import { RoleName, SessionService } from "./session.service";
+import { buildAllowedOrigins } from "../config/app-origins";
 
 export type ApiRole = "super_admin" | "user";
 
@@ -712,23 +713,10 @@ export class AuthService {
   }
 
   private allowedRedirectOrigins() {
-    const configured = (this.config.get<string>("APP_ALLOWED_REDIRECT_ORIGINS") || "")
-      .split(",")
-      .map((origin) => origin.trim())
-      .filter(Boolean);
-
-    const origins = new Set(configured);
-    origins.add("https://prosperasub.com");
-    origins.add("https://www.prosperasub.com");
-
-    if (!this.isProduction()) {
-      origins.add("http://localhost:8080");
-      origins.add("http://127.0.0.1:8080");
-      origins.add("http://localhost:8081");
-      origins.add("http://127.0.0.1:8081");
-    }
-
-    return origins;
+    return buildAllowedOrigins(
+      this.config.get<string>("APP_ALLOWED_REDIRECT_ORIGINS"),
+      !this.isProduction(),
+    );
   }
 
   /**

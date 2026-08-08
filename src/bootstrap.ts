@@ -4,6 +4,7 @@ import { ValidationPipe } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
 import { AppModule } from "./app.module";
+import { buildAllowedOrigins } from "./config/app-origins";
 
 export async function createNestApp() {
   const app = await NestFactory.create(AppModule);
@@ -56,19 +57,13 @@ export async function createNestApp() {
 }
 
 function buildCorsOrigin(config: ConfigService, isProduction: boolean) {
-  const configured = (config.get<string>("API_ALLOWED_ORIGINS") || "")
-    .split(",")
-    .map((origin) => origin.trim())
-    .filter(Boolean);
-
-  const allowedOrigins = new Set(configured);
-
-  if (!isProduction) {
-    allowedOrigins.add("http://localhost:8080");
-    allowedOrigins.add("http://127.0.0.1:8080");
-    allowedOrigins.add("http://localhost:8081");
-    allowedOrigins.add("http://127.0.0.1:8081");
-  }
+  // Shared with the OAuth redirect allow-list. Production used to have no
+  // fallback here: every allowed origin came from API_ALLOWED_ORIGINS, so an
+  // unset env var didn't degrade anything, it blocked every browser request.
+  const allowedOrigins = buildAllowedOrigins(
+    config.get<string>("API_ALLOWED_ORIGINS"),
+    !isProduction,
+  );
 
   return (origin: string | undefined, callback: (error: Error | null, allow?: boolean) => void) => {
     if (!origin || allowedOrigins.has(origin)) {

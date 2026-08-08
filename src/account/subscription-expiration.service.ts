@@ -2,6 +2,7 @@ import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { MailService } from "../mail/mail.service";
 import { AccountNotificationsService, NotificationType } from "./account-notifications.service";
+import { publicAppUrl } from "../config/app-origins";
 
 const BUSINESS_TZ = process.env.BUSINESS_TIMEZONE || "America/Tegucigalpa";
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -427,7 +428,7 @@ export class SubscriptionExpirationService {
   }
 
   private appUrl(): string {
-    return (this.config.get<string>("FRONTEND_URL") || "https://prosperasub.com").replace(/\/$/, "");
+    return publicAppUrl(this.config.get<string>("FRONTEND_URL"));
   }
 
   private businessDateStr(d: Date): string {

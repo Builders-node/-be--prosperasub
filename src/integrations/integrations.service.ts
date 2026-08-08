@@ -22,6 +22,7 @@ import type {
   CreateCleaningBookingResponse,
 } from "./dto/create-cleaning-booking.dto";
 import type { CleaningSlotsResponse } from "./dto/cleaning-slots.dto";
+import { publicAppUrl } from "../config/app-origins";
 
 /**
  * Builders Node → ProsperaSub subscription mirror.
@@ -152,7 +153,7 @@ export class IntegrationsService {
     const { token, expiresIn } = this.sessions.createVerifyToken(userId, ttl);
 
     // ── 3. Compose the URL scanners will land on ───────────────────────────
-    const publicUrl = (this.config.get<string>("PUBLIC_APP_URL") ?? "https://prosperasub.com").replace(/\/$/, "");
+    const publicUrl = publicAppUrl(this.config.get<string>("PUBLIC_APP_URL"));
     const verifyUrl = `${publicUrl}/verify?token=${encodeURIComponent(token)}`;
 
     // ── 4. Render the QR to SVG server-side ────────────────────────────────
