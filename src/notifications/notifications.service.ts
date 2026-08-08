@@ -130,7 +130,7 @@ export class NotificationsService {
     return this.notifyPaymentSucceeded({
       provider,
       providerPaymentId,
-      serviceName: overrides.serviceName || session?.serviceName || "ProsperaSub payment",
+      serviceName: overrides.serviceName || session?.serviceName || "EverySub payment",
       clientName: overrides.clientName ?? session?.clientName ?? null,
       clientEmail: overrides.clientEmail ?? session?.clientEmail ?? null,
       clientPhone: overrides.clientPhone ?? session?.clientPhone ?? null,
@@ -305,7 +305,7 @@ export class NotificationsService {
   private normalizePayload(input: AdminPaymentNotificationPayload): Required<Pick<AdminPaymentNotificationPayload, "provider" | "providerPaymentId" | "serviceName">> & AdminPaymentNotificationPayload {
     return {
       ...input,
-      serviceName: input.serviceName || "ProsperaSub payment",
+      serviceName: input.serviceName || "EverySub payment",
       currency: input.currency || "USD",
       paymentStatus: input.paymentStatus || "paid",
       paidAt: input.paidAt ? new Date(input.paidAt) : new Date()
@@ -317,7 +317,7 @@ export class NotificationsService {
       provider: input.provider,
       providerPaymentId: input.providerPaymentId,
       context: input.context ?? null,
-      serviceName: input.serviceName || "ProsperaSub payment",
+      serviceName: input.serviceName || "EverySub payment",
       clientName: input.clientName ?? null,
       clientEmail: input.clientEmail ?? null,
       clientPhone: input.clientPhone ?? null,

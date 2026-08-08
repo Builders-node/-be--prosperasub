@@ -26,7 +26,7 @@ export class PayPalService {
         purchase_units: [
           {
             amount: { currency_code: "USD", value },
-            description: (input.description ?? "ProsperaSub payment").slice(0, 127),
+            description: (input.description ?? "EverySub payment").slice(0, 127),
           },
         ],
       }),

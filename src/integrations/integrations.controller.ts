@@ -36,7 +36,7 @@ export class IntegrationsController {
 
   /**
    * Mint a short-lived access QR for a user. The QR encodes a URL to our
-   * `/verify` page which shows GREEN/RED against every ProsperaSub
+   * `/verify` page which shows GREEN/RED against every EverySub
    * subscription across services (cleaning + food + beach + rental).
    */
   @Post("access-qr")

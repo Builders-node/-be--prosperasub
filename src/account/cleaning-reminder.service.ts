@@ -3,6 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import { MailService } from "../mail/mail.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { AccountNotificationsService } from "./account-notifications.service";
+import { APP_BRAND_NAME } from "../config/branding";
 
 const BUSINESS_TZ = process.env.BUSINESS_TIMEZONE || "America/Tegucigalpa";
 
@@ -285,7 +286,7 @@ export class CleaningReminderService {
           <p style="margin:0 0 16px;">Your cleaning is scheduled <strong>${this.htmlEscape(dateStr)} at ${this.htmlEscape(timeStr)}</strong>.</p>
           <p style="margin:0 0 16px;">Please make sure the apartment door is <strong>unlocked or accessible</strong> so the cleaning team can enter.</p>
           ${accessSection}
-          <p style="margin:24px 0 0;font-size:13px;color:#9ca3af;">— ProsperaSub Cleaning Team</p>
+          <p style="margin:24px 0 0;font-size:13px;color:#9ca3af;">— ${APP_BRAND_NAME} Cleaning Team</p>
         </div>`,
       text: [
         `Cleaning Reminder`,
@@ -296,7 +297,7 @@ export class CleaningReminderService {
         `Please make sure the apartment door is unlocked or accessible so the cleaning team can enter.`,
         accessNote ? `Access note: ${accessNote}` : "",
         ``,
-        `— ProsperaSub Cleaning Team`,
+        `— ${APP_BRAND_NAME} Cleaning Team`,
       ].filter((l) => l !== undefined).join("\n"),
     });
   }

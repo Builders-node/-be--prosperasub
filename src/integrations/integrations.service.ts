@@ -25,7 +25,7 @@ import type { CleaningSlotsResponse } from "./dto/cleaning-slots.dto";
 import { publicAppUrl } from "../config/app-origins";
 
 /**
- * Builders Node → ProsperaSub subscription mirror.
+ * Builders Node → EverySub subscription mirror.
  *
  * Public entry: `provisionSubscription()` — upserts the customer by email and
  * creates the food/cleaning subscription rows they asked for. Both legs are
@@ -108,7 +108,7 @@ export class IntegrationsService {
    * user identified by email or user_id. Builders Node embeds the SVG on
    * their profile page; anyone (staff, provider, kiosk) scans it and lands
    * on `/verify?token=…` which returns GREEN/RED against ALL the user's
-   * ProsperaSub subscriptions.
+   * EverySub subscriptions.
    *
    * User resolution: prefer `user_id` if present, else look up by email.
    * Never creates a user here — this endpoint is for showing status of an
@@ -135,7 +135,7 @@ export class IntegrationsService {
       );
       userId = rows?.[0]?.id ?? null;
       if (!userId) {
-        throw new NotFoundException(`No ProsperaSub user for email ${email}`);
+        throw new NotFoundException(`No EverySub user for email ${email}`);
       }
     } else {
       // Sanity-check the id exists — otherwise the QR mints fine but the
@@ -179,7 +179,7 @@ export class IntegrationsService {
   }
 
   /**
-   * List every scheduled event for a user across ProsperaSub services,
+   * List every scheduled event for a user across EverySub services,
    * normalised to a common shape. Returns cleaning visits (one row per
    * booked slot), beach court reservations, rental periods, and food
    * subscriptions (one row per subscription — its active window).
@@ -206,7 +206,7 @@ export class IntegrationsService {
         `users?select=id&email=eq.${encodeURIComponent(email)}&limit=1`,
       );
       userId = rows?.[0]?.id ?? null;
-      if (!userId) throw new NotFoundException(`No ProsperaSub user for email ${email}`);
+      if (!userId) throw new NotFoundException(`No EverySub user for email ${email}`);
     }
 
     // Date window
@@ -267,7 +267,7 @@ export class IntegrationsService {
         `users?select=id&email=eq.${encodeURIComponent(email)}&limit=1`,
       );
       userId = rows?.[0]?.id ?? null;
-      if (!userId) throw new NotFoundException(`No ProsperaSub user for email ${email}`);
+      if (!userId) throw new NotFoundException(`No EverySub user for email ${email}`);
     }
 
     // 2. Find an eligible subscription — paid + active/pending_schedule.

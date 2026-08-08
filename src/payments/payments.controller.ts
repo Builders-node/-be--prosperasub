@@ -257,7 +257,7 @@ export class PaymentsController {
     if (body.service_name) return body.service_name;
     if (body.context === "cleaning_subscription") return "Cleaning subscription";
     if (body.context === "admin_test_payment") return "Admin test payment";
-    return "ProsperaSub payment";
+    return "EverySub payment";
   }
 
   private resolvePlanName(body: CreateLightningInvoiceDto, cleaningPackage?: CleaningPackageDto) {

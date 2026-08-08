@@ -148,7 +148,7 @@ export class SimpleFiPaymentsController {
       provider: "simplefi",
       providerPaymentId: result.payment_id,
       context: body.context,
-      serviceName: body.service_name || "ProsperaSub payment",
+      serviceName: body.service_name || "EverySub payment",
       clientName: body.client_name ?? null,
       clientEmail: body.client_email ?? null,
       clientPhone: body.client_phone ?? null,

@@ -58,7 +58,7 @@ class CreatePublicPaymentDto {
 }
 
 @ApiTags("Public Payments API")
-@ApiHeader({ name: "x-api-key", description: "Your ProsperaSub public API key", required: true })
+@ApiHeader({ name: "x-api-key", description: "Your EverySub public API key", required: true })
 @UseGuards(PublicApiKeyGuard)
 @Controller("v1/payments")
 export class PublicPaymentsController {

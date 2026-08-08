@@ -10,7 +10,7 @@ import { PublicApiKeyGuard } from "./public-api-key.guard";
  *   GET /v1/data/food_subscriptions?status=eq.active&select=*&order=created_at.desc&limit=20
  */
 @ApiTags("Public Data API")
-@ApiHeader({ name: "x-api-key", description: "Your ProsperaSub public API key", required: true })
+@ApiHeader({ name: "x-api-key", description: "Your EverySub public API key", required: true })
 @UseGuards(PublicApiKeyGuard)
 @Controller("v1/data")
 export class PublicDataController {

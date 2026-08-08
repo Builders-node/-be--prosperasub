@@ -2,6 +2,7 @@ import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { MailService } from "../mail/mail.service";
 import { AdminPaymentNotificationPayload, NotificationSendResult } from "./notification.types";
+import { APP_BRAND_NAME } from "../config/branding";
 
 @Injectable()
 export class EmailNotificationService {
@@ -32,7 +33,7 @@ export class EmailNotificationService {
     return `
       <div style="font-family:Inter,Arial,sans-serif;color:#1f1f1f;line-height:1.5;">
         <h1 style="margin:0 0 8px;font-size:28px;">New payment received</h1>
-        <p style="margin:0 0 24px;color:#6b7280;">A confirmed payment was received through ProsperaSub.</p>
+        <p style="margin:0 0 24px;color:#6b7280;">A confirmed payment was received through ${APP_BRAND_NAME}.</p>
         <table style="border-collapse:collapse;width:100%;max-width:680px;">${rows}</table>
         ${adminLink}
       </div>

@@ -3,6 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import { MailService } from "../mail/mail.service";
 import { AccountNotificationsService, NotificationType } from "./account-notifications.service";
 import { publicAppUrl } from "../config/app-origins";
+import { APP_BRAND_NAME } from "../config/branding";
 
 const BUSINESS_TZ = process.env.BUSINESS_TIMEZONE || "America/Tegucigalpa";
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -332,7 +333,7 @@ export class SubscriptionExpirationService {
            style="display:inline-block;background:#F8A31A;color:#1f1f1f;font-weight:700;text-decoration:none;padding:12px 28px;border-radius:9999px;">
           Renew Subscription
         </a>
-        <p style="margin:28px 0 0;font-size:13px;color:#9ca3af;">— ProsperaSub</p>
+        <p style="margin:28px 0 0;font-size:13px;color:#9ca3af;">— ${APP_BRAND_NAME}</p>
       </div>`;
   }
 

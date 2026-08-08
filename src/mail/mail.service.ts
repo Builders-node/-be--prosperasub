@@ -1,5 +1,6 @@
 import { Injectable, Logger, ServiceUnavailableException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+import { APP_BRAND_NAME, DEFAULT_MAIL_FROM } from "../config/branding";
 
 interface MailMessage {
   to: string;
@@ -36,9 +37,9 @@ export class MailService {
   async sendPasswordResetEmail(input: PasswordResetEmailInput) {
     return this.sendMail({
       to: input.to,
-      subject: "Reset your ProsperaSub password",
+      subject: `Reset your ${APP_BRAND_NAME} password`,
       text: [
-        "Reset your ProsperaSub password",
+        `Reset your ${APP_BRAND_NAME} password`,
         "",
         "Use this secure link to choose a new password:",
         input.resetUrl,
@@ -46,7 +47,7 @@ export class MailService {
         "This link expires in 30 minutes. If you did not request this email, you can ignore it."
       ].join("\n"),
       html: `
-        <h1>Reset your ProsperaSub password</h1>
+        <h1>Reset your ${APP_BRAND_NAME} password</h1>
         <p>Use this secure link to choose a new password:</p>
         <p><a href="${this.escapeAttribute(input.resetUrl)}">Reset password</a></p>
         <p>This link expires in 30 minutes. If you did not request this email, you can ignore it.</p>
@@ -102,7 +103,7 @@ export class MailService {
 
   async sendMail(message: MailMessage) {
     const apiKey = this.config.get<string>("RESEND_API_KEY")?.trim();
-    const from = this.config.get<string>("MAIL_FROM")?.trim() || "ProsperaSub <no-reply@prosperasub.com>";
+    const from = this.config.get<string>("MAIL_FROM")?.trim() || DEFAULT_MAIL_FROM;
     const replyTo = this.config.get<string>("MAIL_REPLY_TO")?.trim();
 
     if (!apiKey) {

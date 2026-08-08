@@ -12,6 +12,7 @@ import { BillingService } from "../billing/billing.service";
 import type { PaymentMethod } from "../billing/payment-provider.port";
 import { PrismaService } from "../prisma/prisma.service";
 import { AuthService } from "../auth/auth.service";
+import { APP_BRAND_NAME } from "../config/branding";
 import type {
   CompleteCleaningBookingDto,
   CreateCustomCleaningPlanDto,
@@ -260,8 +261,8 @@ export class AdminService {
       await this.mail.sendMail({
         to: opts.email,
         subject: `Payment reminder — ${opts.serviceLabel}`,
-        text: `Hi ${name}, this is a friendly reminder that your payment for ${opts.serviceLabel}${amountStr} is still pending. Please complete it to keep your subscription active. — ProsperaSub`,
-        html: `<p>Hi ${name},</p><p>This is a friendly reminder that your payment for <strong>${opts.serviceLabel}</strong>${amountStr} is still pending. Please complete it to keep your subscription active.</p><p>Thank you,<br/>ProsperaSub</p>`,
+        text: `Hi ${name}, this is a friendly reminder that your payment for ${opts.serviceLabel}${amountStr} is still pending. Please complete it to keep your subscription active. — ${APP_BRAND_NAME}`,
+        html: `<p>Hi ${name},</p><p>This is a friendly reminder that your payment for <strong>${opts.serviceLabel}</strong>${amountStr} is still pending. Please complete it to keep your subscription active.</p><p>Thank you,<br/>${APP_BRAND_NAME}</p>`,
       }).then(() => methods.push("email")).catch((e) => this.logger.warn(`reminder email failed: ${(e as Error).message}`));
     }
 

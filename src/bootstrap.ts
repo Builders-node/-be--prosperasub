@@ -77,8 +77,8 @@ function buildCorsOrigin(config: ConfigService, isProduction: boolean) {
 
 function setupSwagger(app: Awaited<ReturnType<typeof NestFactory.create>>) {
   const config = new DocumentBuilder()
-    .setTitle("Prospera Sub API")
-    .setDescription("Owned API for Prospera Sub cleaning packages, admin metrics, auth, and Blink Lightning payments.")
+    .setTitle("EverySub API")
+    .setDescription("Owned API for EverySub cleaning packages, admin metrics, auth, and Blink Lightning payments.")
     .setVersion("0.1.0")
     .addBearerAuth()
     .build();
@@ -96,7 +96,7 @@ function setupSwagger(app: Awaited<ReturnType<typeof NestFactory.create>>) {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>ProsperaSub API</title>
+  <title>EverySub API</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css" />
 </head>
 <body style="margin:0">
