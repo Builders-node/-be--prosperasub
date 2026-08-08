@@ -116,6 +116,41 @@ export class SessionService {
     return { sub: payload.sub, typ: "verify" };
   }
 
+  /**
+   * Password-reset token.
+   *
+   * Signed rather than stored. The previous implementation kept tokens in an
+   * in-memory Map on the service instance — the code even said "valid only
+   * within the same Lambda instance". On serverless the lambda that sends the
+   * email is almost never the one that handles the click minutes later, so
+   * every reset link answered "Invalid or expired reset token". Password reset
+   * has been structurally broken in production, not occasionally flaky.
+   *
+   * Signing removes the storage entirely: any instance can verify it. Uses the
+   * same separate secret as the verify token, so a reset token can never be
+   * replayed as a session token.
+   *
+   * Trade-off worth knowing: without a store there is nothing to mark as used,
+   * so the link works more than once inside its 30-minute window. That is the
+   * same exposure the email itself carries, and it replaces a link that worked
+   * zero times. Making it strictly single-use needs a revocation table.
+   */
+  createPasswordResetToken(email: string, ttlSeconds = 1800) {
+    const token = jwt.sign({ typ: "pwreset" }, this.verifySecret(), {
+      subject: email,
+      expiresIn: ttlSeconds
+    });
+    return { token, expiresIn: ttlSeconds };
+  }
+
+  verifyPasswordResetToken(token: string): { email: string } {
+    const payload = jwt.verify(token, this.verifySecret()) as jwt.JwtPayload;
+    if (payload.typ !== "pwreset" || !payload.sub) {
+      throw new Error("Invalid password reset token");
+    }
+    return { email: String(payload.sub) };
+  }
+
   async hashRefreshToken(token: string): Promise<string> {
     return crypto.createHash("sha256").update(token).digest("hex");
   }

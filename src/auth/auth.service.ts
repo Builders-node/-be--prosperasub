@@ -56,11 +56,6 @@ export class AuthService {
   /** In-memory password hash for the Frorex owner account (fallback / seed). */
   private passwordHash: string | null = null;
 
-  /**
-   * Short-lived reset tokens: { token → { email, expiresAt } }.
-   * Kept in-memory; valid only within the same Lambda instance.
-   */
-  private readonly resetTokens = new Map<string, { email: string; expiresAt: number }>();
 
   /**
    * Cache for users seen this instance lifetime (Google OAuth, sign-ups, etc.)
@@ -356,11 +351,10 @@ export class AuthService {
 
     if (!isKnownUser) return silentResponse;
 
-    const resetToken = randomBytes(24).toString("hex");
-    this.resetTokens.set(resetToken, {
-      email: normalizedEmail,
-      expiresAt: Date.now() + 1000 * 60 * 30
-    });
+    // Signed, not stored. See SessionService.createPasswordResetToken: the old
+    // in-memory Map only worked if the same lambda handled both the request and
+    // the click, which on serverless it essentially never does.
+    const { token: resetToken } = this.sessions.createPasswordResetToken(normalizedEmail);
 
     const resetUrl = this.buildResetUrl(resetToken, redirectUrl);
     await this.sendPasswordResetEmail(normalizedEmail, resetUrl);
@@ -379,14 +373,12 @@ export class AuthService {
   }
 
   async confirmPasswordReset(token: string, password: string) {
-    const reset = this.resetTokens.get(token);
-
-    if (!reset || reset.expiresAt < Date.now()) {
+    let email: string;
+    try {
+      email = this.sessions.verifyPasswordResetToken(token).email;
+    } catch {
       throw new UnauthorizedException("Invalid or expired reset token");
     }
-
-    const { email } = reset;
-    this.resetTokens.delete(token);
 
     if (email === this.user.email) {
       this.passwordHash = await this.passwords.hash(password);
