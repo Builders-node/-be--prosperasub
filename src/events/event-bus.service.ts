@@ -1,6 +1,7 @@
 import { Injectable, Logger } from "@nestjs/common";
 import type { Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
+import { OutboxDispatcherService } from "./outbox-dispatcher.service";
 import type { PublishInput } from "./domain-event";
 
 /**
@@ -16,7 +17,10 @@ import type { PublishInput } from "./domain-event";
 export class EventBusService {
   private readonly logger = new Logger(EventBusService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly dispatcher: OutboxDispatcherService,
+  ) {}
 
   async publish(input: PublishInput): Promise<void> {
     if (!this.prisma.isAvailable()) {
@@ -36,6 +40,22 @@ export class EventBusService {
       });
     } catch (err) {
       this.logger.error(`Failed to publish '${input.type}': ${err instanceof Error ? err.message : String(err)}`);
+      return;
     }
+
+    // Deliver now, don't wait for the cron.
+    //
+    // The outbox was drained only by `/cron/dispatch-events`, which runs once a
+    // day at 06:30. Every subscriber therefore learned about an event up to 24
+    // hours late — for a court reservation mirrored into the operator's CRM
+    // that means they hear about it the next morning, quite possibly after the
+    // booking has already happened.
+    //
+    // Fire-and-forget and never rethrow: the business action that published this
+    // has already committed, and the row stays in the outbox with its retry
+    // count, so the cron remains the safety net if this pass fails.
+    void this.dispatcher.drain(25).catch((err) => {
+      this.logger.warn(`Inline dispatch after '${input.type}' failed: ${err instanceof Error ? err.message : String(err)}`);
+    });
   }
 }

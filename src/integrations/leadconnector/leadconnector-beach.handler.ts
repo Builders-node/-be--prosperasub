@@ -89,11 +89,14 @@ export class LeadconnectorBeachHandler implements DomainEventHandler, OnModuleIn
     const resource = await this.resources.getResource(booking.resourceId);
     if (resource?.source_service_key !== "beach" || !resource.source_resource_id) return;
 
-    const calendarId = this.calendarIdFor(resource.source_resource_id);
+    const calendarId = this.calendarIdFor(resource.source_resource_id, booking.resourceId);
     if (!calendarId) {
+      // Both ids in the message: whichever one the operator used, this line
+      // tells them the key that would have matched.
       this.logger.warn(
-        `[leadconnector] no calendarId for court ${resource.source_resource_id} — skip. ` +
-        `Set LEADCONNECTOR_COURT_CALENDAR_MAP to enable.`,
+        `[leadconnector] no calendarId for court "${resource.name ?? resource.source_resource_id}" — skip. ` +
+        `Add either id to LEADCONNECTOR_COURT_CALENDAR_MAP: ` +
+        `source_resource_id=${resource.source_resource_id} resource_id=${booking.resourceId}`,
       );
       return;
     }
@@ -178,7 +181,19 @@ export class LeadconnectorBeachHandler implements DomainEventHandler, OnModuleIn
 
   // ─── Helpers ───────────────────────────────────────────────────────────
 
-  private calendarIdFor(courtSourceId: string): string | null {
+  /**
+   * Look the calendar up by EITHER of the court's two ids.
+   *
+   * A court has a legacy `beach_club_courts.id` and an engine
+   * `bookable_resources.id`, and they are different UUIDs. This only accepted
+   * the legacy one — but the engine id is what the admin UI and `GET /resources`
+   * put on screen, so a map filled from what's visible matched nothing. The
+   * handler never throws by design, so the mirror just silently did nothing.
+   *
+   * Neither id is more "correct" than the other to someone writing config, so
+   * accept both rather than making that a thing you have to know.
+   */
+  private calendarIdFor(courtSourceId: string, engineResourceId?: string): string | null {
     const raw = this.config.get<string>("LEADCONNECTOR_COURT_CALENDAR_MAP");
     if (!raw) return null;
     let map: Record<string, string> | null = null;
@@ -189,7 +204,7 @@ export class LeadconnectorBeachHandler implements DomainEventHandler, OnModuleIn
       return null;
     }
     if (!map || typeof map !== "object") return null;
-    return map[courtSourceId] || null;
+    return map[courtSourceId] || (engineResourceId ? map[engineResourceId] : null) || null;
   }
 
   private async resolveCustomer(subjectRef: string | null): Promise<{

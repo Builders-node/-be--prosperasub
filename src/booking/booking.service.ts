@@ -257,13 +257,47 @@ export class BookingService {
     resource: { source_service_key?: string | null; source_resource_id?: string | null },
   ): Promise<unknown> {
     if (resource?.source_service_key === "beach" && resource.source_resource_id) {
-      const rows = await this.rest<Array<{ booking_settings: unknown }>>(
-        `beach_club_courts?select=booking_settings&id=eq.${encodeURIComponent(resource.source_resource_id)}&limit=1`,
+      const rows = await this.rest<Array<{
+        booking_settings: unknown;
+        open_hour: number | null;
+        close_hour: number | null;
+        slot_minutes: number | null;
+      }>>(
+        `beach_club_courts?select=booking_settings,open_hour,close_hour,slot_minutes` +
+          `&id=eq.${encodeURIComponent(resource.source_resource_id)}&limit=1`,
       );
-      const override = rows?.[0]?.booking_settings;
-      if (override) return override;
+      const court = rows?.[0];
+      if (court?.booking_settings) return court.booking_settings;
+
+      // A court carries its own opening hours (open_hour / close_hour /
+      // slot_minutes — what the admin edits on the Courts tab). Only
+      // `booking_settings` was ever read, and it is null for every court, so the
+      // engine fell through to the provider default and published 06:00–18:00
+      // for courts configured 08:00–19:00. Bookable hours the operator never
+      // set, and no bookable hours in the evening they did.
+      const schedule = this.buildFromCourtHours(court);
+      if (schedule) return schedule;
     }
     return this.loadBookingSettings(providerId);
+  }
+
+  /**
+   * Build a Schedule from a court's own hour columns. Courts are open the same
+   * hours every day of the week, including weekends — a beach club that shut on
+   * Saturday would be an odd beach club, and the provider default disables them.
+   */
+  private buildFromCourtHours(court: {
+    open_hour: number | null; close_hour: number | null; slot_minutes: number | null;
+  } | undefined): unknown | null {
+    const open = Number(court?.open_hour);
+    const close = Number(court?.close_hour);
+    if (!Number.isFinite(open) || !Number.isFinite(close) || close <= open) return null;
+    const hh = (h: number) => `${String(h).padStart(2, "0")}:00`;
+    const day = { enabled: true, from: hh(open), to: hh(close) };
+    return {
+      weekly: Array.from({ length: 7 }, () => ({ ...day })),
+      sessionDurationMin: Number(court?.slot_minutes) > 0 ? Number(court?.slot_minutes) : 60,
+    };
   }
 
   private async rest<T>(path: string): Promise<T | null> {
