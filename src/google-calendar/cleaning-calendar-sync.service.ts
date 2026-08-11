@@ -51,6 +51,57 @@ export class CleaningCalendarSyncService {
     return this.googleCalendar.getSharedAdminCleaningCalendarId();
   }
 
+  /**
+   * The calendar a booking belongs on: its provider's own, or the shared one.
+   *
+   * Every cleaning booking used to land in the single calendar named by
+   * GOOGLE_CLEANING_CALENDAR_ID, so a car wash and an apartment clean sat side
+   * by side with nothing but a line of description to tell them apart, and the
+   * staff of one business saw the schedule of the other. Beach courts have had
+   * a per-court calendar all along; cleaning simply never passed one.
+   *
+   * Returns undefined when the provider has no calendar of its own, which the
+   * calendar service reads as "use the shared one" — so nothing changes for a
+   * provider until an admin gives it one.
+   */
+  private readonly calendarIdCache = new Map<string, string | undefined>();
+
+  async resolveCalendarId(bookingId: string): Promise<string | undefined> {
+    if (this.calendarIdCache.has(bookingId)) return this.calendarIdCache.get(bookingId);
+    let calendarId: string | undefined;
+    try {
+      // booking -> subscription -> package -> legacy provider -> universal row
+      const rows = await this.supabaseRest<Array<{ subscription_id: string | null }>>(
+        `/cleaning_bookings?id=eq.${encodeURIComponent(bookingId)}&select=subscription_id&limit=1`,
+      );
+      const subId = rows?.[0]?.subscription_id;
+      if (subId) {
+        const subs = await this.supabaseRest<Array<{ package_id: string | null }>>(
+          `/cleaning_subscriptions?id=eq.${encodeURIComponent(subId)}&select=package_id&limit=1`,
+        );
+        const pkgId = subs?.[0]?.package_id;
+        if (pkgId) {
+          const pkgs = await this.supabaseRest<Array<{ provider_id: string | null }>>(
+            `/cleaning_packages?id=eq.${encodeURIComponent(pkgId)}&select=provider_id&limit=1`,
+          );
+          const legacyId = pkgs?.[0]?.provider_id;
+          if (legacyId) {
+            const provs = await this.supabaseRest<Array<{ google_calendar_id: string | null }>>(
+              `/providers?source_service_key=eq.cleaning&source_provider_id=eq.${encodeURIComponent(legacyId)}&select=google_calendar_id&limit=1`,
+            );
+            calendarId = provs?.[0]?.google_calendar_id?.trim() || undefined;
+          }
+        }
+      }
+    } catch (e) {
+      // A lookup failure must not stop the sync — fall back to the shared
+      // calendar, which is where this booking would have gone anyway.
+      this.logger.warn(`[sync] could not resolve calendar for booking ${bookingId}: ${(e as Error).message}`);
+    }
+    this.calendarIdCache.set(bookingId, calendarId);
+    return calendarId;
+  }
+
   getConfigurationStatus() {
     return this.googleCalendar.getConfigurationStatus();
   }
@@ -68,7 +119,8 @@ export class CleaningCalendarSyncService {
       const isCancelled = booking.status === "CANCELLED" || booking.status === "cancelled";
       const storedEventId = booking.googleCalendarEventId ?? null;
 
-      const result = await this.upsertCalendarEvent(bookingId, storedEventId, payload, isCancelled);
+      const calendarId = await this.resolveCalendarId(bookingId);
+      const result = await this.upsertCalendarEvent(bookingId, storedEventId, payload, isCancelled, calendarId);
 
       await this.prisma.cleaningBooking.update({
         where: { id: bookingId },
@@ -82,7 +134,10 @@ export class CleaningCalendarSyncService {
       });
 
       this.logger.log(`[sync] Booking ${bookingId} → event ${result.id} (${result.action})`);
-      return { ok: true, bookingId, eventId: result.id, action: result.action, calendarId: this.getSharedAdminCalendarId() };
+      // Report the calendar actually written to, not the shared default — the
+      // admin needs to know where to look.
+      return { ok: true, bookingId, eventId: result.id, action: result.action,
+               calendarId: (await this.resolveCalendarId(bookingId)) ?? this.getSharedAdminCalendarId() };
     } catch (error) {
       const message = error instanceof Error ? error.message : "Google Calendar sync failed";
       this.logger.warn(`[sync] Booking ${bookingId} failed: ${message}`);
@@ -128,6 +183,8 @@ export class CleaningCalendarSyncService {
     storedEventId: string | null,
     payload: GoogleCalendarEventPayload,
     isCancelled: boolean,
+    /** The provider's own calendar; undefined means the shared one. */
+    calendarId?: string,
   ): Promise<{ id: string; htmlLink?: string | null; action: "created" | "updated" | "cancelled" }> {
 
     // 0. If the stored event id is shared with another booking (legacy data bug),
@@ -142,8 +199,8 @@ export class CleaningCalendarSyncService {
     if (storedEventId) {
       try {
         const result = isCancelled
-          ? await this.googleCalendar.cancelEvent(storedEventId, payload)
-          : await this.googleCalendar.updateEvent(storedEventId, payload);
+          ? await this.googleCalendar.cancelEvent(storedEventId, payload, calendarId)
+          : await this.googleCalendar.updateEvent(storedEventId, payload, calendarId);
         this.logger.log(`[sync] Updated stored event ${storedEventId} for booking ${bookingId}`);
         return { ...result, action: isCancelled ? "cancelled" : "updated" };
       } catch (err) {
@@ -155,18 +212,18 @@ export class CleaningCalendarSyncService {
     }
 
     // 2. Search Google Calendar for events tagged with this bookingId
-    const byId = await this.googleCalendar.findEventsByBookingId(bookingId);
+    const byId = await this.googleCalendar.findEventsByBookingId(bookingId, calendarId);
     if (byId.length > 0) {
       const [keep, ...dupes] = byId;
       // Delete duplicates
       for (const dupe of dupes) {
         this.logger.warn(`[sync] Deleting duplicate event ${dupe.id} for booking ${bookingId}`);
-        await this.googleCalendar.deleteEvent(dupe.id).catch(() => {/* best effort */});
+        await this.googleCalendar.deleteEvent(dupe.id, calendarId).catch(() => {/* best effort */});
       }
       // Update the survivor
       const result = isCancelled
-        ? await this.googleCalendar.cancelEvent(keep.id, payload)
-        : await this.googleCalendar.updateEvent(keep.id, payload);
+        ? await this.googleCalendar.cancelEvent(keep.id, payload, calendarId)
+        : await this.googleCalendar.updateEvent(keep.id, payload, calendarId);
       this.logger.log(`[sync] Found & updated event ${keep.id} by bookingId for booking ${bookingId}${dupes.length ? ` (deleted ${dupes.length} duplicate(s))` : ""}`);
       return { ...result, action: isCancelled ? "cancelled" : "updated" };
     }
@@ -177,7 +234,7 @@ export class CleaningCalendarSyncService {
     //    ever being mapped onto the same calendar event id.
     const fullTitle = payload.summary.replace(/^\[Cancelled\]\s*/i, "");
     const dateStr = payload.start.toISOString().slice(0, 10);
-    const byTitle = await this.googleCalendar.findEventsByFallback(fullTitle, dateStr);
+    const byTitle = await this.googleCalendar.findEventsByFallback(fullTitle, dateStr, calendarId);
     const matchByTime = byTitle.find((e) => {
       const eStart = e.start?.dateTime ?? e.start?.date ?? "";
       const sameDay = eStart.startsWith(dateStr);
@@ -188,8 +245,8 @@ export class CleaningCalendarSyncService {
     if (matchByTime && !(await this.eventIdTakenByOtherBooking(matchByTime.id, bookingId))) {
       this.logger.log(`[sync] Found event ${matchByTime.id} by title fallback for booking ${bookingId}`);
       const result = isCancelled
-        ? await this.googleCalendar.cancelEvent(matchByTime.id, payload)
-        : await this.googleCalendar.updateEvent(matchByTime.id, payload);
+        ? await this.googleCalendar.cancelEvent(matchByTime.id, payload, calendarId)
+        : await this.googleCalendar.updateEvent(matchByTime.id, payload, calendarId);
       return { ...result, action: isCancelled ? "cancelled" : "updated" };
     }
     if (matchByTime) {
@@ -203,8 +260,8 @@ export class CleaningCalendarSyncService {
       return { id: storedEventId ?? "", htmlLink: null, action: "cancelled" };
     }
 
-    const result = await this.googleCalendar.createEvent(payload);
-    this.logger.log(`[sync] Created new event ${result.id} for booking ${bookingId}`);
+    const result = await this.googleCalendar.createEvent(payload, calendarId);
+    this.logger.log(`[sync] Created new event ${result.id} for booking ${bookingId}${calendarId ? ` on ${calendarId}` : ""}`);
     return { ...result, action: "created" };
   }
 

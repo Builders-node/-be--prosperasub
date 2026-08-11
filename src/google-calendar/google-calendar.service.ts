@@ -177,11 +177,13 @@ export class GoogleCalendarService {
    * Find all calendar events tagged with a specific bookingId in extendedProperties.
    * Returns events sorted by updated desc (newest first).
    */
-  async findEventsByBookingId(bookingId: string): Promise<GoogleCalendarEventItem[]> {
+  async findEventsByBookingId(bookingId: string, calendarId?: string): Promise<GoogleCalendarEventItem[]> {
     try {
       const response = await this.request<{ items?: GoogleCalendarEventItem[] }>(
         "GET",
         `/events?privateExtendedProperty=${encodeURIComponent(`bookingId=${bookingId}`)}&showDeleted=false&maxResults=10`,
+        undefined,
+        calendarId,
       );
       const items = response.items ?? [];
       return items.sort((a, b) =>
@@ -195,13 +197,15 @@ export class GoogleCalendarService {
   /**
    * Fallback: find events by title prefix + date (for old events without extendedProperties).
    */
-  async findEventsByFallback(summaryPrefix: string, startDate: string): Promise<GoogleCalendarEventItem[]> {
+  async findEventsByFallback(summaryPrefix: string, startDate: string, calendarId?: string): Promise<GoogleCalendarEventItem[]> {
     try {
       const timeMin = `${startDate}T00:00:00Z`;
       const timeMax = `${startDate}T23:59:59Z`;
       const response = await this.request<{ items?: GoogleCalendarEventItem[] }>(
         "GET",
         `/events?q=${encodeURIComponent(summaryPrefix)}&timeMin=${encodeURIComponent(timeMin)}&timeMax=${encodeURIComponent(timeMax)}&showDeleted=false&maxResults=20`,
+        undefined,
+        calendarId,
       );
       return response.items ?? [];
     } catch {
@@ -239,13 +243,13 @@ export class GoogleCalendarService {
   }
 
   /** Cancel (mark as cancelled) a Google Calendar event without deleting it. */
-  async cancelEvent(eventId: string, payload: GoogleCalendarEventPayload): Promise<GoogleCalendarEventResult> {
+  async cancelEvent(eventId: string, payload: GoogleCalendarEventPayload, calendarId?: string): Promise<GoogleCalendarEventResult> {
     const body = {
       ...this.toGoogleEvent(payload),
       status: "cancelled",
       colorId: "11", // Tomato — visually marks it as cancelled
     };
-    const response = await this.request<{ id: string; htmlLink?: string }>("PATCH", `/events/${encodeURIComponent(eventId)}`, body);
+    const response = await this.request<{ id: string; htmlLink?: string }>("PATCH", `/events/${encodeURIComponent(eventId)}`, body, calendarId);
     return { id: response.id, htmlLink: response.htmlLink ?? null };
   }
 

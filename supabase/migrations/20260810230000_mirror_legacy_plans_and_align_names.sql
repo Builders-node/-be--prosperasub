@@ -28,3 +28,9 @@
 --     error instead of a save.
 --   * The trigger swallows its own failures with a warning. A convenience
 --     mirror must never be the reason a legacy write fails.
+
+-- Also applied that day: providers.google_calendar_id, so each provider's
+-- bookings can sync to its own Google Calendar instead of one shared one.
+--   alter table providers add column if not exists google_calendar_id text;
+-- NULL keeps a provider on the shared GOOGLE_CLEANING_CALENDAR_ID, so nothing
+-- changes for it until an admin pastes an id.
