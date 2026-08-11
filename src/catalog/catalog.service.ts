@@ -159,8 +159,13 @@ export class CatalogService {
     }
 
     try {
+      // status AND visibility, not just is_active. This endpoint is public and
+      // unauthenticated; filtering on is_active alone published both "Cowork
+      // Apartment" plans, which are visibility=private and priced for assigned
+      // clients only. Archived and draft plans leaked the same way — the admin's
+      // Archive button writes status, and nothing here was reading it.
       const rows = await this.supabaseRest<CleaningPackageRow[]>(
-        "/cleaning_packages?select=id,name,description,price_per_cleaning_cents,monthly_price_cents,cleanings_per_month,frequency_unit,frequency_count,custom_frequency_label,pricing_mode,is_active&deleted_at=is.null&is_active=eq.true&order=price_per_cleaning_cents.asc"
+        "/cleaning_packages?select=id,name,description,price_per_cleaning_cents,monthly_price_cents,cleanings_per_month,frequency_unit,frequency_count,custom_frequency_label,pricing_mode,is_active&deleted_at=is.null&is_active=eq.true&status=eq.active&visibility=eq.public&order=price_per_cleaning_cents.asc"
       );
       return rows.map((row) => this.mapCleaningPackage(row));
     } catch (error) {
@@ -175,8 +180,12 @@ export class CatalogService {
     }
 
     try {
+      // By id, visibility is deliberately NOT filtered: a private plan is
+      // reached by the link its assigned client was given, and this lookup is
+      // what payments/ prices a checkout from. status is filtered, so an
+      // archived or draft plan cannot be paid for through an old link.
       const rows = await this.supabaseRest<CleaningPackageRow[]>(
-        `/cleaning_packages?select=id,name,description,price_per_cleaning_cents,monthly_price_cents,cleanings_per_month,frequency_unit,frequency_count,custom_frequency_label,pricing_mode,is_active&id=eq.${encodeURIComponent(id)}&deleted_at=is.null&limit=1`
+        `/cleaning_packages?select=id,name,description,price_per_cleaning_cents,monthly_price_cents,cleanings_per_month,frequency_unit,frequency_count,custom_frequency_label,pricing_mode,is_active&id=eq.${encodeURIComponent(id)}&deleted_at=is.null&status=eq.active&limit=1`
       );
       return rows[0] ? this.mapCleaningPackage(rows[0]) : undefined;
     } catch (error) {
