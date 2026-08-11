@@ -1,4 +1,4 @@
-import { blockAppliesOn, mondayFirstIndex, toHHMM, toMinutes, type Schedule } from "./schedule";
+import { blockAppliesOn, latestBlockEnd, mondayFirstIndex, toHHMM, toMinutes, type Schedule } from "./schedule";
 import type { BookingModel } from "../resource/resource-type";
 
 export interface Slot {
@@ -33,14 +33,22 @@ function timeSlotStrategy(schedule: Schedule, dateISO: string, capacity?: number
   const step = schedule.bufferBeforeMin + dur + schedule.bufferAfterMin;
   const ranges = schedule.blockedRanges.filter((r) => blockAppliesOn(r, dateISO));
   const slots: Slot[] = [];
-  for (let start = win.open; start + dur <= win.close; start += step) {
+  let start = win.open;
+  while (start + dur <= win.close) {
     const end = start + dur;
-    const blocked = ranges.some((r) => {
-      const bf = toMinutes(r.from);
-      const bt = toMinutes(r.to);
-      return !Number.isNaN(bf) && !Number.isNaN(bt) && start < bt && end > bf;
-    });
-    if (!blocked) slots.push({ from: toHHMM(start), to: toHHMM(end), capacity: capacity ?? 1 });
+    const blockEnd = latestBlockEnd(ranges, start, end);
+
+    if (blockEnd !== null) {
+      // Resume AT the moment the block ends, with no buffer in front of it.
+      // The buffer is the gap after a JOB — tidying up, driving on — and a
+      // blocked hour is not a job. Stepping the grid past it pushed the first
+      // slot after a 12:00–15:00 lunch to 15:30.
+      start = blockEnd > start ? blockEnd : start + step;
+      continue;
+    }
+
+    slots.push({ from: toHHMM(start), to: toHHMM(end), capacity: capacity ?? 1 });
+    start += step;
   }
   return slots;
 }

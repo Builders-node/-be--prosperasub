@@ -63,6 +63,57 @@ describe("blocked ranges without a date", () => {
     expect(schedule.blockedRanges).toHaveLength(0);
   });
 
+  // ── No buffer in front of a block ────────────────────────────────────────
+  // The buffer is the gap after a JOB — tidying up, driving on. A blocked hour
+  // is not a job, so the day resumes the moment the block ends. Stepping the
+  // fixed grid past it instead pushed the first slot after a 12:00–15:00 lunch
+  // to 15:30 and silently cost half an hour of every such day.
+  describe("the day resumes when the block ends", () => {
+    const withBuffer = (ranges: unknown[]) =>
+      normalizeSchedule({
+        ...DEFAULT_SCHEDULE,
+        weekly: DEFAULT_SCHEDULE.weekly.map(() => ({ enabled: true, from: "08:00", to: "18:00" })),
+        sessionDurationMin: 60,
+        bufferAfterMin: 30,
+        blockedRanges: ranges,
+      });
+    const at = (ranges: unknown[]) =>
+      generateSlots("time_slot", withBuffer(ranges), WED).map((s) => `${s.from}-${s.to}`);
+
+    it("starts the next slot exactly at the block's end", () => {
+      const slots = at([{ date: null, from: "12:00", to: "15:00" }]);
+      expect(slots).toContain("15:00-16:00");
+      expect(slots).not.toContain("15:30-16:30");
+    });
+
+    it("keeps the grid stepping normally after it resumes", () => {
+      const slots = at([{ date: null, from: "12:00", to: "15:00" }]);
+      // 15:00 + (60 + 30) = 16:30
+      expect(slots).toContain("16:30-17:30");
+    });
+
+    it("leaves everything before the block untouched", () => {
+      const slots = at([{ date: null, from: "12:00", to: "15:00" }]);
+      expect(slots.slice(0, 3)).toEqual(["08:00-09:00", "09:30-10:30", "11:00-12:00"]);
+    });
+
+    it("resumes past the LAST of several overlapping blocks", () => {
+      const slots = at([
+        { date: null, from: "12:00", to: "13:00" },
+        { date: null, from: "12:30", to: "14:00" },
+      ]);
+      expect(slots).toContain("14:00-15:00");
+      expect(slots.some((s) => s.startsWith("12:") || s.startsWith("13:"))).toBe(false);
+    });
+
+    it("terminates when a block ends at or before it starts", () => {
+      // A zero-width or inverted range must not stall the loop. If this ever
+      // regresses the test suite hangs rather than fails, so it is worth having.
+      const slots = at([{ date: null, from: "12:00", to: "12:00" }]);
+      expect(slots.length).toBeGreaterThan(0);
+    });
+  });
+
   it("blockAppliesOn matches the filter both engines use", () => {
     expect(blockAppliesOn({ date: null, from: "12:00", to: "13:00" }, WED)).toBe(true);
     expect(blockAppliesOn({ date: WED, from: "12:00", to: "13:00" }, WED)).toBe(true);
