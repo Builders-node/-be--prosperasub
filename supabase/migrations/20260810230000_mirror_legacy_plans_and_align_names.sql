@@ -34,3 +34,9 @@
 --   alter table providers add column if not exists google_calendar_id text;
 -- NULL keeps a provider on the shared GOOGLE_CLEANING_CALENDAR_ID, so nothing
 -- changes for it until an admin pastes an id.
+
+-- And the last of the retired brand in provider text:
+--   update providers set description = 'Beach Club — memberships and courts'
+--   where id = '00000000-0000-0000-0000-000000beac41';
+-- Massage's "Book a massage at Prospera Village" is left alone — that is the
+-- place the club sits in, not the old product name.
