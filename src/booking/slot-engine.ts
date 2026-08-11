@@ -1,4 +1,4 @@
-import { mondayFirstIndex, toHHMM, toMinutes, type Schedule } from "./schedule";
+import { blockAppliesOn, mondayFirstIndex, toHHMM, toMinutes, type Schedule } from "./schedule";
 import type { BookingModel } from "../resource/resource-type";
 
 export interface Slot {
@@ -31,7 +31,7 @@ function timeSlotStrategy(schedule: Schedule, dateISO: string, capacity?: number
   const dur = schedule.sessionDurationMin;
   if (dur <= 0) return [];
   const step = schedule.bufferBeforeMin + dur + schedule.bufferAfterMin;
-  const ranges = schedule.blockedRanges.filter((r) => r.date === dateISO);
+  const ranges = schedule.blockedRanges.filter((r) => blockAppliesOn(r, dateISO));
   const slots: Slot[] = [];
   for (let start = win.open; start + dur <= win.close; start += step) {
     const end = start + dur;

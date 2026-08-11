@@ -12,9 +12,16 @@ export interface DayHours {
 }
 
 export interface BlockedRange {
-  date: string;   // "YYYY-MM-DD"
+  /** "YYYY-MM-DD" for a one-off, or **null for every day** (a lunch hour, a
+   *  shift changeover). Must stay in step with the frontend's BlockedRange. */
+  date: string | null;
   from: string;   // "HH:MM"
   to: string;     // "HH:MM"
+}
+
+/** Does this block apply on the given day? */
+export function blockAppliesOn(range: BlockedRange, dateISO: string): boolean {
+  return range.date === null || range.date === dateISO;
 }
 
 export interface Schedule {
@@ -86,8 +93,13 @@ export function normalizeSchedule(raw: unknown): Schedule {
     minNoticeHours: Math.max(0, Number(s.minNoticeHours) || 0),
     maxAdvanceDays: Number(s.maxAdvanceDays) > 0 ? Number(s.maxAdvanceDays) : d.maxAdvanceDays,
     blockedDates: Array.isArray(s.blockedDates) ? s.blockedDates.filter((x): x is string => typeof x === "string") : [],
+    // The date is optional and its absence is meaningful: no date = every day.
+    // "" was what the old editor wrote when no date was picked, and it matched
+    // nothing — it now reads as what the provider meant.
     blockedRanges: Array.isArray(s.blockedRanges)
-      ? s.blockedRanges.filter((r): r is BlockedRange => !!r && typeof r.date === "string")
+      ? s.blockedRanges
+          .filter((r): r is BlockedRange => !!r && typeof r.from === "string" && typeof r.to === "string")
+          .map((r) => ({ ...r, date: typeof r.date === "string" && r.date !== "" ? r.date : null }))
       : [],
   };
 }
