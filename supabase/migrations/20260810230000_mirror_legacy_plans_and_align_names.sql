@@ -1,0 +1,30 @@
+-- Applied to production on 2026-08-10 via the Supabase MCP; recorded here after.
+--
+-- 1. provider_plans was backfilled once and never maintained. The admin
+--    marketplace hub counts that table, so it showed Food 3 plans against 6
+--    real ones and Cleaning 5 against 6, and Car Wash's only package was
+--    missing entirely. Admins were deciding from an incomplete catalogue.
+--
+--    Triggers rather than another one-off backfill: writes arrive from the
+--    browser, the backend and admin tools alike, and the database is the only
+--    place that sees all of them.
+--
+-- 2. The same business had two names — "Apartment Cleaning" in the universal
+--    row the customer sees, "ProsperaSub Cleaning" in the legacy row, still
+--    carrying a brand the platform stopped using. Which one a person saw
+--    depended on which table their page happened to read.
+--
+-- The full statements are in the two migrations applied that day:
+--   mirror_plan_to_provider_plans() + triggers on cleaning_packages,
+--   food_meal_plans and beach_club_plans
+--   provider_plans_source_uniq (plain, not partial — ON CONFLICT cannot infer
+--   a partial index without repeating its predicate)
+--   legacy provider names aligned to the universal ones
+--
+-- Two things worth carrying forward:
+--   * providers.source_provider_id is uuid, not text. Comparing it to
+--     new.provider_id::text raised 42883 and would have failed the whole
+--     food_meal_plans write — a restaurant editing its menu would have got an
+--     error instead of a save.
+--   * The trigger swallows its own failures with a warning. A convenience
+--     mirror must never be the reason a legacy write fails.
