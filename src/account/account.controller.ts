@@ -5,6 +5,7 @@ import { AccountAuthGuard, type AccountRequest } from "./account-auth.guard";
 import { AccountNotificationsService } from "./account-notifications.service";
 import { AccountPasswordService } from "./account-password.service";
 import { AccountPreferencesService } from "./account-preferences.service";
+import { AccountCancellationService } from "./account-cancellation.service";
 import { AccountPaymentService } from "./account-payment.service";
 import { AccountCleaningService } from "./account-cleaning.service";
 import { CleaningReminderService } from "./cleaning-reminder.service";
@@ -61,6 +62,7 @@ export class AccountController {
     private readonly reminders: CleaningReminderService,
     private readonly payment: AccountPaymentService,
     private readonly cleaning: AccountCleaningService,
+    private readonly cancellation: AccountCancellationService,
   ) {}
 
   // ── Cleaning self-service ────────────────────────────────────────────────────
@@ -172,6 +174,31 @@ export class AccountController {
   @Post("subscriptions/:id/invoice")
   getSubscriptionInvoice(@Req() req: AccountRequest, @Param("id") subscriptionId: string) {
     return this.payment.createInvoice(req.authUser!.id, subscriptionId);
+  }
+
+  // ── Cancellation ───────────────────────────────────────────────────────────
+  // One pair of routes for all four services. `service` is cleaning | food |
+  // beach | plan; the service layer maps it to a table and its status column,
+  // and refuses anything it does not recognise.
+
+  @ApiOperation({ summary: "Stop a subscription renewing at the end of the paid period" })
+  @Post(":service/subscriptions/:id/cancel")
+  cancelSubscription(
+    @Req() req: AccountRequest,
+    @Param("service") service: string,
+    @Param("id") subscriptionId: string,
+  ) {
+    return this.cancellation.cancel(req.authUser!.id, service, subscriptionId);
+  }
+
+  @ApiOperation({ summary: "Undo a cancellation while the period is still running" })
+  @Post(":service/subscriptions/:id/resume")
+  resumeSubscription(
+    @Req() req: AccountRequest,
+    @Param("service") service: string,
+    @Param("id") subscriptionId: string,
+  ) {
+    return this.cancellation.resume(req.authUser!.id, service, subscriptionId);
   }
 
 }

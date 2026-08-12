@@ -8,7 +8,10 @@ import { APP_BRAND_NAME } from "../config/branding";
 const BUSINESS_TZ = process.env.BUSINESS_TIMEZONE || "America/Tegucigalpa";
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-type Stage = "2_day" | "1_day" | "expired";
+// The expiry ladder, plus two nudges for a subscription that was paid for and
+// never scheduled. Both sets share the (subscription, stage) claim ledger, so
+// each one is delivered at most once.
+type Stage = "2_day" | "1_day" | "expired" | "unscheduled_1" | "unscheduled_3";
 type SubType = "food" | "cleaning";
 
 interface PendingReminder {
@@ -17,7 +20,12 @@ interface PendingReminder {
   userId: string;
   stage: Stage;
   planName: string;
-  expirationStr: string; // YYYY-MM-DD
+  /**
+   * YYYY-MM-DD. For the expiry ladder this is when the plan runs out; for the
+   * unscheduled nudges it is the day the customer paid, which is what the
+   * message is actually about.
+   */
+  expirationStr: string;
 }
 
 export interface ProcessStats {
@@ -63,6 +71,7 @@ export class SubscriptionExpirationService {
       pending = [
         ...(await this.collectFoodReminders(todayStr)),
         ...(await this.collectCleaningReminders(todayStr)),
+        ...(await this.collectUnscheduledCleaningReminders(todayStr)),
       ];
     } catch (err) {
       this.logger.error(`Failed to collect subscriptions: ${(err as Error).message}`);
@@ -149,9 +158,17 @@ export class SubscriptionExpirationService {
     }
   }
 
+  /**
+   * Note `cancel_at_period_end=eq.false` on both expiry collectors below.
+   *
+   * A customer who has cancelled is told the end date at the moment they
+   * cancel; chasing them afterwards with "renew now to continue receiving
+   * bookings" is nagging someone for a decision they already made. They still
+   * keep access until the date — the flag changes nothing about that.
+   */
   private async collectFoodReminders(todayStr: string): Promise<PendingReminder[]> {
     const subs = await this.supabaseRest<any[]>(
-      `/food_subscriptions?status=eq.active&select=id,user_id,meal_plan_id,started_at,end_date,commitment_weeks&limit=500`,
+      `/food_subscriptions?status=eq.active&cancel_at_period_end=eq.false&select=id,user_id,meal_plan_id,started_at,end_date,commitment_weeks&limit=500`,
     );
     if (!subs?.length) return [];
 
@@ -186,7 +203,7 @@ export class SubscriptionExpirationService {
 
   private async collectCleaningReminders(todayStr: string): Promise<PendingReminder[]> {
     const subs = await this.supabaseRest<any[]>(
-      `/cleaning_subscriptions?subscription_status=eq.active&is_active=eq.true&select=id,user_id,package_id,service_end_date,end_date,paid_until&limit=500`,
+      `/cleaning_subscriptions?subscription_status=eq.active&is_active=eq.true&cancel_at_period_end=eq.false&select=id,user_id,package_id,service_end_date,end_date,paid_until&limit=500`,
     );
     if (!subs?.length) return [];
 
@@ -209,6 +226,73 @@ export class SubscriptionExpirationService {
         stage,
         planName: planNames.get(s.package_id) || "your cleaning plan",
         expirationStr,
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Paid for, never scheduled.
+   *
+   * A cleaning subscription lands on `pending_schedule` the moment payment
+   * clears; the customer is meant to pick a day and time on the next screen.
+   * If they close the tab there, nothing has ever chased them — the expiry
+   * ladder only looks at `status = active`, so these fall between the two.
+   * Three were sitting unscheduled for 5, 9 and 12 days when this was written.
+   *
+   * Only subscriptions with no booking at all. One visit already on the
+   * calendar means they found the screen.
+   */
+  private async collectUnscheduledCleaningReminders(todayStr: string): Promise<PendingReminder[]> {
+    const subs = await this.supabaseRest<any[]>(
+      `/cleaning_subscriptions?payment_status=eq.paid&subscription_status=eq.pending_schedule` +
+        `&deleted_at=is.null&select=id,user_id,package_id,created_at&limit=500`,
+    );
+    if (!subs?.length) return [];
+
+    // One query for every booking that belongs to this batch, rather than one
+    // per subscription.
+    const ids = subs.map((s) => s.id).filter(Boolean);
+    const booked = new Set<string>();
+    if (ids.length) {
+      const rows = await this.supabaseRest<any[]>(
+        `/cleaning_bookings?subscription_id=in.(${ids.map((id) => `"${id}"`).join(",")})&select=subscription_id`,
+      );
+      (rows ?? []).forEach((b) => b?.subscription_id && booked.add(String(b.subscription_id)));
+    }
+
+    const planNames = await this.lookupNames(
+      "/cleaning_packages",
+      subs.map((s) => s.package_id).filter(Boolean),
+    );
+
+    const out: PendingReminder[] = [];
+    for (const s of subs) {
+      if (!s.user_id || !s.created_at) continue;
+      if (booked.has(String(s.id))) continue;
+
+      const paidOn = String(s.created_at).slice(0, 10);
+      const daysSince = Math.round(
+        (Date.parse(`${todayStr}T00:00:00Z`) - Date.parse(`${paidOn}T00:00:00Z`)) / DAY_MS,
+      );
+
+      // Day 1 and day 3. Not day 0 — the checkout screen just asked them, and
+      // an email in the same minute reads as a system that isn't paying
+      // attention. Anything older than day 3 has had both nudges; the claim
+      // ledger stops a repeat, and `>=` lets a subscription that was created
+      // while the cron was down still get its first one.
+      let stage: Stage | null = null;
+      if (daysSince === 1) stage = "unscheduled_1";
+      else if (daysSince >= 3) stage = "unscheduled_3";
+      if (!stage) continue;
+
+      out.push({
+        type: "cleaning",
+        subscriptionId: String(s.id),
+        userId: s.user_id,
+        stage,
+        planName: planNames.get(s.package_id) || "your cleaning plan",
+        expirationStr: paidOn,
       });
     }
     return out;
@@ -243,7 +327,12 @@ export class SubscriptionExpirationService {
       body: content.body,
       relatedEntityType: item.type === "food" ? "food_subscription" : "cleaning_subscription",
       relatedEntityId: item.subscriptionId,
-      actionUrl: "/my-subscriptions",
+      // The unscheduled nudge lands on the schedule picker for THAT
+      // subscription. Sending it to the subscriptions list would ask the
+      // customer to find the thing the message is about.
+      actionUrl: item.stage.startsWith("unscheduled")
+        ? `/services/cleaning/book?subscriptionId=${item.subscriptionId}`
+        : "/my-subscriptions",
       metadata: { stage: item.stage, planName: item.planName, expirationDate: item.expirationStr },
     });
     methods.push("in_app");
@@ -271,6 +360,24 @@ export class SubscriptionExpirationService {
   } {
     const plan = item.planName;
     const date = this.formatDate(item.expirationStr);
+
+    // Paid, never scheduled. Note the tone: this customer has done nothing
+    // wrong and is owed a service they have already paid for, so the message
+    // is a reminder that something is waiting for them, not a demand.
+    if (item.stage === "unscheduled_1" || item.stage === "unscheduled_3") {
+      const waited = item.stage === "unscheduled_3" ? " It has been a few days." : "";
+      return {
+        notificationType: "reminder_general",
+        subject: "Pick a time for your cleaning",
+        title: "Your cleaning is paid for — choose a time",
+        body:
+          `You paid for ${plan} on ${date} and haven't picked a day and time yet.${waited} ` +
+          `Choose a slot and we'll put it on the schedule. Nothing expires in the meantime.`,
+        text:
+          `You paid for ${plan} on ${date} and haven't picked a day and time yet.${waited}\n\n` +
+          `Choose a slot and we'll put it on the schedule. Nothing expires in the meantime.`,
+      };
+    }
 
     if (item.stage === "2_day") {
       return {
@@ -323,15 +430,21 @@ export class SubscriptionExpirationService {
     user?: { name?: string; display_name?: string },
   ): string {
     const name = user?.display_name || user?.name || "there";
-    const renewUrl = `${this.appUrl()}/my-subscriptions`;
+    // "Renew Subscription" is the wrong button on a subscription that has not
+    // started yet — it is paid for and waiting for a time.
+    const unscheduled = item.stage.startsWith("unscheduled");
+    const ctaUrl = unscheduled
+      ? `${this.appUrl()}/services/cleaning/book?subscriptionId=${encodeURIComponent(item.subscriptionId)}`
+      : `${this.appUrl()}/my-subscriptions`;
+    const ctaLabel = unscheduled ? "Choose a time" : "Renew Subscription";
     return `
       <div style="font-family:Inter,Arial,sans-serif;color:#1f1f1f;line-height:1.6;max-width:560px;">
         <h2 style="margin:0 0 8px;font-size:22px;">${this.htmlEscape(content.title)}</h2>
         <p style="margin:0 0 16px;color:#6b7280;">Hi ${this.htmlEscape(name)},</p>
         <p style="margin:0 0 24px;">${this.htmlEscape(content.body)}</p>
-        <a href="${renewUrl}"
+        <a href="${ctaUrl}"
            style="display:inline-block;background:#F8A31A;color:#1f1f1f;font-weight:700;text-decoration:none;padding:12px 28px;border-radius:9999px;">
-          Renew Subscription
+          ${ctaLabel}
         </a>
         <p style="margin:28px 0 0;font-size:13px;color:#9ca3af;">— ${APP_BRAND_NAME}</p>
       </div>`;

@@ -11,6 +11,7 @@ import { AccountPreferencesService } from "./account-preferences.service";
 import { AccountPaymentService } from "./account-payment.service";
 import { AccountCleaningService } from "./account-cleaning.service";
 import { AccountRenewalsService } from "./account-renewals.service";
+import { AccountCancellationService } from "./account-cancellation.service";
 import { AccountController } from "./account.controller";
 import { AccountRenewalsController } from "./account-renewals.controller";
 import { CleaningReminderService } from "./cleaning-reminder.service";
@@ -28,6 +29,7 @@ import { RemindersController } from "./reminders.controller";
     AccountPaymentService,
     AccountCleaningService,
     AccountRenewalsService,
+    AccountCancellationService,
     CleaningReminderService,
     SubscriptionExpirationService,
   ],

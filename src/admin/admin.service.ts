@@ -942,18 +942,13 @@ export class AdminService {
         relatedEntityId: subId,
         actionUrl: "/my-subscriptions",
       });
-      if (paymentStatus === "paid") {
-        await this.accountNotifications.create({
-          recipientUserId: recipientId,
-          category: "payment",
-          type: "payment_received",
-          title: "Payment received",
-          body: `Your payment for ${planName} has been confirmed.`,
-          relatedEntityType: "subscription",
-          relatedEntityId: subId,
-          actionUrl: "/my-subscriptions",
-        });
-      } else if (paymentStatus === "pending") {
+      // "Payment received" is no longer sent from here. It is a database
+      // trigger now (notify_payment_received), because this was the ONLY place
+      // that sent one — so a customer buying through the storefront got
+      // nothing, and the reconcile cron confirming a Lightning payment hours
+      // later got nothing either. The trigger fires on the transition to paid
+      // wherever the write comes from, and refuses to send twice.
+      if (paymentStatus === "pending") {
         await this.accountNotifications.create({
           recipientUserId: recipientId,
           category: "payment",
@@ -1377,18 +1372,9 @@ export class AdminService {
       const prevPaymentStatus = subBefore.payment_status ? String(subBefore.payment_status) : null;
       const prevSubStatus = subBefore.subscription_status ? String(subBefore.subscription_status) : null;
 
-      if (newPaymentStatus === "paid" && prevPaymentStatus !== "paid") {
-        await this.accountNotifications.create({
-          recipientUserId: recipientId,
-          category: "payment",
-          type: "payment_received",
-          title: "Payment received",
-          body: `Your payment for ${planName} has been confirmed.`,
-          relatedEntityType: "subscription",
-          relatedEntityId: subId,
-          actionUrl: "/my-subscriptions",
-        });
-      } else if (newPaymentStatus === "pending" && prevPaymentStatus !== "pending") {
+      // The paid transition is handled by the notify_payment_received trigger —
+      // see the note on the create path above.
+      if (newPaymentStatus === "pending" && prevPaymentStatus !== "pending") {
         await this.accountNotifications.create({
           recipientUserId: recipientId,
           category: "payment",
