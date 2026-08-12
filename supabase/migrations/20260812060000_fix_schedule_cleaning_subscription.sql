@@ -1,0 +1,56 @@
+-- The recurring cleaning scheduler was broken in two ways at once, and both
+-- left a customer who had already paid unable to book anything. Reported by a
+-- customer on 2026-08-12: "can't book Car Wash, I have the plan".
+--
+-- 1. `slots.start_time = p_start_time` compares a TEXT column to a TIME
+--    parameter. Postgres has no such operator, so the call raised
+--        42883 operator does not exist: text = time without time zone
+--    the moment anybody pressed confirm. The column must have been TIME when
+--    this function was written; it is text now, and nothing re-checked.
+--
+-- 2. The slot lookup had no provider in it. Slots became per-provider on
+--    2026-08-10 (20260810220000_cleaning_slots_per_provider), so
+--    `date = X and start_time = Y` now matches Car Wash's row, Apartment
+--    Cleaning's row AND the legacy shared row — three of them for 2026-08-13
+--    08:00. The LEFT JOIN would have produced three bookings per date and
+--    consumed capacity in two other providers' grids. Nobody had scheduled
+--    since that migration, so it never fired; the next customer would have
+--    been the first. This is a regression from that change.
+--
+-- Also added: `is_active`. The booking page hides inactive slots, this did not,
+-- so a customer could be scheduled into an hour the provider had switched off.
+--
+-- The provider is resolved the same way the booking page resolves it —
+-- package → legacy provider → universal provider — with the same fallback: a
+-- provider that keeps no grid of its own uses the shared rows.
+--
+-- Applied to production on 2026-08-12 via the Supabase MCP. The full body is
+-- the CREATE OR REPLACE that was applied; only the four lines below changed
+-- from the previous definition, plus the two new declarations:
+--
+--   v_provider_id UUID;
+--   v_start_txt   TEXT;
+--
+--   v_start_txt := to_char(p_start_time, 'HH24:MI:SS');
+--
+--   SELECT pr.id INTO v_provider_id
+--   FROM public.cleaning_packages cp
+--   JOIN public.providers pr
+--     ON pr.source_provider_id = cp.provider_id
+--    AND pr.source_service_key = 'cleaning'
+--   WHERE cp.id = v_subscription.package_id;
+--
+--   IF v_provider_id IS NOT NULL AND NOT EXISTS (
+--     SELECT 1 FROM public.cleaning_available_slots s WHERE s.provider_id = v_provider_id
+--   ) THEN
+--     v_provider_id := NULL;
+--   END IF;
+--
+--   LEFT JOIN public.cleaning_available_slots slots
+--     ON slots.date = dates.service_date
+--    AND slots.start_time = v_start_txt
+--    AND slots.provider_id IS NOT DISTINCT FROM v_provider_id
+--    AND slots.is_active;
+--
+-- Verified against the reporting customer's own subscription: eight Thursdays
+-- from 13 Aug to 1 Oct, exactly one Car Wash slot each, all free.
