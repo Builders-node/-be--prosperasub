@@ -44,6 +44,12 @@ comment on column provider_subscriptions.notes is
 drop table if exists public.cleaning_reviews;
 drop table if exists public.food_reviews;
 
+-- NOTE: get_food_catalog() aggregated ratings from food_reviews. plpgsql does
+-- not resolve table names until run time, so this drop succeeded and the food
+-- listing started failing with 42P01 in production. Fixed in
+-- 20260812093000_get_food_catalog_reads_provider_reviews.sql — grep the
+-- database's function bodies, not just the app source, before dropping a table.
+
 comment on table public.provider_reviews is
   'Every rating on the platform. One row per (provider_id, user_id) — upserted, so a customer has one standing review per business. `service` records which flow it came from. Replaced cleaning_reviews and food_reviews on 2026-08-12.';
 
