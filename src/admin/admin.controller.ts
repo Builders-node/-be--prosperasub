@@ -509,6 +509,17 @@ export class AdminController {
     return this.admin.syncAllCleaningBookingsCalendar();
   }
 
+  @ApiOperation({
+    summary: "Which Google Calendar a provider's cleaning bookings sync to",
+    description:
+      "The binding was invisible: providers.google_calendar_id is set on one admin page nobody visits, and when it is empty everything silently lands in the calendar named by the GOOGLE_CLEANING_CALENDAR_ID env var — which the browser cannot see at all. This reports the calendar actually in effect and where it came from.",
+  })
+  @Get("cleaning/calendar/target")
+  @RequireAdminPermission(AdminPermission.BookingsRead)
+  getCleaningCalendarTarget(@Query("providerId") providerId?: string) {
+    return this.admin.getCleaningCalendarTarget(providerId);
+  }
+
   @ApiOperation({ summary: "Reconcile the shared cleaning calendar (remove orphaned events, fix dates, sync pending)" })
   @ApiResponse({ status: 201, description: "Reconcile summary: orphans deleted, mismatches re-synced, pending synced." })
   @Post("cleaning/calendar/reconcile")

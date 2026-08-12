@@ -2537,6 +2537,48 @@ export class AdminService {
     }
   }
 
+  /**
+   * Which Google Calendar this provider's bookings actually land in.
+   *
+   * The binding had no window into it anywhere. providers.google_calendar_id is
+   * editable on one admin page reached only from the marketplace hub, and when
+   * it is empty — which it is for every provider today — the sync silently uses
+   * the calendar named by GOOGLE_CLEANING_CALENDAR_ID. That value lives in the
+   * server's environment, so the browser has no way to learn it, and the screen
+   * that says "Sync booked sessions to Google Calendar" could not say which one.
+   */
+  async getCleaningCalendarTarget(providerId?: string) {
+    const platformCalendarId = this.cleaningCalendarSync.getSharedAdminCalendarId() ?? null;
+
+    let ownCalendarId: string | null = null;
+    let providerName: string | null = null;
+    if (providerId) {
+      try {
+        const rows = await this.supabaseRest<Array<{ name?: string; google_calendar_id?: string | null }>>(
+          `/providers?select=name,google_calendar_id&id=eq.${encodeURIComponent(providerId)}&limit=1`,
+        );
+        providerName = rows?.[0]?.name ?? null;
+        ownCalendarId = rows?.[0]?.google_calendar_id?.trim() || null;
+      } catch {
+        // Reporting where events go must never fail the page that shows them.
+      }
+    }
+
+    const calendarId = ownCalendarId ?? platformCalendarId;
+    return {
+      providerId: providerId ?? null,
+      providerName,
+      calendarId,
+      /** "provider" — this business has its own; "platform" — the shared fallback. */
+      source: ownCalendarId ? "provider" : "platform",
+      /** False when nothing is configured at all: nothing syncs anywhere. */
+      configured: Boolean(calendarId),
+      link: calendarId
+        ? `https://calendar.google.com/calendar/embed?src=${encodeURIComponent(calendarId)}`
+        : null,
+    };
+  }
+
   /** Reconcile the shared cleaning calendar with the DB (remove orphans, fix dates, sync pending). */
   async reconcileCleaningCalendar() {
     return this.cleaningCalendarSync.reconcileCalendar();
