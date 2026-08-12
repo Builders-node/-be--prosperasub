@@ -204,6 +204,19 @@ export class AccountController {
   }
 
   /**
+   * Calling off a car rental before it starts.
+   *
+   * Not the same shape as a subscription cancellation and deliberately not the
+   * same route: a rental is cancelled outright and its dates go back on the
+   * calendar, where a subscription merely stops renewing.
+   */
+  @ApiOperation({ summary: "Cancel a car rental that hasn't started" })
+  @Post("rental/bookings/:id/cancel")
+  cancelRental(@Req() req: AccountRequest, @Param("id") bookingId: string) {
+    return this.cancellation.cancelRental(req.authUser!.id, bookingId);
+  }
+
+  /**
    * What this business has been paid.
    *
    * `provider_payouts` has RLS on with no policies, so the browser's anon key
