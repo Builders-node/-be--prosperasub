@@ -3,7 +3,9 @@ import type { Request } from "express";
 import { SessionService } from "../auth/session.service";
 
 export interface AccountRequest extends Request {
-  authUser?: { id: string; email?: string };
+  /** `roles` comes straight off the access token — endpoints that widen access
+   *  for staff (payouts, for one) read it rather than re-querying. */
+  authUser?: { id: string; email?: string; roles?: string[] };
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -29,7 +31,7 @@ export class AccountAuthGuard implements CanActivate {
       } catch { /* keep original */ }
     }
 
-    request.authUser = { id: userId, email: payload.email };
+    request.authUser = { id: userId, email: payload.email, roles: payload.roles ?? [] };
     return true;
   }
 

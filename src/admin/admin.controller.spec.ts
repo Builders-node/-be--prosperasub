@@ -12,6 +12,7 @@ describe("AdminController", () => {
       {} as AdminRbacService,
       {} as NotificationsService,
       {} as any,
+      {} as any,
       {} as any
     );
 

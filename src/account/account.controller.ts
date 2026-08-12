@@ -6,6 +6,7 @@ import { AccountNotificationsService } from "./account-notifications.service";
 import { AccountPasswordService } from "./account-password.service";
 import { AccountPreferencesService } from "./account-preferences.service";
 import { AccountCancellationService } from "./account-cancellation.service";
+import { ProviderPayoutsService } from "./provider-payouts.service";
 import { AccountPaymentService } from "./account-payment.service";
 import { AccountCleaningService } from "./account-cleaning.service";
 import { CleaningReminderService } from "./cleaning-reminder.service";
@@ -63,6 +64,7 @@ export class AccountController {
     private readonly payment: AccountPaymentService,
     private readonly cleaning: AccountCleaningService,
     private readonly cancellation: AccountCancellationService,
+    private readonly payouts: ProviderPayoutsService,
   ) {}
 
   // ── Cleaning self-service ────────────────────────────────────────────────────
@@ -199,6 +201,23 @@ export class AccountController {
     @Param("id") subscriptionId: string,
   ) {
     return this.cancellation.resume(req.authUser!.id, service, subscriptionId);
+  }
+
+  /**
+   * What this business has been paid.
+   *
+   * `provider_payouts` has RLS on with no policies, so the browser's anon key
+   * gets nothing from it — this endpoint is the only way a provider sees the
+   * ledger, and it checks ownership before answering.
+   */
+  @ApiOperation({ summary: "Payouts recorded for a business you own" })
+  @Get("providers/:providerId/payouts")
+  listProviderPayouts(
+    @Req() req: AccountRequest,
+    @Param("providerId") providerId: string,
+  ) {
+    const isAdmin = (req.authUser?.roles ?? []).includes("SUPER_ADMIN");
+    return this.payouts.listForOwner(req.authUser!.id, providerId, isAdmin);
   }
 
 }

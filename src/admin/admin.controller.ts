@@ -16,6 +16,8 @@ import { CatalogService } from "../catalog/catalog.service";
 import { GoogleCalendarService } from "../google-calendar/google-calendar.service";
 import { NotificationsService } from "../notifications/notifications.service";
 import { AdminAuthGuard, type AdminRequest } from "./admin-auth.guard";
+import { ProviderPayoutsService } from "../account/provider-payouts.service";
+import { CreateProviderPayoutDto } from "./dto/provider-payout.dto";
 import { AdminContentService } from "./admin-content.service";
 import { AdminPermission, RequireAdminPermission } from "./admin-permissions";
 import { AdminRbacService } from "./admin-rbac.service";
@@ -48,6 +50,7 @@ export class AdminController {
     private readonly notifications: NotificationsService,
     private readonly googleCalendar: GoogleCalendarService,
     private readonly content: AdminContentService,
+    private readonly payouts: ProviderPayoutsService,
   ) {}
 
   @ApiOperation({ summary: "Get platform overview metrics" })
@@ -714,5 +717,47 @@ export class AdminController {
   @RequireAdminPermission(AdminPermission.RoleManagementRead)
   listUserRoleHistory(@Param("id") id: string) {
     return this.rbac.listUserRoleHistory(id);
+  }
+
+  // ── Provider payouts ──────────────────────────────────────────────────────
+  // The ledger of what the platform has actually sent each provider. Guarded by
+  // the payments permissions rather than a new pair: an admin who can see the
+  // money can see what left, and one who can move it can record it.
+
+  @ApiOperation({ summary: "Payouts recorded for a provider" })
+  @Get("providers/:providerId/payouts")
+  @RequireAdminPermission(AdminPermission.PaymentsRead)
+  listProviderPayouts(@Param("providerId") providerId: string) {
+    return this.payouts.list(providerId);
+  }
+
+  @ApiOperation({ summary: "Record a payout to a provider" })
+  @Post("providers/:providerId/payouts")
+  @RequireAdminPermission(AdminPermission.PaymentsWrite)
+  createProviderPayout(
+    @Param("providerId") providerId: string,
+    @Body() body: CreateProviderPayoutDto,
+    @Req() request: AdminRequest,
+  ) {
+    return this.payouts.create(
+      {
+        providerId,
+        amountCents: body.amount_cents,
+        periodStart: body.period_start ?? null,
+        periodEnd: body.period_end ?? null,
+        method: body.method ?? null,
+        reference: body.reference ?? null,
+        note: body.note ?? null,
+        paidAt: body.paid_at ?? null,
+      },
+      request.adminUser?.id ?? null,
+    );
+  }
+
+  @ApiOperation({ summary: "Remove a payout recorded in error" })
+  @Delete("payouts/:id")
+  @RequireAdminPermission(AdminPermission.PaymentsWrite)
+  deleteProviderPayout(@Param("id") id: string) {
+    return this.payouts.remove(id);
   }
 }
