@@ -28,7 +28,6 @@ const SUB_TABLES = [
   { table: "cleaning_subscriptions", extra: "&deleted_at=is.null" },
   { table: "food_subscriptions",     extra: "" },
   { table: "beach_club_subscriptions", extra: "" },
-  { table: "rental_bookings",        extra: "&deleted_at=is.null" },
 ] as const;
 
 /** How many pending rows the blind fallback will verify in one call. */
@@ -184,8 +183,6 @@ export class BlinkWebhookController {
     if (table === "cleaning_subscriptions") {
       patch.subscription_status = "active";
       patch.is_active = true;
-    } else if (table === "rental_bookings") {
-      patch.status = "confirmed";
     } else {
       patch.status = "active";
     }

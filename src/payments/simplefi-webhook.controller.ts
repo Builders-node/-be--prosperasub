@@ -25,7 +25,6 @@ const SUB_TABLES = [
   { table: "cleaning_subscriptions", extra: "&deleted_at=is.null" },
   { table: "food_subscriptions",     extra: "" },
   { table: "beach_club_subscriptions", extra: "" },
-  { table: "rental_bookings",        extra: "&deleted_at=is.null" },
 ] as const;
 
 // SimpleFi statuses treated as successfully paid.
