@@ -48,6 +48,38 @@ export class BillingService {
     });
   }
 
+  /**
+   * What this payment was worth, taken from the checkout session the server
+   * itself wrote when it created the invoice.
+   *
+   * Three of the four rails call `recordCaptured` without an amount — the
+   * status endpoints only receive a payment hash — so every ledger row was
+   * landing with `amount_cents = NULL`. Twelve rows, none of them with a
+   * figure, against $4,060 of paid subscriptions: a ledger that knows a
+   * payment happened but not for how much cannot pay anyone out.
+   *
+   * The session is the right source rather than the request body: it is
+   * written server-side at invoice time and keyed uniquely on
+   * (provider, provider_payment_id), so the number cannot be talked up by
+   * whoever is calling the status endpoint.
+   */
+  private async amountFromSession(provider: string, providerRef: string) {
+    try {
+      const session = await this.prisma.paymentCheckoutSession.findUnique({
+        where: { provider_providerPaymentId: { provider, providerPaymentId: providerRef } },
+      });
+      if (!session) return null;
+      return {
+        amountCents: session.amountCents ?? null,
+        currency: session.currency ?? "USD",
+        subjectRef: session.bookingId ? `booking:${session.bookingId}` : null,
+        context: session.context ?? null,
+      };
+    } catch {
+      return null;
+    }
+  }
+
   /** @returns true if this payment was already captured (so the event is skipped). */
   private async persistCaptured(provider: string, input: RecordPaymentInput): Promise<boolean> {
     if (!this.prisma.isAvailable()) return false;
@@ -57,15 +89,22 @@ export class BillingService {
       });
       if (existing?.status === "captured") return true;
 
+      const fallback = input.amountCents == null || input.subjectRef == null
+        ? await this.amountFromSession(provider, input.providerRef)
+        : null;
+
       const data = {
         method: input.method,
         provider,
         providerRef: input.providerRef,
-        amountCents: input.amountCents ?? null,
-        currency: input.currency ?? "USD",
+        amountCents: input.amountCents ?? fallback?.amountCents ?? null,
+        currency: input.currency ?? fallback?.currency ?? "USD",
         status: "captured",
-        subjectRef: input.subjectRef ?? null,
-        metadata: (input.metadata ?? {}) as Prisma.InputJsonValue,
+        subjectRef: input.subjectRef ?? fallback?.subjectRef ?? null,
+        metadata: {
+          ...(fallback?.context ? { context: fallback.context } : {}),
+          ...(input.metadata ?? {}),
+        } as Prisma.InputJsonValue,
         paidAt: new Date(),
       };
       if (existing) {

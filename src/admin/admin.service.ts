@@ -1425,7 +1425,7 @@ export class AdminService {
    * reference but aren't marked paid, check the provider, and activate the paid
    * ones. Runs from a cron so activation happens without any manual action.
    */
-  async reconcilePendingPayments(): Promise<{ checked: number; activated: number }> {
+  async reconcilePendingPayments(): Promise<{ checked: number; activated: number; expired: number }> {
     // Reconcile pending payments across cleaning / food / beach subscriptions,
     // dispatching to the right provider (Blink Lightning/on-chain OR SimpleFi
     // for LIVES). PayPal is captured client-side at checkout and does not need
@@ -1518,7 +1518,68 @@ export class AdminService {
         }
       }
     }
-    return { checked: totalChecked, activated };
+
+    const expired = await this.expireUnverifiablePending(scopes);
+    return { checked: totalChecked, activated, expired };
+  }
+
+  /**
+   * Close out pending rows that can never be confirmed.
+   *
+   * A row reserved before payment whose `payment_reference` was never written
+   * has nothing to verify against — and the scan above only looks at rows that
+   * HAVE a reference, so these sat pending forever. Four cleaning subscriptions
+   * had been doing exactly that for weeks, quietly counting as revenue nobody
+   * received, until someone marked them paid by hand.
+   *
+   * Deliberately narrow: only rows with no reference at all, and only after a
+   * day. A row that has a reference stays in the scan and gets retried for as
+   * long as it takes — retrying is free, and cancelling something a customer
+   * actually paid for is not.
+   */
+  private async expireUnverifiablePending(
+    scopes: ReadonlyArray<{ table: string; statusCol: string; extraFilters: string }>,
+  ): Promise<number> {
+    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    let expired = 0;
+
+    for (const scope of scopes) {
+      let rows: Array<Record<string, any>> = [];
+      try {
+        rows = await this.supabaseRest<Array<Record<string, any>>>(
+          `/${scope.table}?select=id&payment_status=neq.paid&payment_reference=is.null` +
+          `&created_at=lt.${encodeURIComponent(cutoff)}&${scope.statusCol}=neq.cancelled` +
+          `${scope.extraFilters}&limit=200`,
+        );
+      } catch {
+        continue;
+      }
+
+      for (const row of rows) {
+        const patch: Record<string, any> = {
+          payment_status: "expired",
+          updated_at: new Date().toISOString(),
+        };
+        if (scope.table === "cleaning_subscriptions") {
+          patch.subscription_status = "cancelled";
+          patch.is_active = false;
+        } else {
+          patch.status = "cancelled";
+        }
+        try {
+          await this.supabaseRest(
+            `/${scope.table}?id=eq.${encodeURIComponent(row.id)}`,
+            { method: "PATCH", body: JSON.stringify(patch) },
+          );
+          expired++;
+        } catch {
+          // one bad row must not stop the sweep
+        }
+      }
+    }
+
+    if (expired) this.logger.log(`Expired ${expired} unverifiable pending payment(s)`);
+    return expired;
   }
 
   async createSubscriptionInvoice(subscriptionId: string, method: "lightning" | "onchain" = "lightning") {
