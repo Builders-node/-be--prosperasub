@@ -93,11 +93,17 @@ export class ProviderEarningsService {
     const legacyId = row?.source_provider_id ?? null;
 
     const end = new Date();
-    const { revenue, units } = await this.fetchEarned(source, legacyId, ALL_TIME_START, end);
+    const { revenue, units, serviceDays } = await this.fetchEarned(source, legacyId, ALL_TIME_START, end);
 
     const settings = await this.readSettings();
-    const months = Math.max(1, (dayIndex(end) - dayIndex(ALL_TIME_START) + 1) / AVG_DAYS_PER_MONTH);
-    const earnedCents = source ? this.providerShare(source, settings, revenue, units, months) : 0;
+    // Months of SERVICE, not months since an epoch. A per-month rate multiplied
+    // by the age of the platform is how a cleaning provider with $1,573 of
+    // sales gets told they may withdraw $59,000 — the window has to be the
+    // period they actually delivered in.
+    const months = serviceDays > 0 ? serviceDays / AVG_DAYS_PER_MONTH : 0;
+    const earnedCents = source && serviceDays > 0
+      ? this.providerShare(source, settings, revenue, units, months)
+      : 0;
 
     const committedCents = await this.committed(providerId);
     return {
@@ -116,7 +122,7 @@ export class ProviderEarningsService {
     legacyId: string | null,
     start: Date,
     end: Date,
-  ): Promise<{ revenue: number; units: number }> {
+  ): Promise<{ revenue: number; units: number; serviceDays: number }> {
     const acc = (
       rows: Array<Record<string, any>> | null,
       toInput: (r: any) => Recognition,
@@ -124,21 +130,34 @@ export class ProviderEarningsService {
     ) => {
       let revenue = 0;
       let units = 0;
+      // The union would be more precise than the envelope, but a provider with
+      // a gap between subscriptions is not being paid a retainer for the gap
+      // either — clamped to today so future-dated plans cannot buy months.
+      let first = Number.POSITIVE_INFINITY;
+      let last = Number.NEGATIVE_INFINITY;
+      const todayIdx = dayIndex(end);
       (rows ?? []).forEach((r) => {
-        const cents = recognizedCents(toInput(r), start, end);
+        const input = toInput(r);
+        const cents = recognizedCents(input, start, end);
         if (cents <= 0) return;
         revenue += cents;
         units += unit ? unit(r) : 1;
+        const s = span(input);
+        if (s) {
+          first = Math.min(first, s.start);
+          last = Math.max(last, Math.min(s.end, todayIdx + 1));
+        }
       });
-      return { revenue, units };
+      const serviceDays = Number.isFinite(first) && last > first ? last - first : 0;
+      return { revenue, units, serviceDays };
     };
 
     if (source === "cleaning") {
-      if (!legacyId) return { revenue: 0, units: 0 };
+      if (!legacyId) return { revenue: 0, units: 0, serviceDays: 0 };
       const pkgs = await this.rest<Array<{ id: string }>>(
         `cleaning_packages?provider_id=eq.${encodeURIComponent(legacyId)}&select=id`);
       const ids = (pkgs ?? []).map((p) => p.id);
-      if (!ids.length) return { revenue: 0, units: 0 };
+      if (!ids.length) return { revenue: 0, units: 0, serviceDays: 0 };
       const rows = await this.rest<Array<Record<string, any>>>(
         `cleaning_subscriptions?package_id=in.(${ids.join(",")})&payment_status=eq.paid&deleted_at=is.null` +
         `&select=total_price_cents,monthly_price_cents,created_at,service_start_date,service_end_date,start_date,end_date`);
@@ -156,7 +175,7 @@ export class ProviderEarningsService {
     }
 
     if (source === "food") {
-      if (!legacyId) return { revenue: 0, units: 0 };
+      if (!legacyId) return { revenue: 0, units: 0, serviceDays: 0 };
       const rows = await this.rest<Array<Record<string, any>>>(
         `food_subscriptions?provider_id=eq.${encodeURIComponent(legacyId)}&payment_status=eq.paid` +
         `&status=in.(active,paused,expired)` +
@@ -183,7 +202,7 @@ export class ProviderEarningsService {
         (r) => r.people || 0);
     }
 
-    return { revenue: 0, units: 0 };
+    return { revenue: 0, units: 0, serviceDays: 0 };
   }
 
   private providerShare(
@@ -205,9 +224,11 @@ export class ProviderEarningsService {
       : Math.round(raw * Math.max(0, units));
 
     // A `cost` source inverts: the platform buys the service outright, so the
-    // agreed price IS the provider's earnings. Never negative here — a payout
-    // cap of "minus money" is meaningless even where the admin's P&L shows it.
-    if (meta.kind === "cost") return Math.max(0, amount);
+    // agreed price IS the provider's earnings. Two clamps the admin's P&L does
+    // not need: never negative, and never more than customers actually paid.
+    // The P&L is allowed to show the platform losing money on a contract; a
+    // withdrawal limit that exceeds the cash collected is a different thing.
+    if (meta.kind === "cost") return Math.max(0, Math.min(amount, revenueCents));
     return Math.max(0, revenueCents - Math.min(amount, revenueCents));
   }
 
