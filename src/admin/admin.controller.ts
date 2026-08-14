@@ -541,6 +541,14 @@ export class AdminController {
     return this.providerCalendar.provision(id);
   }
 
+  @ApiOperation({ summary: "Provision the platform-owned Google Calendar for a beach court" })
+  @ApiResponse({ status: 201, description: "Returns the calendar id; idempotent when one already exists." })
+  @Post("beach-club/courts/:id/calendar/provision")
+  @RequireAdminPermission(AdminPermission.BookingsWrite)
+  provisionCourtCalendar(@Param("id") id: string) {
+    return this.providerCalendar.provisionCourt(id);
+  }
+
   @ApiOperation({ summary: "Sync a booking to Google Calendar using data provided directly (no DB needed)" })
   @ApiResponse({ status: 201, description: "Calendar event created or updated. Returns googleCalendarEventId and link." })
   @Post("cleaning/bookings/:id/sync-direct")

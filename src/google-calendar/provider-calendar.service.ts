@@ -1,6 +1,13 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { GoogleCalendarService } from "./google-calendar.service";
 
+export interface ProvisionResult {
+  calendarId: string | null;
+  created: boolean;
+  shared: boolean;
+  skipped?: string;
+}
+
 interface ProviderRow {
   id: string;
   name: string;
@@ -10,7 +17,7 @@ interface ProviderRow {
 }
 
 /**
- * The platform owns every provider's calendar.
+ * The platform owns every bookable calendar — a provider's and a court's.
  *
  * A provider signing up asked to be listed, not to run Google Workspace. Left
  * to them, the calendar behind a live booking flow is one they can rename,
@@ -29,49 +36,98 @@ export class ProviderCalendarService {
 
   constructor(private readonly google: GoogleCalendarService) {}
 
-  async provision(providerId: string): Promise<{
-    calendarId: string | null;
-    created: boolean;
-    shared: boolean;
-    skipped?: string;
-  }> {
+  async provision(providerId: string): Promise<ProvisionResult> {
     const provider = await this.fetchProvider(providerId);
     if (!provider) throw new Error(`Provider ${providerId} not found`);
-
-    if (provider.google_calendar_id?.trim()) {
-      return { calendarId: provider.google_calendar_id.trim(), created: false, shared: false };
-    }
-
-    if (!this.google.isConfigured()) {
-      // Not an error: a deployment without Google credentials should still be
-      // able to approve providers. The calendar is provisioned later, by the
-      // same call, once credentials exist.
-      this.logger.warn(`[provider-calendar] ${providerId}: Google Calendar not configured, skipping`);
-      return { calendarId: null, created: false, shared: false, skipped: "google_not_configured" };
-    }
-
-    const { calendarId } = await this.google.createCalendar({
+    return this.provisionFor({
+      table: "providers",
+      id: providerId,
+      existing: provider.google_calendar_id,
       summary: `EverySub — ${provider.name}`,
       description:
         `Bookings for ${provider.name} on EverySub.\n` +
         `Created and owned by the platform; events are written automatically.`,
+      shareWith: provider.contact_email,
+    });
+  }
+
+  /**
+   * A court's calendar, on the same terms.
+   *
+   * Courts used to want a calendar id typed into an admin form, with a
+   * separate manual step to grant our service account access — two chances to
+   * get it wrong, and a booking that silently syncs nowhere when it is. Now the
+   * platform creates the court's calendar exactly as it creates a provider's;
+   * the club's own contact address gets write access so a human can still see
+   * it.
+   */
+  async provisionCourt(courtId: string): Promise<ProvisionResult> {
+    const courts = await this.restGet<Array<{ id: string; name: string; google_calendar_id: string | null }>>(
+      `beach_club_courts?id=eq.${encodeURIComponent(courtId)}&select=id,name,google_calendar_id`,
+    );
+    const court = courts?.[0];
+    if (!court) throw new Error(`Court ${courtId} not found`);
+
+    // The club is one platform-owned provider; its contact address is the
+    // nearest thing a court has to an owner.
+    const club = await this.restGet<Array<{ contact_email: string | null }>>(
+      `providers?source_service_key=eq.beach&select=contact_email&limit=1`,
+    );
+
+    return this.provisionFor({
+      table: "beach_club_courts",
+      id: courtId,
+      existing: court.google_calendar_id,
+      summary: `EverySub — ${court.name}`,
+      description:
+        `Bookings for the ${court.name} court on EverySub.\n` +
+        `Created and owned by the platform; events are written automatically.`,
+      shareWith: club?.[0]?.contact_email ?? null,
+    });
+  }
+
+  /** The one provisioning routine. Idempotent by the `existing` check. */
+  private async provisionFor(input: {
+    table: "providers" | "beach_club_courts";
+    id: string;
+    existing: string | null | undefined;
+    summary: string;
+    description: string;
+    shareWith: string | null | undefined;
+  }): Promise<ProvisionResult> {
+    if (input.existing?.trim()) {
+      return { calendarId: input.existing.trim(), created: false, shared: false };
+    }
+
+    if (!this.google.isConfigured()) {
+      // Not an error: a deployment without Google credentials should still be
+      // able to approve providers and add courts. The calendar is provisioned
+      // later, by the same call, once credentials exist.
+      this.logger.warn(`[calendar] ${input.table}/${input.id}: Google Calendar not configured, skipping`);
+      return { calendarId: null, created: false, shared: false, skipped: "google_not_configured" };
+    }
+
+    const { calendarId } = await this.google.createCalendar({
+      summary: input.summary,
+      description: input.description,
     });
 
-    await this.writeCalendarId(providerId, calendarId);
+    await this.writeCalendarId(input.table, input.id, calendarId);
 
     let shared = false;
-    if (provider.contact_email?.trim()) {
+    const email = input.shareWith?.trim();
+    if (email) {
       try {
-        await this.google.shareCalendar(calendarId, provider.contact_email.trim(), "writer");
+        await this.google.shareCalendar(calendarId, email, "writer");
         shared = true;
       } catch (err) {
         // The calendar exists and is already recorded; failing to share it is
         // worth a log and a retry, not an unwind that would strand the id.
-        this.logger.warn(`[provider-calendar] ${providerId}: share failed — ${String(err)}`);
+        this.logger.warn(`[calendar] ${input.table}/${input.id}: share failed — ${String(err)}`);
       }
     }
 
-    this.logger.log(`[provider-calendar] ${providerId} → ${calendarId} (shared=${shared})`);
+    this.logger.log(`[calendar] ${input.table}/${input.id} → ${calendarId} (shared=${shared})`);
     return { calendarId, created: true, shared };
   }
 
@@ -84,21 +140,26 @@ export class ProviderCalendarService {
     return { url, key };
   }
 
-  private async fetchProvider(providerId: string): Promise<ProviderRow | null> {
+  private async restGet<T>(path: string): Promise<T | null> {
     const { url, key } = this.restBase();
-    const res = await fetch(
-      `${url}/rest/v1/providers?id=eq.${encodeURIComponent(providerId)}` +
+    const res = await fetch(`${url}/rest/v1/${path}`, {
+      headers: { apikey: key, Authorization: `Bearer ${key}` },
+    });
+    if (!res.ok) throw new Error(`Could not read ${path}: ${res.status}`);
+    return (await res.json()) as T;
+  }
+
+  private async fetchProvider(providerId: string): Promise<ProviderRow | null> {
+    const rows = await this.restGet<ProviderRow[]>(
+      `providers?id=eq.${encodeURIComponent(providerId)}` +
       `&select=id,name,contact_email,google_calendar_id,archetype_key`,
-      { headers: { apikey: key, Authorization: `Bearer ${key}` } },
     );
-    if (!res.ok) throw new Error(`Could not read provider ${providerId}: ${res.status}`);
-    const rows = (await res.json()) as ProviderRow[];
     return rows?.[0] ?? null;
   }
 
-  private async writeCalendarId(providerId: string, calendarId: string) {
+  private async writeCalendarId(table: string, rowId: string, calendarId: string) {
     const { url, key } = this.restBase();
-    const res = await fetch(`${url}/rest/v1/providers?id=eq.${encodeURIComponent(providerId)}`, {
+    const res = await fetch(`${url}/rest/v1/${table}?id=eq.${encodeURIComponent(rowId)}`, {
       method: "PATCH",
       headers: {
         apikey: key,
@@ -109,7 +170,7 @@ export class ProviderCalendarService {
       body: JSON.stringify({ google_calendar_id: calendarId }),
     });
     if (!res.ok) {
-      throw new Error(`Created calendar ${calendarId} but could not store it: ${res.status}`);
+      throw new Error(`Created calendar ${calendarId} but could not store it on ${table}: ${res.status}`);
     }
   }
 }
