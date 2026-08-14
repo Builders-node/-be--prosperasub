@@ -13,6 +13,7 @@ describe("AdminController", () => {
       {} as NotificationsService,
       {} as any,
       {} as any,
+      {} as any,
       {} as any
     );
 

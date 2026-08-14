@@ -14,6 +14,7 @@ const AdminSubscriptionValidation = new ValidationPipe({
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from "@nestjs/swagger";
 import { CatalogService } from "../catalog/catalog.service";
 import { GoogleCalendarService } from "../google-calendar/google-calendar.service";
+import { ProviderCalendarService } from "../google-calendar/provider-calendar.service";
 import { NotificationsService } from "../notifications/notifications.service";
 import { AdminAuthGuard, type AdminRequest } from "./admin-auth.guard";
 import { ProviderPayoutsService } from "../account/provider-payouts.service";
@@ -49,6 +50,7 @@ export class AdminController {
     private readonly rbac: AdminRbacService,
     private readonly notifications: NotificationsService,
     private readonly googleCalendar: GoogleCalendarService,
+    private readonly providerCalendar: ProviderCalendarService,
     private readonly content: AdminContentService,
     private readonly payouts: ProviderPayoutsService,
   ) {}
@@ -529,6 +531,14 @@ export class AdminController {
   @RequireAdminPermission(AdminPermission.BookingsWrite)
   reconcileCleaningCalendar() {
     return this.admin.reconcileCleaningCalendar();
+  }
+
+  @ApiOperation({ summary: "Provision the platform-owned Google Calendar for a provider" })
+  @ApiResponse({ status: 201, description: "Returns the calendar id; idempotent when one already exists." })
+  @Post("providers/:id/calendar/provision")
+  @RequireAdminPermission(AdminPermission.BookingsWrite)
+  provisionProviderCalendar(@Param("id") id: string) {
+    return this.providerCalendar.provision(id);
   }
 
   @ApiOperation({ summary: "Sync a booking to Google Calendar using data provided directly (no DB needed)" })

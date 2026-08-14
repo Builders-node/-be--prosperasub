@@ -109,7 +109,9 @@ export class GoogleCalendarService {
       client_id: this.oauthClientId ?? "",
       redirect_uri: redirectUri,
       response_type: "code",
-      scope: "https://www.googleapis.com/auth/calendar.events",
+      // `calendar`, not `calendar.events`: the platform provisions a calendar
+      // per provider, and creating one is not an event operation.
+      scope: "https://www.googleapis.com/auth/calendar",
       access_type: "offline",
       prompt: "consent",
     });
@@ -303,7 +305,58 @@ export class GoogleCalendarService {
     return Boolean(this.privateKey?.includes("BEGIN PRIVATE KEY"));
   }
 
+  // ─── Calendar provisioning ────────────────────────────────────────────────
+
+  /**
+   * Create a secondary calendar owned by the platform.
+   *
+   * Providers do not bring their own calendar. They asked to be listed, not to
+   * administer Google Workspace, and a calendar they own is one they can
+   * rename, unshare or delete out from under a live booking flow. The platform
+   * owns it; the provider gets write access to it.
+   */
+  async createCalendar(input: { summary: string; description?: string; timeZone?: string }) {
+    const json = await this.apiRequest<{ id: string; summary?: string }>("POST", "/calendars", {
+      summary: input.summary,
+      description: input.description,
+      timeZone: input.timeZone || "America/Tegucigalpa",
+    });
+    if (!json?.id) throw new Error("Google Calendar returned no calendar id");
+    return { calendarId: json.id, summary: json.summary ?? input.summary };
+  }
+
+  /** Grant a person access to a platform-owned calendar. */
+  async shareCalendar(calendarId: string, email: string, role: "reader" | "writer" = "writer") {
+    return this.request<unknown>("POST", "/acl", {
+      role,
+      scope: { type: "user", value: email },
+    }, calendarId);
+  }
+
   // ─── HTTP layer ────────────────────────────────────────────────────────────
+
+  /** Same auth and error handling as `request`, but for paths that are not
+   *  scoped to a single calendar (creating one, for instance). */
+  private async apiRequest<T>(method: string, path: string, body?: unknown): Promise<T> {
+    if (!this.isConfigured()) {
+      const status = this.getConfigurationStatus();
+      throw new Error(`Google Calendar is not configured (method=${status.authMethod}).`);
+    }
+    const token = await this.getAccessToken();
+    const response = await fetch(`https://www.googleapis.com/calendar/v3${path}`, {
+      method,
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    if (response.status === 204) return undefined as T;
+    const text = await response.text();
+    const json = text ? JSON.parse(text) : null;
+    if (!response.ok) {
+      const message = json?.error?.message || response.statusText;
+      throw new Error(`Google Calendar request failed (${response.status}): ${message}`);
+    }
+    return json as T;
+  }
 
   private async request<T>(method: string, path: string, body?: unknown, calendarIdOverride?: string): Promise<T> {
     const calendarId = calendarIdOverride?.trim() || this.sharedAdminCleaningCalendarId;
