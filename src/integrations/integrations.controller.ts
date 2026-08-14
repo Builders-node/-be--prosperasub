@@ -37,7 +37,7 @@ export class IntegrationsController {
   /**
    * Mint a short-lived access QR for a user. The QR encodes a URL to our
    * `/verify` page which shows GREEN/RED against every EverySub
-   * subscription across services (cleaning + food + beach + rental).
+   * subscription across services (cleaning + food + beach).
    */
   @Post("access-qr")
   @HttpCode(200)
@@ -49,7 +49,7 @@ export class IntegrationsController {
   /**
    * Aggregated view of a user's scheduled bookings across every service —
    * one row per cleaning visit, one per beach court reservation, one per
-   * rental period, and one per food subscription window. Sorted by start_at.
+   * beach booking, and one per food subscription window. Sorted by start_at.
    */
   @Post("bookings")
   @HttpCode(200)

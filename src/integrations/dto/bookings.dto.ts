@@ -18,10 +18,10 @@ export class BookingsRequestDto {
   @IsOptional() @IsEmail() @MaxLength(255) email?: string;
   @IsOptional() @IsString() @MaxLength(10) from?: string;
   @IsOptional() @IsString() @MaxLength(10) to?: string;
-  @IsOptional() @IsIn(["cleaning", "food", "beach", "rental"]) service?: string;
+  @IsOptional() @IsIn(["cleaning", "food", "beach"]) service?: string;
 }
 
-export type IntegrationServiceKey = "cleaning" | "food" | "beach" | "rental";
+export type IntegrationServiceKey = "cleaning" | "food" | "beach";
 
 export interface IntegrationBooking {
   /** Which service this row is from. */
@@ -30,7 +30,7 @@ export interface IntegrationBooking {
   id: string;
   /** Human plan / package / court / vehicle name. Best-effort, may be null. */
   plan_name: string | null;
-  /** Provider (restaurant / cleaning company / beach club / rental company) name. */
+  /** Provider (restaurant / cleaning company / beach club) name. */
   provider_name: string | null;
   /**
    * ISO-8601 with -06:00 Honduras offset. For subscription-window rows

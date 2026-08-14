@@ -3,7 +3,7 @@ import { BadRequestException, ForbiddenException, Injectable, ServiceUnavailable
 // Tables exposed through the public data API. Prefix-based allow covers every
 // service module; a small set of common tables is allowed explicitly. Sensitive
 // audit/security tables are always denied.
-const ALLOWED_PREFIXES = ["cleaning_", "food_", "rental_", "beach_club_", "massage_"];
+const ALLOWED_PREFIXES = ["cleaning_", "food_", "beach_club_"];
 const ALLOWED_COMMON = new Set([
   "users", "user_profiles", "user_locations", "user_roles",
   "rbac_roles", "rbac_user_roles",

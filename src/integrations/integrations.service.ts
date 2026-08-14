@@ -217,14 +217,13 @@ export class IntegrationsService {
     // Fan out — each service is independent; failures on one leg surface as
     // empty arrays, not a whole-response 500.
     const only = body.service as IntegrationServiceKey | undefined;
-    const [cleaning, food, beach, rental] = await Promise.all([
+    const [cleaning, food, beach] = await Promise.all([
       !only || only === "cleaning" ? this.listCleaningBookings(userId, from, to).catch(() => []) : Promise.resolve([]),
       !only || only === "food"     ? this.listFoodSubscriptions(userId, from, to).catch(() => []) : Promise.resolve([]),
       !only || only === "beach"    ? this.listBeachBookings(userId, from, to).catch(() => [])    : Promise.resolve([]),
-      !only || only === "rental"   ? this.listRentalBookings(userId, from, to).catch(() => [])   : Promise.resolve([]),
     ]);
 
-    const bookings = [...cleaning, ...food, ...beach, ...rental]
+    const bookings = [...cleaning, ...food, ...beach]
       .sort((a, b) => a.start_at.localeCompare(b.start_at));
 
     return { user_id: userId, from, to, bookings };
@@ -637,47 +636,6 @@ export class IntegrationsService {
       }));
 
     return [...fromLegacy, ...fromDdd];
-  }
-
-  private async listRentalBookings(userId: string, from: string, to: string): Promise<IntegrationBooking[]> {
-    const rows = await this.rest<Array<{
-      id: string; vehicle_id: string | null;
-      start_date: string; end_date: string;
-      status: string; notes: string | null; delivery_address: string | null;
-    }>>(
-      `rental_bookings?select=id,vehicle_id,start_date,end_date,status,notes,delivery_address` +
-        `&user_id=eq.${userId}` +
-        `&start_date=lte.${to}&end_date=gte.${from}&order=start_date.asc`,
-    );
-    const bookings = rows ?? [];
-    if (bookings.length === 0) return [];
-
-    const vehicleIds = Array.from(new Set(bookings.map((r) => r.vehicle_id).filter((id): id is string => !!id)));
-    const vehicles = vehicleIds.length
-      ? await this.rest<Array<{ id: string; name: string; provider_id: string | null }>>(
-          `rental_vehicles?select=id,name,provider_id&id=in.(${vehicleIds.join(",")})`)
-      : [];
-    const vehicleMap = new Map((vehicles ?? []).map((v) => [v.id, v]));
-    const providerIds = Array.from(new Set((vehicles ?? []).map((v) => v.provider_id).filter((id): id is string => !!id)));
-    const providers = providerIds.length
-      ? await this.rest<Array<{ id: string; name: string }>>(
-          `rental_providers?select=id,name&id=in.(${providerIds.join(",")})`)
-      : [];
-    const providerMap = new Map((providers ?? []).map((p) => [p.id, p.name]));
-
-    return bookings.map((r) => {
-      const vehicle = r.vehicle_id ? vehicleMap.get(r.vehicle_id) : null;
-      return {
-        service: "rental",
-        id: r.id,
-        plan_name: vehicle?.name ?? null,
-        provider_name: vehicle?.provider_id ? providerMap.get(vehicle.provider_id) ?? null : null,
-        start_at: this.toHNOffsetISO(r.start_date, "00:00"),
-        end_at: this.toHNOffsetISO(r.end_date, "23:59"),
-        status: r.status,
-        notes: r.notes ?? r.delivery_address ?? null,
-      };
-    });
   }
 
   // ─── User upsert ───────────────────────────────────────────────────────────

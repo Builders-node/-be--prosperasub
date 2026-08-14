@@ -18,13 +18,12 @@ export class LegacySubscriptionSource implements SubscriptionSource {
   constructor(private readonly config: ConfigService) {}
 
   async getSubscriptions(subjectId: string): Promise<SubscriptionView[]> {
-    const [cleaning, food, beach, rentals] = await Promise.all([
+    const [cleaning, food, beach] = await Promise.all([
       this.fetchCleaning(subjectId),
       this.fetchFood(subjectId),
       this.fetchBeachClub(subjectId),
-      this.fetchRentals(subjectId),
     ]);
-    return [...cleaning, ...food, ...beach, ...rentals];
+    return [...cleaning, ...food, ...beach];
   }
 
   private async fetchCleaning(userId: string): Promise<SubscriptionView[]> {
@@ -89,29 +88,6 @@ export class LegacySubscriptionSource implements SubscriptionSource {
         id: String(r.id),
         service: "beach_club",
         name: (r.plan_name as string) || "Beach Club membership",
-        status: this.normalizeStatus(status, isActive, expiresAt),
-        expires_at: expiresAt,
-      };
-    });
-  }
-
-  private async fetchRentals(userId: string): Promise<SubscriptionView[]> {
-    const rows = await this.rest<Array<Record<string, unknown>>>(
-      `rental_bookings?select=id,status,payment_status,end_date&user_id=eq.${encodeURIComponent(userId)}&deleted_at=is.null`
-    );
-    if (!rows?.length) return [];
-    return rows.map((r) => {
-      const expiresAt = (r.end_date as string | null) ?? null;
-      const status = String(r.status ?? "").toLowerCase();
-      const notExpired = expiresAt ? new Date(expiresAt) >= this.today() : true;
-      const isActive =
-        r.payment_status === "paid" &&
-        (status === "confirmed" || status === "active" || status === "in_progress") &&
-        notExpired;
-      return {
-        id: String(r.id),
-        service: "car_rental",
-        name: "Car rental",
         status: this.normalizeStatus(status, isActive, expiresAt),
         expires_at: expiresAt,
       };

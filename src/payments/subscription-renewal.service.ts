@@ -4,7 +4,7 @@ import { BlinkService } from "./blink.service";
 import { SimpleFiService } from "./simplefi.service";
 import { PayPalService } from "./paypal.service";
 
-export type RenewalService = "food" | "cleaning" | "beach" | "rental";
+export type RenewalService = "food" | "cleaning" | "beach";
 export type RenewalPaymentMethod = "lightning" | "onchain" | "crypto" | "infinita" | "paypal";
 
 interface VerifyInput {
@@ -47,7 +47,7 @@ interface RecordResult {
 }
 
 /**
- * Shared renewal engine used by every service (food / cleaning / beach / rental).
+ * Shared renewal engine used by every service (food / cleaning / beach).
  * Enforces:
  *   1. Payment reference is REAL — verified with the actual provider before the
  *      subscription's period is extended (closes the "extend for free" bypass).
@@ -186,7 +186,6 @@ export class SubscriptionRenewalService {
       food: "Meal plan",
       cleaning: "Cleaning plan",
       beach: "Beach Club membership",
-      rental: "Vehicle rental",
     };
     const label = SERVICE_LABEL[input.service] ?? "Subscription";
     // What the customer actually paid, not just the service price — quoting the
