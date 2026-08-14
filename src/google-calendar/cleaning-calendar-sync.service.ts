@@ -330,8 +330,7 @@ export class CleaningCalendarSyncService {
     const bookings = await this.supabaseRest<any[]>(
       `/cleaning_bookings?select=id,status,location,notes,user_id,google_calendar_event_id,` +
       `cleaning_available_slots(date,start_time,end_time),` +
-      `cleaning_clients(company_name,location),` +
-      `cleaning_custom_plans(plan_name)&limit=2000`,
+      `cleaning_clients(company_name,location)&limit=2000`,
     ).catch(() => null);
     if (!Array.isArray(bookings)) return { ok: false as const, reason: "fetch_failed" as const };
 
@@ -369,7 +368,7 @@ export class CleaningCalendarSyncService {
         b.cleaning_clients?.company_name ||
         u?.display_name || u?.name || u?.email || "Cleaning client";
       const building = b.location || b.cleaning_clients?.location || "Prospera Village";
-      const planName = b.cleaning_custom_plans?.plan_name || "Cleaning booking";
+      const planName = "Cleaning booking";
       const isCancelled = String(b.status ?? "").toLowerCase() === "cancelled";
       const titleBase = `Cleaning - ${clientName}`;
       const hnOffset = "-06:00";

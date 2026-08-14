@@ -31,9 +31,6 @@ const DEFAULT_CLEANING_TWO_BEDROOM_ID = "00000000-0000-4000-8000-000000000202";
 const resettableTablesInFkOrder = [
   "cleaning_completion_reports",
   "cleaning_bookings",
-  "cleaning_recurring_schedules",
-  "cleaning_checklist_templates",
-  "cleaning_custom_plans",
   "cleaning_plan_client_assignments",
   "cleaning_clients",
   "cleaning_subscriptions",
