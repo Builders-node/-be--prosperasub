@@ -117,15 +117,18 @@ export class CleaningCalendarSyncService {
     try {
       const payload = this.buildEventPayload(booking);
       const isCancelled = booking.status === "CANCELLED" || booking.status === "cancelled";
-      const storedEventId = booking.googleCalendarEventId ?? null;
+      let storedEventId = booking.googleCalendarEventId ?? null;
 
       const calendarId = await this.resolveCalendarId(bookingId);
+      storedEventId = await this.evictFromPreviousCalendar(booking, storedEventId, calendarId);
       const result = await this.upsertCalendarEvent(bookingId, storedEventId, payload, isCancelled, calendarId);
 
       await this.prisma.cleaningBooking.update({
         where: { id: bookingId },
         data: {
           googleCalendarEventId: result.id,
+          // Where it went, so a later move can find it again.
+          googleCalendarId: calendarId ?? this.getSharedAdminCalendarId() ?? null,
           googleCalendarEventLink: result.htmlLink ?? booking.googleCalendarEventLink,
           googleCalendarSyncedAt: new Date(),
           googleCalendarSyncStatus: "synced",
@@ -174,6 +177,39 @@ export class CleaningCalendarSyncService {
     }
     this.logger.log(`[auto-sync] processed ${rows.length} pending bookings → ${synced} synced, ${failed} failed`);
     return { ok: true as const, processed: rows.length, synced, failed };
+  }
+
+  /**
+   * A booking whose provider changed calendars leaves an event behind.
+   *
+   * A Google event id only resolves on the calendar it was created on, so the
+   * upsert below cannot move an event: the update 404s, the search finds
+   * nothing on the new calendar, and it creates a fresh one — correct, except
+   * the original stays on the old calendar for ever, showing a visit that has
+   * moved to another business's schedule.
+   *
+   * So the event is deleted where it actually is, first. Best effort on
+   * purpose: a booking must still reach its new calendar even if the old one
+   * has been unshared or the event already removed by hand — a leftover event
+   * is a smaller problem than a visit nobody can see.
+   *
+   * Returns the event id the upsert should carry on with — null once the old
+   * event is gone, because that id means nothing on the new calendar.
+   */
+  private async evictFromPreviousCalendar(
+    booking: { id: string; googleCalendarId?: string | null },
+    storedEventId: string | null,
+    resolvedCalendarId: string | undefined,
+  ): Promise<string | null> {
+    const previous = booking.googleCalendarId ?? null;
+    const next = resolvedCalendarId ?? this.getSharedAdminCalendarId() ?? null;
+    if (!storedEventId || !previous || !next || previous === next) return storedEventId;
+
+    this.logger.log(`[sync] Booking ${booking.id} moved calendars: ${previous} → ${next}; removing the old event`);
+    await this.googleCalendar
+      .deleteEvent(storedEventId, previous)
+      .catch((e) => this.logger.warn(`[sync] could not delete ${storedEventId} from ${previous}: ${(e as Error).message}`));
+    return null;
   }
 
   // ─── Idempotent upsert ────────────────────────────────────────────────────
@@ -534,6 +570,9 @@ export class CleaningCalendarSyncService {
           id: r.id,
           status: r.status,
           googleCalendarEventId: r.google_calendar_event_id ?? null,
+          // Without this the REST path would think no booking had ever moved,
+          // and the eviction below would never run on a cron invocation.
+          googleCalendarId: r.google_calendar_id ?? null,
           googleCalendarEventLink: r.google_calendar_event_link ?? null,
           location: r.location ?? null,
           notes: r.notes ?? null,

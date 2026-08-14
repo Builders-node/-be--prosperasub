@@ -39,7 +39,7 @@ export class ProviderCalendarService {
   async provision(providerId: string): Promise<ProvisionResult> {
     const provider = await this.fetchProvider(providerId);
     if (!provider) throw new Error(`Provider ${providerId} not found`);
-    return this.provisionFor({
+    const result = await this.provisionFor({
       table: "providers",
       id: providerId,
       existing: provider.google_calendar_id,
@@ -49,6 +49,15 @@ export class ProviderCalendarService {
         `Created and owned by the platform; events are written automatically.`,
       shareWith: provider.contact_email,
     });
+
+    // A provider that already had visits has them on somebody else's calendar —
+    // the shared one it was falling back to. Giving it a calendar is only half
+    // the move; the visits have to follow, or the business it was sharing with
+    // keeps showing work that is no longer theirs. Flagging the bookings is
+    // enough: the sync evicts each event from the old calendar and recreates it
+    // on the new one.
+    if (result.created) await this.requeueBookings(providerId);
+    return result;
   }
 
   /**
@@ -155,6 +164,49 @@ export class ProviderCalendarService {
       `&select=id,name,contact_email,google_calendar_id,archetype_key`,
     );
     return rows?.[0] ?? null;
+  }
+
+  /**
+   * Mark this provider's already-synced visits as out of date, so the next sync
+   * moves them onto the calendar it just got.
+   *
+   * Cleaning is the only service whose bookings carry Google events today, and
+   * `cleaning_bookings.provider_id` holds the LEGACY provider id, not the
+   * universal one — the id-space split that everything here has to respect.
+   *
+   * Best effort: the calendar is created and recorded either way, and a visit
+   * that misses this requeue is picked up by any later edit or by a manual
+   * "Sync all".
+   */
+  private async requeueBookings(providerId: string): Promise<void> {
+    try {
+      const rows = await this.restGet<Array<{ source_service_key: string | null; source_provider_id: string | null }>>(
+        `providers?id=eq.${encodeURIComponent(providerId)}&select=source_service_key,source_provider_id`,
+      );
+      const row = rows?.[0];
+      if (row?.source_service_key !== "cleaning" || !row.source_provider_id) return;
+
+      const { url, key } = this.restBase();
+      const res = await fetch(
+        `${url}/rest/v1/cleaning_bookings` +
+        `?provider_id=eq.${encodeURIComponent(row.source_provider_id)}` +
+        `&google_calendar_event_id=not.is.null`,
+        {
+          method: "PATCH",
+          headers: {
+            apikey: key,
+            Authorization: `Bearer ${key}`,
+            "Content-Type": "application/json",
+            Prefer: "return=minimal",
+          },
+          body: JSON.stringify({ google_calendar_sync_status: "pending" }),
+        },
+      );
+      if (!res.ok) throw new Error(`${res.status} ${await res.text().catch(() => "")}`);
+      this.logger.log(`[calendar] queued ${row.source_provider_id}'s visits to move to the new calendar`);
+    } catch (err) {
+      this.logger.warn(`[calendar] could not queue existing visits for ${providerId}: ${String(err)}`);
+    }
   }
 
   private async writeCalendarId(table: string, rowId: string, calendarId: string) {

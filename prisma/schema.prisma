@@ -309,6 +309,8 @@ model CleaningBooking {
   visibility     String?
   clientType     String?               @map("client_type")
   googleCalendarEventId String?        @map("google_calendar_event_id")
+  // Which calendar the event above lives on — an event id only resolves on its own.
+  googleCalendarId String?             @map("google_calendar_id")
   googleCalendarEventLink String?      @map("google_calendar_event_link")
   googleCalendarSyncedAt DateTime?     @map("google_calendar_synced_at")
   googleCalendarSyncStatus String      @default("pending") @map("google_calendar_sync_status")
