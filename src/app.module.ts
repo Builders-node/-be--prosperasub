@@ -20,7 +20,6 @@ import { SupportModule } from "./support/support.module";
 import { AnalyticsModule } from "./analytics/analytics.module";
 import { NotificationEventsModule } from "./notification/notification-events.module";
 import { IntegrationsModule } from "./integrations/integrations.module";
-import { LeadconnectorModule } from "./integrations/leadconnector/leadconnector.module";
 
 @Module({
   imports: [
@@ -47,7 +46,6 @@ import { LeadconnectorModule } from "./integrations/leadconnector/leadconnector.
     VerifyModule,
     FoodModule,
     IntegrationsModule,
-    LeadconnectorModule,
   ],
   controllers: [HealthController]
 })
