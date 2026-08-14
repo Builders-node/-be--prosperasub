@@ -28,6 +28,23 @@ class RescheduleBookingDto {
   slot_id!: string;
 }
 
+class RequestPayoutDto {
+  @ApiProperty({ example: 25000, description: "Cents. Capped server-side by what the business earned." })
+  @IsInt()
+  @Min(1)
+  amountCents!: number;
+
+  @ApiProperty({ example: "provider@walletofsatoshi.com", description: "Lightning address or on-chain BTC address." })
+  @IsString()
+  @MinLength(4)
+  destination!: string;
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  @IsString()
+  note?: string;
+}
+
 class UpdatePreferencesDto {
   @ApiProperty({ required: false })
   @IsOptional()
@@ -219,6 +236,41 @@ export class AccountController {
   ) {
     const isAdmin = (req.authUser?.roles ?? []).includes("SUPER_ADMIN");
     return this.payouts.listForOwner(req.authUser!.id, providerId, isAdmin);
+  }
+
+  @ApiOperation({ summary: "What this business may withdraw right now" })
+  @Get("providers/:providerId/payouts/available")
+  providerPayoutAvailable(
+    @Req() req: AccountRequest,
+    @Param("providerId") providerId: string,
+  ) {
+    const isAdmin = (req.authUser?.roles ?? []).includes("SUPER_ADMIN");
+    return this.payouts.available(req.authUser!.id, providerId, isAdmin);
+  }
+
+  /**
+   * Ask to be paid. The amount is capped server-side against what the business
+   * actually earned minus what it has already asked for — the figure the Money
+   * tab shows is the same one, but a cap computed in a browser is a suggestion.
+   */
+  @ApiOperation({ summary: "Request a payout for a business you own" })
+  @Post("providers/:providerId/payouts/request")
+  requestProviderPayout(
+    @Req() req: AccountRequest,
+    @Param("providerId") providerId: string,
+    @Body() body: RequestPayoutDto,
+  ) {
+    const isAdmin = (req.authUser?.roles ?? []).includes("SUPER_ADMIN");
+    return this.payouts.request(
+      {
+        providerId,
+        amountCents: body.amountCents,
+        destination: body.destination,
+        note: body.note ?? null,
+      },
+      req.authUser!.id,
+      isAdmin,
+    );
   }
 
 }

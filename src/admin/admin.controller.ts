@@ -18,7 +18,7 @@ import { ProviderCalendarService } from "../google-calendar/provider-calendar.se
 import { NotificationsService } from "../notifications/notifications.service";
 import { AdminAuthGuard, type AdminRequest } from "./admin-auth.guard";
 import { ProviderPayoutsService } from "../account/provider-payouts.service";
-import { CreateProviderPayoutDto } from "./dto/provider-payout.dto";
+import { CreateProviderPayoutDto, DecideProviderPayoutDto } from "./dto/provider-payout.dto";
 import { AdminContentService } from "./admin-content.service";
 import { AdminPermission, RequireAdminPermission } from "./admin-permissions";
 import { AdminRbacService } from "./admin-rbac.service";
@@ -762,6 +762,24 @@ export class AdminController {
       },
       request.adminUser?.id ?? null,
     );
+  }
+
+  @ApiOperation({ summary: "Open payout requests across every provider" })
+  @Get("payouts/requests")
+  @RequireAdminPermission(AdminPermission.PaymentsRead)
+  listPayoutRequests() {
+    return this.payouts.pendingRequests();
+  }
+
+  @ApiOperation({ summary: "Approve, reject, or mark a payout request paid" })
+  @Post("payouts/:id/decision")
+  @RequireAdminPermission(AdminPermission.PaymentsWrite)
+  decideProviderPayout(
+    @Param("id") id: string,
+    @Body() body: DecideProviderPayoutDto,
+    @Req() request: AdminRequest,
+  ) {
+    return this.payouts.decide(id, body.decision, request.adminUser?.id ?? null, body.note ?? null);
   }
 
   @ApiOperation({ summary: "Remove a payout recorded in error" })

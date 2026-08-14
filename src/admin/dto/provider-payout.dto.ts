@@ -1,5 +1,5 @@
 import { ApiProperty } from "@nestjs/swagger";
-import { IsInt, IsISO8601, IsOptional, IsString, Min } from "class-validator";
+import { IsIn, IsInt, IsISO8601, IsOptional, IsString, Min } from "class-validator";
 
 /**
  * Recording money that has left the platform.
@@ -43,4 +43,21 @@ export class CreateProviderPayoutDto {
   @IsOptional()
   @IsISO8601()
   paid_at?: string | null;
+}
+
+/**
+ * An admin's answer to a provider's payout request.
+ *
+ * `paid` is the only value that means money moved, so it is the only one that
+ * stamps `paid_at`. Approving is a promise; paying is a fact.
+ */
+export class DecideProviderPayoutDto {
+  @ApiProperty({ enum: ["approved", "rejected", "paid"] })
+  @IsIn(["approved", "rejected", "paid"])
+  decision!: "approved" | "rejected" | "paid";
+
+  @ApiProperty({ required: false, nullable: true, description: "Why — shown to the provider." })
+  @IsOptional()
+  @IsString()
+  note?: string | null;
 }
