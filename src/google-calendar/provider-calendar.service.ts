@@ -104,8 +104,25 @@ export class ProviderCalendarService {
     description: string;
     shareWith: string | null | undefined;
   }): Promise<ProvisionResult> {
+    // Already has one — but "already has one" is not the same as "someone can
+    // see it". A provider approved without a contact email got a calendar owned
+    // solely by the service account, and because this returned here, pressing
+    // the button again could never fix that: the calendar existed, so nothing
+    // happened, for ever. Re-running now shares it with whatever address the
+    // provider has since been given.
     if (input.existing?.trim()) {
-      return { calendarId: input.existing.trim(), created: false, shared: false };
+      const calendarId = input.existing.trim();
+      const email = input.shareWith?.trim();
+      if (!email || !this.google.isConfigured()) {
+        return { calendarId, created: false, shared: false };
+      }
+      try {
+        await this.google.shareCalendar(calendarId, email, "writer");
+        return { calendarId, created: false, shared: true };
+      } catch (err) {
+        this.logger.warn(`[calendar] ${input.table}/${input.id}: re-share failed — ${String(err)}`);
+        return { calendarId, created: false, shared: false };
+      }
     }
 
     if (!this.google.isConfigured()) {
