@@ -14,6 +14,7 @@ import { AccountRenewalsService } from "./account-renewals.service";
 import { AccountCancellationService } from "./account-cancellation.service";
 import { ProviderPayoutsService } from "./provider-payouts.service";
 import { ProviderEarningsService } from "./provider-earnings.service";
+import { OccurrencesService } from "./occurrences.service";
 import { AccountController } from "./account.controller";
 import { AccountRenewalsController } from "./account-renewals.controller";
 import { CleaningReminderService } from "./cleaning-reminder.service";
@@ -34,6 +35,7 @@ import { RemindersController } from "./reminders.controller";
     AccountCancellationService,
     ProviderPayoutsService,
     ProviderEarningsService,
+    OccurrencesService,
     CleaningReminderService,
     SubscriptionExpirationService,
   ],

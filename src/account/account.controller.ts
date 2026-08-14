@@ -7,6 +7,7 @@ import { AccountPasswordService } from "./account-password.service";
 import { AccountPreferencesService } from "./account-preferences.service";
 import { AccountCancellationService } from "./account-cancellation.service";
 import { ProviderPayoutsService } from "./provider-payouts.service";
+import { OccurrencesService } from "./occurrences.service";
 import { AccountPaymentService } from "./account-payment.service";
 import { AccountCleaningService } from "./account-cleaning.service";
 import { CleaningReminderService } from "./cleaning-reminder.service";
@@ -26,6 +27,56 @@ class RescheduleBookingDto {
   @ApiProperty()
   @IsString()
   slot_id!: string;
+}
+
+class OccurrenceStatusDto {
+  @ApiProperty({ enum: ["scheduled", "done", "failed", "cancelled"] })
+  @IsString()
+  status!: string;
+
+  @ApiProperty({ required: false, nullable: true, description: "Why it failed — shown on the day's list." })
+  @IsOptional()
+  @IsString()
+  reason?: string | null;
+}
+
+class OccurrenceAnnotateDto {
+  @ApiProperty({ required: false, nullable: true, description: "Who is doing it." })
+  @IsOptional()
+  @IsString()
+  assignee?: string | null;
+
+  @ApiProperty({ required: false, nullable: true })
+  @IsOptional()
+  @IsString()
+  notes?: string | null;
+}
+
+class OccurrenceRescheduleDto {
+  @ApiProperty({ example: "2026-08-20T11:00:00.000Z" })
+  @IsString()
+  startsAt!: string;
+}
+
+class OccurrenceCompletionDto {
+  @ApiProperty({ required: false, nullable: true })
+  @IsOptional()
+  checklist?: unknown;
+
+  @ApiProperty({ required: false, nullable: true })
+  @IsOptional()
+  @IsString()
+  photoUrl?: string | null;
+
+  @ApiProperty({ required: false, nullable: true })
+  @IsOptional()
+  @IsString()
+  issue?: string | null;
+
+  @ApiProperty({ required: false, nullable: true })
+  @IsOptional()
+  @IsString()
+  completedBy?: string | null;
 }
 
 class RequestPayoutDto {
@@ -82,6 +133,7 @@ export class AccountController {
     private readonly cleaning: AccountCleaningService,
     private readonly cancellation: AccountCancellationService,
     private readonly payouts: ProviderPayoutsService,
+    private readonly occurrences: OccurrencesService,
   ) {}
 
   // ── Cleaning self-service ────────────────────────────────────────────────────
@@ -236,6 +288,59 @@ export class AccountController {
   ) {
     const isAdmin = (req.authUser?.roles ?? []).includes("SUPER_ADMIN");
     return this.payouts.listForOwner(req.authUser!.id, providerId, isAdmin);
+  }
+
+  /**
+   * The provider's day — visits, deliveries and booked hours in one list,
+   * whatever the service. See OccurrencesService for why the writes still go
+   * to the legacy row where one exists.
+   */
+  @ApiOperation({ summary: "Occurrences for a business you run, in a date window" })
+  @Get("providers/:providerId/occurrences")
+  listOccurrences(
+    @Req() req: AccountRequest,
+    @Param("providerId") providerId: string,
+    @Query("from") from?: string,
+    @Query("to") to?: string,
+    @Query("status") status?: string,
+  ) {
+    const isAdmin = (req.authUser?.roles ?? []).includes("SUPER_ADMIN");
+    return this.occurrences.list(req.authUser!.id, providerId, isAdmin, { from, to, status });
+  }
+
+  @ApiOperation({ summary: "Schedule the days ahead that nobody has generated yet" })
+  @Post("providers/:providerId/occurrences/generate")
+  generateOccurrences(@Req() req: AccountRequest, @Param("providerId") providerId: string) {
+    const isAdmin = (req.authUser?.roles ?? []).includes("SUPER_ADMIN");
+    return this.occurrences.generate(req.authUser!.id, providerId, isAdmin);
+  }
+
+  @ApiOperation({ summary: "Mark an occurrence done, failed or cancelled" })
+  @Patch("occurrences/:id/status")
+  setOccurrenceStatus(@Req() req: AccountRequest, @Param("id") id: string, @Body() body: OccurrenceStatusDto) {
+    const isAdmin = (req.authUser?.roles ?? []).includes("SUPER_ADMIN");
+    return this.occurrences.setStatus(req.authUser!.id, id, isAdmin, { status: body.status, reason: body.reason });
+  }
+
+  @ApiOperation({ summary: "Assign someone to an occurrence, or note something on it" })
+  @Patch("occurrences/:id")
+  annotateOccurrence(@Req() req: AccountRequest, @Param("id") id: string, @Body() body: OccurrenceAnnotateDto) {
+    const isAdmin = (req.authUser?.roles ?? []).includes("SUPER_ADMIN");
+    return this.occurrences.annotate(req.authUser!.id, id, isAdmin, body);
+  }
+
+  @ApiOperation({ summary: "Move an occurrence to another time" })
+  @Post("occurrences/:id/reschedule")
+  rescheduleOccurrence(@Req() req: AccountRequest, @Param("id") id: string, @Body() body: OccurrenceRescheduleDto) {
+    const isAdmin = (req.authUser?.roles ?? []).includes("SUPER_ADMIN");
+    return this.occurrences.reschedule(req.authUser!.id, id, isAdmin, body.startsAt);
+  }
+
+  @ApiOperation({ summary: "File a completion report and mark it done" })
+  @Post("occurrences/:id/completion")
+  completeOccurrence(@Req() req: AccountRequest, @Param("id") id: string, @Body() body: OccurrenceCompletionDto) {
+    const isAdmin = (req.authUser?.roles ?? []).includes("SUPER_ADMIN");
+    return this.occurrences.complete(req.authUser!.id, id, isAdmin, body);
   }
 
   @ApiOperation({ summary: "What this business may withdraw right now" })
