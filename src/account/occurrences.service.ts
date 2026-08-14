@@ -260,18 +260,24 @@ export class OccurrencesService {
 
   private async assertOwner(userId: string, providerId: string, isAdmin: boolean): Promise<void> {
     if (isAdmin) return;
-    const rows = await this.rest<Array<{ admin_user_id: string | null }>>(
-      `providers?id=eq.${this.enc(providerId)}&select=admin_user_id&limit=1`,
+
+    const rows = await this.rest<Array<{ id: string; admin_user_id: string | null }>>(
+      `providers?id=eq.${this.enc(providerId)}&select=id,admin_user_id&limit=1`,
     );
-    const owner = rows?.[0]?.admin_user_id;
-    if (!owner) throw new NotFoundException("Provider not found.");
-    if (String(owner) !== String(userId)) {
-      // A manager runs the day-to-day, so they count as an owner here.
-      const members = await this.rest<Array<{ id: string }>>(
-        `provider_members?provider_id=eq.${this.enc(providerId)}&user_id=eq.${this.enc(userId)}&select=id&limit=1`,
-      );
-      if (!members?.length) throw new ForbiddenException("You don't run this business.");
-    }
+    const provider = rows?.[0];
+    if (!provider) throw new NotFoundException("Provider not found.");
+
+    // A platform-run business has no personal owner — Apartment Cleaning is
+    // exactly that. Treating a null owner as "no such provider" locked its own
+    // managers out of their day's work, and the screen reported it as an empty
+    // day rather than a refusal.
+    if (provider.admin_user_id && String(provider.admin_user_id) === String(userId)) return;
+
+    // A manager runs the day-to-day, so they count here.
+    const members = await this.rest<Array<{ id: string }>>(
+      `provider_members?provider_id=eq.${this.enc(providerId)}&user_id=eq.${this.enc(userId)}&select=id&limit=1`,
+    );
+    if (!members?.length) throw new ForbiddenException("You don't run this business.");
   }
 
   // ─── Supabase REST (service role — this table is invisible to the anon key) ──
@@ -296,8 +302,12 @@ export class OccurrencesService {
     const { base } = this.creds();
     const res = await fetch(`${base}/rest/v1/${path}`, { headers: this.headers() });
     if (!res.ok) {
-      this.logger.warn(`[occurrences] GET ${path} → ${res.status}`);
-      return null;
+      // Loudly. A swallowed read here reaches the provider as "nothing on this
+      // day", which is indistinguishable from a quiet day and sends them
+      // looking for work that the screen simply failed to fetch.
+      const text = await res.text().catch(() => "");
+      this.logger.error(`[occurrences] GET ${path} → ${res.status}: ${text}`);
+      throw new BadRequestException(`Could not read the day's work (${res.status}).`);
     }
     return (await res.json()) as T;
   }
