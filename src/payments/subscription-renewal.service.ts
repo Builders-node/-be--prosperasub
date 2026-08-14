@@ -4,7 +4,9 @@ import { BlinkService } from "./blink.service";
 import { SimpleFiService } from "./simplefi.service";
 import { PayPalService } from "./paypal.service";
 
-export type RenewalService = "food" | "cleaning" | "beach";
+/** `plan` is a universal `provider_subscriptions` row — a provider with no
+ *  legacy table of its own. It renews by the same three rules as the rest. */
+export type RenewalService = "food" | "cleaning" | "beach" | "plan";
 export type RenewalPaymentMethod = "lightning" | "onchain" | "crypto" | "infinita" | "paypal";
 
 interface VerifyInput {
@@ -186,6 +188,7 @@ export class SubscriptionRenewalService {
       food: "Meal plan",
       cleaning: "Cleaning plan",
       beach: "Beach Club membership",
+      plan: "Subscription",
     };
     const label = SERVICE_LABEL[input.service] ?? "Subscription";
     // What the customer actually paid, not just the service price — quoting the

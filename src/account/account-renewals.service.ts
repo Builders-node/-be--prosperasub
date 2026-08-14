@@ -41,6 +41,18 @@ interface BeachSubRow {
   plan_name: string | null;
 }
 
+interface PlanSubRow {
+  id: string;
+  user_id: string | null;
+  status: string | null;
+  start_date: string | null;
+  end_date: string | null;
+  price_cents: number | null;
+  plan_id: string | null;
+  periods_paid: number | null;
+  metadata: Record<string, any> | null;
+}
+
 /**
  * User-facing renewal endpoints for cleaning + beach club subscriptions. Both
  * follow the same shape food.service.ts already uses:
@@ -196,6 +208,89 @@ export class AccountRenewalsService {
     };
   }
 
+  // ═══════════════════════════════════════════════════════════════════════
+  // Universal plans (provider_subscriptions)
+  // ═══════════════════════════════════════════════════════════════════════
+  /**
+   * The fourth service, and the one that had no renewal at all: a provider with
+   * no legacy table kept its customers here, and "Renew" on that card opened a
+   * checkout that bought a SECOND subscription. Same three rules as the rest —
+   * verified payment, idempotent retry, one row extended in place.
+   */
+  async renewPlan(
+    user: { id: string; email?: string },
+    subId: string,
+    payload: RenewPayload,
+  ) {
+    this.assertPayload(payload);
+
+    const sub = await this.fetchPlan(subId);
+    // `provider_subscriptions.user_id` is a uuid, and a Google login's token id
+    // is not one — the row was written with the canonical users.id resolved by
+    // email, so that is what ownership has to be checked against.
+    await this.assertPlanOwnership(sub.user_id, user);
+    if (String(sub.status).toLowerCase() === "cancelled") {
+      throw new ForbiddenException("Cancelled subscriptions cannot be renewed.");
+    }
+
+    await this.renewals.verifyPayment({
+      method: payload.payment_method,
+      reference: payload.payment_reference,
+      amountCents: payload.amount_cents,
+    });
+
+    // The term is what was bought: `periods_paid` periods of the plan's own
+    // unit, which the purchase snapshotted into metadata. A renewal buys the
+    // same term again — never a different one, because the price was quoted
+    // for that term.
+    const periods = Math.max(1, Number(sub.periods_paid) || 1);
+    const unit = String(sub.metadata?.period ?? "monthly").toLowerCase();
+    const previousEnd = this.planEndDateOf(sub, unit, periods);
+    const nextStart = this.continuousNextStart(previousEnd);
+    const newEnd = this.advance(nextStart, unit, periods);
+
+    const record = await this.renewals.recordRenewal({
+      service: "plan",
+      subscriptionId: subId,
+      previousEnd,
+      newStart: nextStart,
+      newEnd,
+      amountCents: payload.amount_cents,
+      surchargeCents: payload.surcharge_cents ?? 0,
+      method: payload.payment_method,
+      reference: payload.payment_reference,
+      idempotencyKey: payload.idempotency_key,
+      userId: user.id,
+    });
+    if (record.status === "existing") {
+      return {
+        ok: true,
+        idempotent: true,
+        start_date: record.row.new_start,
+        end_date: record.row.new_end,
+        status: "active" as const,
+      };
+    }
+
+    await this.patch(`provider_subscriptions?id=eq.${this.enc(subId)}`, {
+      start_date: nextStart,
+      end_date: newEnd,
+      status: "active",
+      payment_status: "paid",
+      payment_method: payload.payment_method,
+      payment_reference: payload.payment_reference,
+      updated_at: new Date().toISOString(),
+    });
+
+    return {
+      ok: true,
+      idempotent: false,
+      start_date: nextStart,
+      end_date: newEnd,
+      status: "active" as const,
+    };
+  }
+
   // ── Validation helpers ────────────────────────────────────────────────────
 
   private assertPayload(p: RenewPayload) {
@@ -213,6 +308,27 @@ export class AccountRenewalsService {
     }
   }
 
+  /**
+   * Same check, one lookup deeper. The legacy tables hold whatever id the token
+   * carried; this one holds the canonical uuid, so a Google account's token id
+   * never matches it directly and a straight comparison would lock the owner
+   * out of their own renewal.
+   */
+  private async assertPlanOwnership(
+    subUserId: string | null,
+    user: { id: string; email?: string },
+  ) {
+    if (!subUserId) return;
+    if (String(subUserId) === String(user.id)) return;
+    if (user.email) {
+      const rows = await this.rest<{ id: string }[]>(
+        `users?email=eq.${this.enc(user.email)}&select=id&limit=1`,
+      );
+      if (rows?.[0]?.id && String(rows[0].id) === String(subUserId)) return;
+    }
+    throw new ForbiddenException("You do not have access to this subscription");
+  }
+
   // ── Data access (PostgREST) ───────────────────────────────────────────────
 
   private async fetchCleaning(id: string): Promise<CleaningSubRow> {
@@ -221,6 +337,15 @@ export class AccountRenewalsService {
     );
     const sub = rows?.[0];
     if (!sub) throw new NotFoundException("Cleaning subscription not found");
+    return sub;
+  }
+
+  private async fetchPlan(id: string): Promise<PlanSubRow> {
+    const rows = await this.rest<PlanSubRow[]>(
+      `provider_subscriptions?id=eq.${this.enc(id)}&select=id,user_id,status,start_date,end_date,price_cents,plan_id,periods_paid,metadata&limit=1`,
+    );
+    const sub = rows?.[0];
+    if (!sub) throw new NotFoundException("Subscription not found");
     return sub;
   }
 
@@ -269,6 +394,22 @@ export class AccountRenewalsService {
     if (stored) return stored;
     const start = this.toDateStr(sub.start_date) || this.today();
     return this.addMonths(start, 1);
+  }
+  /** One term of a universal plan, in the plan's own unit. */
+  private advance(dateStr: string, unit: string, periods: number): string {
+    const n = Math.max(1, periods);
+    switch (unit) {
+      case "weekly":    return this.addDays(dateStr, 7 * n);
+      case "quarterly": return this.addMonths(dateStr, 3 * n);
+      case "yearly":    return this.addMonths(dateStr, 12 * n);
+      default:          return this.addMonths(dateStr, n);
+    }
+  }
+  private planEndDateOf(sub: PlanSubRow, unit: string, periods: number): string {
+    const stored = this.toDateStr(sub.end_date);
+    if (stored) return stored;
+    const start = this.toDateStr(sub.start_date) || this.today();
+    return this.advance(start, unit, periods);
   }
   private originalDurationDays(start: string | null, end: string): number {
     const s = this.toDateStr(start);

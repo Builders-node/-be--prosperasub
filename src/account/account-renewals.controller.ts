@@ -72,4 +72,16 @@ export class AccountRenewalsController {
   renewBeach(@Param("id") id: string, @Body() body: RenewPayloadDto, @Req() req: AccountRequest) {
     return this.renewals.renewBeach(req.authUser!.id, id, body);
   }
+
+  @ApiOperation({
+    summary: "Renew a universal plan subscription — verified payment + idempotent",
+    description:
+      "Extends a `provider_subscriptions` row by the same term it was bought for. Until this existed, renewing one of these bought a second subscription instead of extending the first.",
+  })
+  @ApiBody({ type: RenewPayloadDto })
+  @ApiResponse({ status: 201, description: "Renewed; returns new start/end dates + idempotent flag." })
+  @Post("plan/subscriptions/:id/renew")
+  renewPlan(@Param("id") id: string, @Body() body: RenewPayloadDto, @Req() req: AccountRequest) {
+    return this.renewals.renewPlan(req.authUser!, id, body);
+  }
 }
