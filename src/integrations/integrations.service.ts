@@ -337,10 +337,20 @@ export class IntegrationsService {
     }
 
     // 5. Insert the booking, then bump the slot's counter.
+    //
+    // `provider_id` matters more than it looks: the provider workspace scopes
+    // every query by it, so a booking without one exists and its owner cannot
+    // see it. Eighteen rows were in exactly that state before this was added.
+    const pkgOwner = sub.package_id
+      ? await this.rest<Array<{ provider_id: string | null }>>(
+          `cleaning_packages?select=provider_id&id=eq.${encodeURIComponent(sub.package_id)}&limit=1`)
+      : null;
+
     const bookingRows = await this.insertReturning<{ id: string }>("cleaning_bookings", {
       user_id: userId,
       subscription_id: sub.id,
       cleaning_subscription_id: sub.id,
+      provider_id: pkgOwner?.[0]?.provider_id ?? null,
       slot_id: slot.id,
       status: "booked",
       reservation_type: "booking_reserved",
