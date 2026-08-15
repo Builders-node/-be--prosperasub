@@ -283,6 +283,9 @@ export class IntegrationsService {
     const subs = await this.rest<Array<{
       id: string; user_id: string; package_id: string | null;
       apartment_note: string | null;
+      // Selected above and read below, to know whether this booking is the one
+      // that takes the subscription off "awaiting schedule".
+      subscription_status: string | null;
     }>>(subQuery);
     const sub = (subs ?? [])[0];
     if (!sub) {
@@ -367,6 +370,28 @@ export class IntegrationsService {
       current_bookings: (slot.current_bookings ?? 0) + 1,
       updated_at: new Date().toISOString(),
     });
+
+    // 6b. The subscription is no longer awaiting a schedule — it has one.
+    //
+    // A cleaning subscription sits on `pending_schedule` from payment until
+    // somebody picks the days. The browser flow flips it to `active` when it
+    // generates the visits; this endpoint never did, so a partner could book
+    // eight visits and the admin list would still show "Awaiting schedule",
+    // and the daily reminder would keep chasing a customer who had already
+    // been scheduled. Only ever forward, and only from that one state — an
+    // `active` sub stays active, a cancelled one is not resurrected by a
+    // booking.
+    if (String(sub.subscription_status).toLowerCase() === "pending_schedule") {
+      await this.patch(`cleaning_subscriptions?id=eq.${encodeURIComponent(sub.id)}`, {
+        subscription_status: "active",
+        is_active: true,
+        updated_at: new Date().toISOString(),
+      }).catch((e) =>
+        // The booking is already committed; failing the partner's request over
+        // a status badge would report a booking that did happen as a failure.
+        this.logger.warn(`[builders-node] booked ${bookingId} but could not activate ${sub.id}: ${String(e)}`),
+      );
+    }
 
     // 7. Put it on the cleaners' calendar now, not on the next daily cron.
     //    Best-effort: the booking is already committed, and the row stays
