@@ -112,17 +112,9 @@ export class ProviderCalendarService {
     // provider has since been given.
     if (input.existing?.trim()) {
       const calendarId = input.existing.trim();
-      const email = input.shareWith?.trim();
-      if (!email || !this.google.isConfigured()) {
-        return { calendarId, created: false, shared: false };
-      }
-      try {
-        await this.google.shareCalendar(calendarId, email, "writer");
-        return { calendarId, created: false, shared: true };
-      } catch (err) {
-        this.logger.warn(`[calendar] ${input.table}/${input.id}: re-share failed — ${String(err)}`);
-        return { calendarId, created: false, shared: false };
-      }
+      if (!this.google.isConfigured()) return { calendarId, created: false, shared: false };
+      const shared = await this.shareWithAll(calendarId, input.shareWith, `${input.table}/${input.id}`);
+      return { calendarId, created: false, shared };
     }
 
     if (!this.google.isConfigured()) {
@@ -140,21 +132,61 @@ export class ProviderCalendarService {
 
     await this.writeCalendarId(input.table, input.id, calendarId);
 
-    let shared = false;
-    const email = input.shareWith?.trim();
-    if (email) {
-      try {
-        await this.google.shareCalendar(calendarId, email, "writer");
-        shared = true;
-      } catch (err) {
-        // The calendar exists and is already recorded; failing to share it is
-        // worth a log and a retry, not an unwind that would strand the id.
-        this.logger.warn(`[calendar] ${input.table}/${input.id}: share failed — ${String(err)}`);
-      }
-    }
+    const shared = await this.shareWithAll(calendarId, input.shareWith, `${input.table}/${input.id}`);
 
     this.logger.log(`[calendar] ${input.table}/${input.id} → ${calendarId} (shared=${shared})`);
     return { calendarId, created: true, shared };
+  }
+
+  /**
+   * Everyone who should be able to open this calendar.
+   *
+   * The provider's own address, when it has one — and always the platform
+   * owner's, from `global_settings.calendar_owner_email`. Without the second,
+   * a provider with no contact email gets a calendar that only the service
+   * account can see: real bookings landing where no human has a link. Both
+   * cleaning providers were in exactly that state.
+   *
+   * Best effort per address: the calendar exists and is already recorded, so a
+   * failed share is worth a log and a retry, not an unwind that would strand
+   * the id.
+   */
+  private async shareWithAll(
+    calendarId: string,
+    providerEmail: string | null | undefined,
+    label: string,
+  ): Promise<boolean> {
+    const owner = await this.ownerEmail();
+    const audience = [providerEmail?.trim(), owner].filter(
+      (e): e is string => !!e && e.includes("@"),
+    );
+    const unique = [...new Set(audience.map((e) => e.toLowerCase()))];
+
+    let anyShared = false;
+    for (const email of unique) {
+      try {
+        await this.google.shareCalendar(calendarId, email, "writer");
+        anyShared = true;
+      } catch (err) {
+        this.logger.warn(`[calendar] ${label}: share with ${email} failed — ${String(err)}`);
+      }
+    }
+    return anyShared;
+  }
+
+  /** The platform owner's address, or null when nobody has set one. */
+  private async ownerEmail(): Promise<string | null> {
+    try {
+      const rows = await this.restGet<Array<{ value: unknown }>>(
+        `global_settings?key=eq.calendar_owner_email&select=value`,
+      );
+      const raw = rows?.[0]?.value;
+      const email = typeof raw === "string" ? raw : null;
+      return email && email.includes("@") ? email : null;
+    } catch (err) {
+      this.logger.warn(`[calendar] could not read calendar_owner_email: ${String(err)}`);
+      return null;
+    }
   }
 
   // ─── PostgREST ──────────────────────────────────────────────────────────────
