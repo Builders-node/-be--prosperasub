@@ -123,6 +123,14 @@ export class AdminService {
     return null;
   }
 
+  /** A legacy court id → the calendar row that now carries its bookings. */
+  async resourceIdForLegacyCourt(courtId: string): Promise<string | null> {
+    const rows = await this.supabaseRest<Array<Record<string, any>>>(
+      `/bookable_resources?source_service_key=eq.beach&source_resource_id=eq.${encodeURIComponent(courtId)}&select=id&limit=1`,
+    );
+    return rows?.[0]?.id ?? null;
+  }
+
   // ── Beach Court → Google Calendar sync ─────────────────────────────────────
 
   async syncBeachCourtBookingCreated(bookingId: string) {
@@ -136,17 +144,15 @@ export class AdminService {
     if (!booking) return { ok: false, error: "Booking not found" };
     if (booking.status !== "confirmed" && booking.status !== "held") return { ok: false, skipped: true, reason: "not_active" as const };
 
-    const bridge = await this.supabaseRest<Array<Record<string, any>>>(
-      `/bookable_resources?id=eq.${encodeURIComponent(String(booking.resourceId))}&select=source_resource_id&limit=1`,
+    // The calendar id lives on the calendar. It used to be fetched by bridging
+    // back to the legacy court row, which is one hop and one table more than
+    // the answer needs.
+    const rows = await this.supabaseRest<Array<Record<string, any>>>(
+      `/bookable_resources?id=eq.${encodeURIComponent(String(booking.resourceId))}&select=id,name,metadata&limit=1`,
     );
-    const legacyCourtId = bridge?.[0]?.source_resource_id;
-    if (!legacyCourtId) return { ok: false, error: "Resource → court bridge not found" };
-
-    const courts = await this.supabaseRest<Array<Record<string, any>>>(
-      `/beach_club_courts?id=eq.${encodeURIComponent(String(legacyCourtId))}&select=id,name,google_calendar_id&limit=1`,
-    );
-    const court = courts?.[0];
-    if (!court) return { ok: false, error: "Court not found" };
+    const court = rows?.[0];
+    if (!court) return { ok: false, error: "Calendar not found" };
+    court.google_calendar_id = court.metadata?.google_calendar_id ?? null;
     if (!court.google_calendar_id) return { ok: false, skipped: true, reason: "no_calendar" as const };
 
     const dateStr = new Date(booking.startAt).toISOString().slice(0, 10);
@@ -182,40 +188,39 @@ export class AdminService {
     if (!this.beachCourtCalendarSync?.isConfigured()) {
       return { ok: false, skipped: true, reason: "not_configured" as const };
     }
-    const courts = await this.supabaseRest<Array<Record<string, any>>>(
-      `/beach_club_courts?id=eq.${encodeURIComponent(courtId)}&select=id,name,google_calendar_id&limit=1`,
+    // `courtId` may be either id while old links live: resolve it to the
+    // calendar, which is where both the name and the Google id now are.
+    const resourceId = (await this.resourceIdForLegacyCourt(courtId)) ?? courtId;
+    const rows = await this.supabaseRest<Array<Record<string, any>>>(
+      `/bookable_resources?id=eq.${encodeURIComponent(resourceId)}&select=id,name,metadata&limit=1`,
     );
-    const court = courts?.[0];
-    if (!court) return { ok: false, error: "Court not found" };
-    if (!court.google_calendar_id) return { ok: false, skipped: true, reason: "no_calendar" as const };
-    // court → calendar: a booking belongs to the resource, not to the legacy
-    // court row, which is only where the Google calendar id happens to live.
-    const resources = await this.supabaseRest<Array<Record<string, any>>>(
-      `/bookable_resources?source_service_key=eq.beach&source_resource_id=eq.${encodeURIComponent(courtId)}&select=id&limit=1`,
-    );
-    const resourceId = resources?.[0]?.id;
-    if (!resourceId) return { ok: false, error: "Court → calendar bridge not found" };
+    const court = rows?.[0];
+    if (!court) return { ok: false, error: "Calendar not found" };
+    const calendarId = court.metadata?.google_calendar_id ?? null;
+    if (!calendarId) return { ok: false, skipped: true, reason: "no_calendar" as const };
 
     const result = await this.beachCourtCalendarSync.pullExternalBookings({
       courtId: String(court.id),
-      resourceId: String(resourceId),
+      resourceId: String(court.id),
       courtName: String(court.name),
-      courtGoogleCalendarId: String(court.google_calendar_id),
+      courtGoogleCalendarId: String(calendarId),
     });
-    await this.supabaseRest(`/beach_club_courts?id=eq.${encodeURIComponent(courtId)}`, {
+    await this.supabaseRest(`/bookable_resources?id=eq.${encodeURIComponent(String(court.id))}`, {
       method: "PATCH",
-      body: JSON.stringify({ google_last_synced_at: new Date().toISOString() }),
+      body: JSON.stringify({
+        metadata: { ...(court.metadata ?? {}), google_last_synced_at: new Date().toISOString() },
+      }),
     }).catch(() => { /* ignore */ });
     return result;
   }
 
-  /** Pull Google Calendar events for every court that has a calendar attached. */
+  /** Pull Google Calendar events for every calendar that has one attached. */
   async pullAllBeachCourtsFromGoogle() {
     if (!this.beachCourtCalendarSync?.isConfigured()) {
       return { ok: false, skipped: true, reason: "not_configured" as const };
     }
     const courts = await this.supabaseRest<Array<Record<string, any>>>(
-      `/beach_club_courts?is_active=eq.true&google_calendar_id=not.is.null&select=id`,
+      `/bookable_resources?status=eq.active&metadata->>google_calendar_id=not.is.null&select=id`,
     ).catch(() => []);
     const results: Array<{ courtId: string } & Awaited<ReturnType<typeof this.pullBeachCourtFromGoogle>>> = [];
     for (const c of courts ?? []) {
@@ -227,10 +232,12 @@ export class AdminService {
   async syncBeachCourtBookingDeleted(input: { bookingId: string; courtId: string; eventId: string | null }) {
     if (!this.beachCourtCalendarSync?.isConfigured()) return { ok: true, skipped: true };
     if (!input.eventId) return { ok: true, skipped: true };
-    const courts = await this.supabaseRest<Array<Record<string, any>>>(
-      `/beach_club_courts?id=eq.${encodeURIComponent(input.courtId)}&select=google_calendar_id&limit=1`,
+    // `courtId` is whichever id the caller had; both resolve to the calendar.
+    const resourceId = (await this.resourceIdForLegacyCourt(input.courtId)) ?? input.courtId;
+    const rows = await this.supabaseRest<Array<Record<string, any>>>(
+      `/bookable_resources?id=eq.${encodeURIComponent(resourceId)}&select=metadata&limit=1`,
     );
-    const calendarId = courts?.[0]?.google_calendar_id;
+    const calendarId = rows?.[0]?.metadata?.google_calendar_id;
     if (!calendarId) return { ok: true, skipped: true };
     return this.beachCourtCalendarSync.syncDeleted({ eventId: input.eventId, courtGoogleCalendarId: calendarId });
   }

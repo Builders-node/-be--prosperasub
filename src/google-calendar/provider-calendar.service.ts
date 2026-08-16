@@ -61,43 +61,42 @@ export class ProviderCalendarService {
   }
 
   /**
-   * A court's calendar, on the same terms.
+   * A bookable calendar's Google calendar, on the same terms as a provider's.
    *
-   * Courts used to want a calendar id typed into an admin form, with a
-   * separate manual step to grant our service account access — two chances to
-   * get it wrong, and a booking that silently syncs nowhere when it is. Now the
-   * platform creates the court's calendar exactly as it creates a provider's;
-   * the club's own contact address gets write access so a human can still see
-   * it.
+   * This was `provisionCourt` and took a `beach_club_courts` id, so only the
+   * beach could ever have one. It takes a `bookable_resources` id now — a
+   * room, a table or a chair gets its calendar the same way — and the id is
+   * stored on the resource's own metadata rather than on a legacy column.
    */
-  async provisionCourt(courtId: string): Promise<ProvisionResult> {
-    const courts = await this.restGet<Array<{ id: string; name: string; google_calendar_id: string | null }>>(
-      `beach_club_courts?id=eq.${encodeURIComponent(courtId)}&select=id,name,google_calendar_id`,
+  async provisionResource(resourceId: string): Promise<ProvisionResult> {
+    const rows = await this.restGet<Array<{
+      id: string; name: string; provider_id: string; metadata: Record<string, unknown> | null;
+    }>>(
+      `bookable_resources?id=eq.${encodeURIComponent(resourceId)}&select=id,name,provider_id,metadata`,
     );
-    const court = courts?.[0];
-    if (!court) throw new Error(`Court ${courtId} not found`);
+    const resource = rows?.[0];
+    if (!resource) throw new Error(`Calendar ${resourceId} not found`);
 
-    // The club is one platform-owned provider; its contact address is the
-    // nearest thing a court has to an owner.
-    const club = await this.restGet<Array<{ contact_email: string | null }>>(
-      `providers?source_service_key=eq.beach&select=contact_email&limit=1`,
+    // The business that owns the calendar is who the calendar is shared with.
+    const owner = await this.restGet<Array<{ contact_email: string | null }>>(
+      `providers?id=eq.${encodeURIComponent(resource.provider_id)}&select=contact_email&limit=1`,
     );
 
     return this.provisionFor({
-      table: "beach_club_courts",
-      id: courtId,
-      existing: court.google_calendar_id,
-      summary: `EverySub — ${court.name}`,
+      table: "bookable_resources",
+      id: resourceId,
+      existing: (resource.metadata?.google_calendar_id as string | null) ?? null,
+      summary: `EverySub — ${resource.name}`,
       description:
-        `Bookings for the ${court.name} court on EverySub.\n` +
+        `Bookings for ${resource.name} on EverySub.\n` +
         `Created and owned by the platform; events are written automatically.`,
-      shareWith: club?.[0]?.contact_email ?? null,
+      shareWith: owner?.[0]?.contact_email ?? null,
     });
   }
 
   /** The one provisioning routine. Idempotent by the `existing` check. */
   private async provisionFor(input: {
-    table: "providers" | "beach_club_courts";
+    table: "providers" | "bookable_resources";
     id: string;
     existing: string | null | undefined;
     summary: string;
@@ -258,8 +257,22 @@ export class ProviderCalendarService {
     }
   }
 
+  /**
+   * Where the calendar id lives depends on what owns it: a provider has a
+   * column, a bookable calendar keeps it in `metadata` beside its iCal token.
+   * Merging rather than replacing that object, because the token is in there.
+   */
   private async writeCalendarId(table: string, rowId: string, calendarId: string) {
     const { url, key } = this.restBase();
+
+    let body: Record<string, unknown> = { google_calendar_id: calendarId };
+    if (table === "bookable_resources") {
+      const current = await this.restGet<Array<{ metadata: Record<string, unknown> | null }>>(
+        `bookable_resources?id=eq.${encodeURIComponent(rowId)}&select=metadata`,
+      );
+      body = { metadata: { ...(current?.[0]?.metadata ?? {}), google_calendar_id: calendarId } };
+    }
+
     const res = await fetch(`${url}/rest/v1/${table}?id=eq.${encodeURIComponent(rowId)}`, {
       method: "PATCH",
       headers: {
@@ -268,7 +281,7 @@ export class ProviderCalendarService {
         "Content-Type": "application/json",
         Prefer: "return=minimal",
       },
-      body: JSON.stringify({ google_calendar_id: calendarId }),
+      body: JSON.stringify(body),
     });
     if (!res.ok) {
       throw new Error(`Created calendar ${calendarId} but could not store it on ${table}: ${res.status}`);

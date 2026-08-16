@@ -541,12 +541,21 @@ export class AdminController {
     return this.providerCalendar.provision(id);
   }
 
-  @ApiOperation({ summary: "Provision the platform-owned Google Calendar for a beach court" })
+  @ApiOperation({ summary: "Provision the platform-owned Google Calendar for a bookable calendar" })
   @ApiResponse({ status: 201, description: "Returns the calendar id; idempotent when one already exists." })
+  @Post("calendars/:id/calendar/provision")
+  @RequireAdminPermission(AdminPermission.BookingsWrite)
+  provisionResourceCalendar(@Param("id") id: string) {
+    return this.providerCalendar.provisionResource(id);
+  }
+
+  /** The court-shaped path, kept so an old client does not 404 mid-deploy. */
+  @ApiOperation({ summary: "Deprecated — use POST /admin/calendars/:id/calendar/provision" })
   @Post("beach-club/courts/:id/calendar/provision")
   @RequireAdminPermission(AdminPermission.BookingsWrite)
-  provisionCourtCalendar(@Param("id") id: string) {
-    return this.providerCalendar.provisionCourt(id);
+  async provisionCourtCalendar(@Param("id") id: string) {
+    const rows = await this.admin.resourceIdForLegacyCourt(id);
+    return this.providerCalendar.provisionResource(rows ?? id);
   }
 
   @ApiOperation({ summary: "Sync a booking to Google Calendar using data provided directly (no DB needed)" })

@@ -572,37 +572,16 @@ export class BookingService {
    */
   private async loadEffectiveBookingSettings(
     providerId: string | null,
-    resource: {
-      hours?: unknown;
-      source_service_key?: string | null;
-      source_resource_id?: string | null;
-    },
+    resource: { hours?: unknown },
   ): Promise<unknown> {
     const own = this.scheduleFromResourceHours(resource?.hours);
     if (own) return own;
 
-    if (resource?.source_service_key === "beach" && resource.source_resource_id) {
-      const rows = await this.rest<Array<{
-        booking_settings: unknown;
-        open_hour: number | null;
-        close_hour: number | null;
-        slot_minutes: number | null;
-      }>>(
-        `beach_club_courts?select=booking_settings,open_hour,close_hour,slot_minutes` +
-          `&id=eq.${encodeURIComponent(resource.source_resource_id)}&limit=1`,
-      );
-      const court = rows?.[0];
-      if (court?.booking_settings) return court.booking_settings;
-
-      // A court carries its own opening hours (open_hour / close_hour /
-      // slot_minutes — what the admin edits on the Courts tab). Only
-      // `booking_settings` was ever read, and it is null for every court, so the
-      // engine fell through to the provider default and published 06:00–18:00
-      // for courts configured 08:00–19:00. Bookable hours the operator never
-      // set, and no bookable hours in the evening they did.
-      const schedule = this.buildFromCourtHours(court);
-      if (schedule) return schedule;
-    }
+    // The beach used to have a branch here that read a court's own
+    // `booking_settings` and hour columns. Both moved onto the calendar row
+    // above: `booking_settings` was null for every court in production, and
+    // the hours are now authored on the resource and mirrored DOWN to the
+    // court, so reading them back up was reading our own echo.
     return this.loadBookingSettings(providerId);
   }
 
