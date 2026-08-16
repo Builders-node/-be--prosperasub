@@ -9,6 +9,7 @@ import { AccountCancellationService } from "./account-cancellation.service";
 import { ProviderPayoutsService } from "./provider-payouts.service";
 import { OccurrencesService } from "./occurrences.service";
 import { ProviderMembersService } from "./provider-members.service";
+import { ReviewPromptsService } from "./review-prompts.service";
 import { AccountPaymentService } from "./account-payment.service";
 import { AccountCleaningService } from "./account-cleaning.service";
 import { CleaningReminderService } from "./cleaning-reminder.service";
@@ -160,6 +161,7 @@ export class AccountController {
     private readonly payouts: ProviderPayoutsService,
     private readonly occurrences: OccurrencesService,
     private readonly members: ProviderMembersService,
+    private readonly reviewPrompts: ReviewPromptsService,
   ) {}
 
   // ── Cleaning self-service ────────────────────────────────────────────────────
@@ -378,6 +380,19 @@ export class AccountController {
    * ownership, so with a world-writable table the anon key was enough to
    * become either. The table now refuses anon writes and this is the door.
    */
+  /**
+   * What this customer could rate.
+   *
+   * The rating widget has been on every subscription card for months and has
+   * collected one review — because nothing ever asked. This is the ask: a job
+   * that finished in the last month, for a business they have not rated.
+   */
+  @ApiOperation({ summary: "Finished jobs this customer has not rated yet" })
+  @Get("reviews/pending")
+  pendingReviews(@Req() req: AccountRequest) {
+    return this.reviewPrompts.pending(req.authUser!.id);
+  }
+
   @ApiOperation({ summary: "Who runs a business you own" })
   @Get("providers/:providerId/members")
   listProviderMembers(@Req() req: AccountRequest, @Param("providerId") providerId: string) {
