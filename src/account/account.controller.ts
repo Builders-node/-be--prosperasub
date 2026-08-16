@@ -259,7 +259,7 @@ export class AccountController {
     @Param("service") service: string,
     @Param("id") subscriptionId: string,
   ) {
-    return this.cancellation.cancel(req.authUser!.id, service, subscriptionId);
+    return this.cancellation.cancel(req.authUser!.id, service, subscriptionId, req.authUser!.email);
   }
 
   @ApiOperation({ summary: "Undo a cancellation while the period is still running" })
@@ -269,7 +269,7 @@ export class AccountController {
     @Param("service") service: string,
     @Param("id") subscriptionId: string,
   ) {
-    return this.cancellation.resume(req.authUser!.id, service, subscriptionId);
+    return this.cancellation.resume(req.authUser!.id, service, subscriptionId, req.authUser!.email);
   }
 
 

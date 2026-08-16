@@ -30,6 +30,11 @@ interface ServiceShape {
   /** Statuses a customer may cancel from. */
   cancellable: string[];
   label: string;
+  /**
+   * Set when the row was migrated from a legacy table whose ids are still
+   * handed out by the screens — the lookup then accepts either id.
+   */
+  legacySource?: string;
 }
 
 const SERVICES: Record<string, ServiceShape> = {
@@ -87,13 +92,23 @@ export class AccountCancellationService {
     private readonly notifications: AccountNotificationsService,
   ) {}
 
-  async cancel(userId: string, service: string, subscriptionId: string): Promise<CancellationResult> {
-    return this.setFlag(userId, service, subscriptionId, true);
+  async cancel(userId: string, service: string, subscriptionId: string, email?: string): Promise<CancellationResult> {
+    return this.setFlag(userId, service, subscriptionId, true, email);
   }
 
   /** Undo, while the period is still running. */
-  async resume(userId: string, service: string, subscriptionId: string): Promise<CancellationResult> {
-    return this.setFlag(userId, service, subscriptionId, false);
+  async resume(userId: string, service: string, subscriptionId: string, email?: string): Promise<CancellationResult> {
+    return this.setFlag(userId, service, subscriptionId, false, email);
+  }
+
+  /**
+   * How to find the row: by its own id, and — for a service whose screens
+   * still hand out legacy ids — by the id it was migrated from.
+   */
+  private matchFilter(shape: { legacySource?: string }, id: string): string {
+    const enc = encodeURIComponent(id);
+    if (!shape.legacySource) return `id=eq.${enc}`;
+    return `or=(id.eq.${enc},and(source_service_key.eq.${shape.legacySource},source_subscription_id.eq.${enc}))`;
   }
 
   private async setFlag(
@@ -101,12 +116,14 @@ export class AccountCancellationService {
     service: string,
     subscriptionId: string,
     cancel: boolean,
+    email?: string,
   ): Promise<CancellationResult> {
     const shape = SERVICES[service];
     if (!shape) throw new BadRequestException(`Unknown service "${service}".`);
 
+    const match = this.matchFilter(shape, subscriptionId);
     const rows = await this.rest<any[]>(
-      `${shape.table}?id=eq.${encodeURIComponent(subscriptionId)}` +
+      `${shape.table}?${match}` +
         `&select=id,user_id,end_date,cancel_at_period_end,${shape.statusCol}&limit=1`,
     );
     const sub = rows?.[0];
@@ -114,7 +131,20 @@ export class AccountCancellationService {
 
     // Ownership, not just existence — the id is guessable and the service key
     // is caller-supplied.
-    if (String(sub.user_id ?? "") !== String(userId)) {
+    //
+    // A Google-login customer carries a `google-…` subject in their token
+    // while the universal row records their canonical `users.id`. The legacy
+    // tables kept whatever the session had, so a direct comparison used to
+    // work; it stops working the moment a service moves. Fall back to the
+    // email, which is what identifies the account either way.
+    let owns = String(sub.user_id ?? "") === String(userId);
+    if (!owns && email) {
+      const users = await this.rest<Array<{ id: string }>>(
+        `users?select=id&email=eq.${encodeURIComponent(email)}&limit=1`,
+      );
+      owns = !!users?.[0]?.id && String(sub.user_id ?? "") === String(users[0].id);
+    }
+    if (!owns) {
       throw new ForbiddenException("This subscription is not yours.");
     }
 
@@ -133,7 +163,9 @@ export class AccountCancellationService {
       return { ok: true, cancelAtPeriodEnd: cancel, endsOn: sub.end_date ?? null };
     }
 
-    await this.patch(`${shape.table}?id=eq.${encodeURIComponent(subscriptionId)}`, {
+    // By the row's OWN id, now that we have it — a filter that matched two
+    // columns would be a filter that could match two rows.
+    await this.patch(`${shape.table}?id=eq.${encodeURIComponent(String(sub.id))}`, {
       cancel_at_period_end: cancel,
       cancel_requested_at: cancel ? new Date().toISOString() : null,
       updated_at: new Date().toISOString(),
