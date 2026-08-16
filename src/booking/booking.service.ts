@@ -23,6 +23,30 @@ const HOLD_TTL_MINUTES = 10;
  * with a TTL; `bookings_active_slot_uidx` (partial unique) makes double-booking
  * impossible at the DB. Emits `booking.*` so Order/Notification/Analytics react.
  */
+/** `plan_id` / `package_id` / `meal_plan_id` — whatever the table calls it. */
+function ids(rows: Array<Record<string, unknown>> | null, column: string): string[] {
+  return [...new Set((rows ?? []).map((r) => r[column]).filter((v): v is string => !!v))];
+}
+
+/**
+ * Every calendar a plan names, across both places it can name one: the flat
+ * `resource_ids` column and the per-line `resource_ids` inside `entitlements`.
+ * Empty means "all of them" and the caller reads it that way.
+ */
+function grantedResourceIds(plan: { resource_ids?: unknown; entitlements?: unknown }): string[] {
+  const out = new Set<string>();
+  const collect = (value: unknown) => {
+    if (Array.isArray(value)) value.forEach((v) => { if (typeof v === "string" && v) out.add(v); });
+  };
+  collect(plan.resource_ids);
+  if (Array.isArray(plan.entitlements)) {
+    for (const line of plan.entitlements) {
+      if (line && typeof line === "object") collect((line as Record<string, unknown>).resource_ids);
+    }
+  }
+  return [...out];
+}
+
 @Injectable()
 export class BookingService {
   private readonly logger = new Logger(BookingService.name);
@@ -208,14 +232,17 @@ export class BookingService {
   }
 
   /**
-   * Does this subject hold a live subscription to the resource's provider?
+   * Does this subject hold a live subscription that opens this calendar?
    *
-   * Beach memberships are the only subscriptions that gate a resource today.
+   * Three answers, not two: no subscription at all, a subscription whose plan
+   * does not name THIS calendar, and yes. The middle one exists because a plan
+   * can name the calendars it opens — a tennis-only membership should be told
+   * it is the wrong court, not that it is not a member.
    *
-   * Three answers, not two: no membership at all, a membership that does not
-   * include THIS court, and yes. The middle one exists because a plan can now
-   * name the courts it opens — a tennis-only membership should be told it is
-   * the wrong court, not that it is not a member.
+   * It used to ask `beach_club_subscriptions` and beach plans, full stop. So
+   * `requiresMembership` was a beach feature: any other provider who turned it
+   * on would have refused every one of their own paying customers. A
+   * subscription is recorded in four places and this reads all of them.
    */
   private async membershipCoversResource(
     subjectRef: string,
@@ -223,31 +250,126 @@ export class BookingService {
   ): Promise<"ok" | "none" | "other_resource"> {
     const userId = subjectRef.startsWith("user:") ? subjectRef.slice(5) : subjectRef;
     if (!userId) return "none";
+    const resource = await this.resources.getResource(resourceId);
+    if (!resource?.provider_id) return "none";
+
+    const plans = await this.plansHeldBy(userId, resource.provider_id);
+    return BookingService.decideCoverage(resourceId, plans);
+  }
+
+  /**
+   * The universal plan rows behind every live subscription this customer holds
+   * with this provider.
+   *
+   * `null` means "no subscription at all" — the only answer that refuses
+   * somebody. An empty array means they are subscribed but the plan could not
+   * be resolved to a universal row, which is a gap in our mirroring and not a
+   * reason to turn a paying member away at the gate.
+   */
+  private async plansHeldBy(
+    userId: string,
+    providerId: string,
+  ): Promise<Array<{ resource_ids?: unknown; entitlements?: unknown }> | null> {
     const today = new Date().toISOString().slice(0, 10);
+    const uid = encodeURIComponent(userId);
 
-    // The live memberships this customer holds, and what each was bought from.
-    const subs = await this.rest<Array<{ plan_id: string | null }>>(
-      `beach_club_subscriptions?select=plan_id&user_id=eq.${encodeURIComponent(userId)}` +
-      `&status=eq.active&payment_status=eq.paid&end_date=gte.${today}`,
+    const provider = (await this.rest<Array<{ source_service_key: string | null; source_provider_id: string | null }>>(
+      `providers?select=source_service_key,source_provider_id&id=eq.${encodeURIComponent(providerId)}&limit=1`,
+    ))?.[0];
+
+    // 1. The universal table. Rows carrying a source key are a stale backfill
+    //    of legacy subscriptions (see CLAUDE.md) — the legacy read below is the
+    //    live answer for those, so counting them here would double-count.
+    const universal = await this.rest<Array<{ plan_id: string | null }>>(
+      `provider_subscriptions?select=plan_id&user_id=eq.${uid}` +
+        `&provider_id=eq.${encodeURIComponent(providerId)}` +
+        `&status=eq.active&source_service_key=is.null`,
     );
-    if (!subs?.length) return "none";
+    const universalPlanIds = (universal ?? []).map((r) => r.plan_id).filter((id): id is string => !!id);
 
-    // What each plan grants. A plan naming no resources grants all of its
-    // provider's — which is what a single all-access membership means, and
-    // what every plan written before this column existed still means.
-    const planIds = [...new Set(subs.map((s) => s.plan_id).filter((id): id is string => !!id))];
-    if (!planIds.length) return "ok";
+    // 2. The service's own table, whichever it is. Each names its plan
+    //    differently and calls "still running" something different.
+    const legacy = await this.legacyPlanIds(provider ?? null, uid, today);
 
-    const plans = await this.rest<Array<{ resource_ids: unknown }>>(
-      `provider_plans?select=resource_ids&source_service_key=eq.beach` +
-      `&source_plan_id=in.(${planIds.map((id) => encodeURIComponent(id)).join(",")})`,
+    if (!universalPlanIds.length && !legacy.subscribed) return null;
+
+    const clauses: string[] = [];
+    if (universalPlanIds.length) {
+      clauses.push(`id.in.(${universalPlanIds.map(encodeURIComponent).join(",")})`);
+    }
+    if (legacy.planIds.length && provider?.source_service_key) {
+      // A legacy plan id is not a `provider_plans.id` — it is what the mirror
+      // row records as its source.
+      clauses.push(
+        `and(source_service_key.eq.${encodeURIComponent(provider.source_service_key)},` +
+          `source_plan_id.in.(${legacy.planIds.map(encodeURIComponent).join(",")}))`,
+      );
+    }
+    if (!clauses.length) return [];
+
+    const rows = await this.rest<Array<{ resource_ids: unknown; entitlements: unknown }>>(
+      `provider_plans?select=resource_ids,entitlements&or=(${clauses.join(",")})`,
     );
-    // No mirror row yet is not a reason to refuse a paying member.
-    if (!plans?.length) return "ok";
+    return rows ?? [];
+  }
 
+  /** Live subscriptions in the per-service tables, and the plan ids they name. */
+  private async legacyPlanIds(
+    provider: { source_service_key: string | null; source_provider_id: string | null } | null,
+    uid: string,
+    today: string,
+  ): Promise<{ subscribed: boolean; planIds: string[] }> {
+    const key = provider?.source_service_key ?? "";
+    const legacyProvider = provider?.source_provider_id ?? "";
+
+    if (key === "beach" || key === "beach_club") {
+      // Platform-owned and singular: a beach membership is not scoped to a
+      // provider column because there is only one.
+      const rows = await this.rest<Array<{ plan_id: string | null }>>(
+        `beach_club_subscriptions?select=plan_id&user_id=eq.${uid}` +
+          `&status=eq.active&payment_status=eq.paid&end_date=gte.${today}`,
+      );
+      return { subscribed: !!rows?.length, planIds: ids(rows, "plan_id") };
+    }
+
+    if (key === "cleaning" && legacyProvider) {
+      const rows = await this.rest<Array<{ package_id: string | null }>>(
+        `cleaning_subscriptions?select=package_id&user_id=eq.${uid}` +
+          `&provider_id=eq.${encodeURIComponent(legacyProvider)}` +
+          `&subscription_status=eq.active`,
+      );
+      return { subscribed: !!rows?.length, planIds: ids(rows, "package_id") };
+    }
+
+    if (key === "food" && legacyProvider) {
+      const rows = await this.rest<Array<{ meal_plan_id: string | null }>>(
+        `food_subscriptions?select=meal_plan_id&user_id=eq.${uid}` +
+          `&provider_id=eq.${encodeURIComponent(legacyProvider)}` +
+          `&status=eq.active&payment_status=eq.paid&end_date=gte.${today}`,
+      );
+      return { subscribed: !!rows?.length, planIds: ids(rows, "meal_plan_id") };
+    }
+
+    return { subscribed: false, planIds: [] };
+  }
+
+  /**
+   * The decision itself, given what the customer holds. Pure, because this is
+   * the part that refuses people.
+   *
+   * A plan that names no calendars opens all of its provider's — that is what
+   * a single all-access membership means, and what every plan written before
+   * the column existed still means.
+   */
+  static decideCoverage(
+    resourceId: string,
+    plans: Array<{ resource_ids?: unknown; entitlements?: unknown }> | null,
+  ): "ok" | "none" | "other_resource" {
+    if (plans === null) return "none";
+    if (!plans.length) return "ok";
     for (const plan of plans) {
-      const ids = Array.isArray(plan.resource_ids) ? plan.resource_ids.map(String) : [];
-      if (ids.length === 0 || ids.includes(resourceId)) return "ok";
+      const named = grantedResourceIds(plan);
+      if (!named.length || named.includes(resourceId)) return "ok";
     }
     return "other_resource";
   }
