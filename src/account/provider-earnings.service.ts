@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable, Logger, ServiceUnavailableException } from "@nestjs/common";
 
 /**
  * What a provider is owed, computed on the server.
@@ -266,22 +266,49 @@ export class ProviderEarningsService {
 
   // ─── PostgREST ──────────────────────────────────────────────────────────────
 
+  /**
+   * Every row of `path`, or an exception.
+   *
+   * Two failures used to be the same thing here. A plain select stops at
+   * PostgREST's 1000-row cap and returns HTTP 200, so past that a provider's
+   * earnings would simply stop growing; and any error returned `null`, which
+   * the callers read as "no subscriptions" — a provider looking at their Money
+   * tab during a blip was told they had earned nothing, and the payout cap
+   * agreed. Now it pages until a short page, and a failure is a failure.
+   */
   private async rest<T>(path: string): Promise<T | null> {
     const base = process.env.SUPABASE_URL?.replace(/\/$/, "");
     const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
-    if (!base || !key) return null;
-    try {
-      const res = await fetch(`${base}/rest/v1/${path}`, {
-        headers: { apikey: key, Authorization: `Bearer ${key}` },
-      });
-      if (!res.ok) {
-        this.logger.warn(`[provider-earnings] ${path} → ${res.status}`);
-        return null;
-      }
-      return (await res.json()) as T;
-    } catch (err) {
-      this.logger.warn(`[provider-earnings] ${path} failed: ${String(err)}`);
-      return null;
+    if (!base || !key) {
+      throw new ServiceUnavailableException("Earnings are unavailable right now.");
     }
+
+    const PAGE = 1000;
+    const rows: unknown[] = [];
+    for (let from = 0; ; from += PAGE) {
+      let res: Response;
+      try {
+        res = await fetch(`${base}/rest/v1/${path}`, {
+          headers: {
+            apikey: key,
+            Authorization: `Bearer ${key}`,
+            Range: `${from}-${from + PAGE - 1}`,
+            "Range-Unit": "items",
+          },
+        });
+      } catch (err) {
+        this.logger.error(`[provider-earnings] ${path} failed: ${String(err)}`);
+        throw new ServiceUnavailableException("Earnings are unavailable right now.");
+      }
+      if (!res.ok) {
+        this.logger.error(`[provider-earnings] ${path} → ${res.status}`);
+        throw new ServiceUnavailableException("Earnings are unavailable right now.");
+      }
+      const page = (await res.json()) as unknown;
+      if (!Array.isArray(page)) return page as T;
+      rows.push(...page);
+      if (page.length < PAGE) break;
+    }
+    return rows as T;
   }
 }
