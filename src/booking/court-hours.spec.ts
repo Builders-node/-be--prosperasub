@@ -50,3 +50,42 @@ describe("beach court hours", () => {
     expect(schedule.sessionDurationMin).toBe(60);
   });
 });
+
+/**
+ * A calendar's own hours, whoever authored them.
+ *
+ * `bookable_resources.hours` was backfilled and then ignored: the only
+ * per-resource lookup was the beach-shaped one below, so a room, a table or a
+ * chair could not carry opening hours at all. These pin the two shapes the
+ * column is written in — and pin that nonsense in it falls through to the
+ * provider's default instead of inventing a day.
+ */
+describe("resource hours", () => {
+  const read = (hours: unknown) =>
+    (BookingService.prototype as never as {
+      scheduleFromResourceHours(h: unknown): unknown;
+    }).scheduleFromResourceHours.call(BookingService.prototype, hours);
+
+  it("reads the open/close shape the editor writes", () => {
+    const schedule = normalizeSchedule(read({ open_hour: 9, close_hour: 17, slot_minutes: 30 }));
+    expect(schedule.weekly[0]).toMatchObject({ enabled: true, from: "09:00", to: "17:00" });
+    expect(schedule.sessionDurationMin).toBe(30);
+  });
+
+  it("passes a full week through untouched", () => {
+    const weekly = Array.from({ length: 7 }, (_, i) => ({
+      enabled: i < 5, from: "10:00", to: "14:00",
+    }));
+    const schedule = normalizeSchedule(read({ weekly, sessionDurationMin: 45 }));
+    expect(schedule.weekly.filter((d) => d.enabled)).toHaveLength(5);
+    expect(schedule.sessionDurationMin).toBe(45);
+  });
+
+  it("declines to answer when there are no hours", () => {
+    // null is the signal to fall through to the provider default — returning a
+    // schedule here would publish bookable hours nobody set.
+    expect(read(null)).toBeNull();
+    expect(read({})).toBeNull();
+    expect(read({ open_hour: 19, close_hour: 8 })).toBeNull();
+  });
+});

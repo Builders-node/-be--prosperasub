@@ -359,17 +359,27 @@ export class BookingService {
   }
 
   /**
-   * Effective booking calendar for a resource — mirrors the frontend
-   * `resolvePlanBookingSettings` precedence: resource-level override wins,
-   * then provider default. Currently we only look up per-resource overrides
-   * for beach courts (`beach_club_courts.booking_settings`); other services'
-   * plan-level overrides live at the plan (subscription) layer, not the
-   * resource layer.
+   * Effective booking calendar for a resource: its own hours if it has any,
+   * then the provider's default.
+   *
+   * The resource's own `hours` used to be ignored entirely — the only
+   * per-resource lookup was a beach-shaped one against `beach_club_courts`,
+   * so a calendar belonging to any other kind of business could not carry
+   * opening hours at all, and the copy sitting on the universal row was
+   * decorative. It is the authored value now; the beach columns stay as a
+   * fallback for courts written before the editor moved.
    */
   private async loadEffectiveBookingSettings(
     providerId: string | null,
-    resource: { source_service_key?: string | null; source_resource_id?: string | null },
+    resource: {
+      hours?: unknown;
+      source_service_key?: string | null;
+      source_resource_id?: string | null;
+    },
   ): Promise<unknown> {
+    const own = this.scheduleFromResourceHours(resource?.hours);
+    if (own) return own;
+
     if (resource?.source_service_key === "beach" && resource.source_resource_id) {
       const rows = await this.rest<Array<{
         booking_settings: unknown;
@@ -396,9 +406,32 @@ export class BookingService {
   }
 
   /**
-   * Build a Schedule from a court's own hour columns. Courts are open the same
-   * hours every day of the week, including weekends — a beach club that shut on
-   * Saturday would be an odd beach club, and the provider default disables them.
+   * A calendar's own hours, in either shape it may be written in.
+   *
+   *   { weekly: [...] }                       — a full week, passed straight through
+   *   { open_hour, close_hour, slot_minutes } — the same hours every day
+   *
+   * The second is what the Calendars editor writes and what the beach backfill
+   * left behind, so both have to be understood. Anything else — null, an empty
+   * object, a close before an open — is not an answer, and the caller falls
+   * through to the provider's default rather than inventing a day.
+   */
+  private scheduleFromResourceHours(hours: unknown): unknown | null {
+    if (!hours || typeof hours !== "object") return null;
+    const h = hours as Record<string, unknown>;
+    if (Array.isArray(h.weekly) && h.weekly.length) return h;
+    return this.buildFromCourtHours({
+      open_hour: Number(h.open_hour),
+      close_hour: Number(h.close_hour),
+      slot_minutes: Number(h.slot_minutes),
+    });
+  }
+
+  /**
+   * Build a Schedule from open/close hour columns. Such a calendar keeps the
+   * same hours every day of the week, including weekends — a beach club that
+   * shut on Saturday would be an odd beach club, and the provider default
+   * disables them.
    */
   private buildFromCourtHours(court: {
     open_hour: number | null; close_hour: number | null; slot_minutes: number | null;
