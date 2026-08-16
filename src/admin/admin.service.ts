@@ -1783,10 +1783,11 @@ export class AdminService {
   async getPlatformSettings() {
     const keys = [
       "min_subscription_weeks", "max_subscription_weeks", "platform_fee_percent",
-      "finance_cleaning_cost_cents", "finance_beach_extra_cents",
-      "finance_car_commission_pct", "finance_food_commission_pct",
-      "finance_cleaning_type", "finance_beach_type",
-      "finance_car_type", "finance_food_type",
+      // One commission model: a percentage per provider (providers.commission_pct),
+      // with this as the rate for a business that has none of its own. The old
+      // per-service keys (finance_cleaning_cost_cents, finance_beach_extra_cents,
+      // finance_*_type…) described fixed and per-person takes that no longer exist.
+      "finance_default_commission_pct",
       ...AdminService.CATEGORY_KEYS,
       ...AdminService.BOOLEAN_FLAG_KEYS,
     ];
@@ -1816,16 +1817,9 @@ export class AdminService {
       category_cleaning_visible: bool(values.get("category_cleaning_visible")),
       category_beach_visible: bool(values.get("category_beach_visible")),
       category_massage_visible: bool(values.get("category_massage_visible")),
-      // Financial / profit configuration (cents and whole-percent values).
-      finance_cleaning_cost_cents: Number(values.get("finance_cleaning_cost_cents") ?? 75000),
-      finance_beach_extra_cents: Number(values.get("finance_beach_extra_cents") ?? 1000),
-      finance_car_commission_pct: Number(values.get("finance_car_commission_pct") ?? 10),
-      finance_food_commission_pct: Number(values.get("finance_food_commission_pct") ?? 10),
-      // How each source's value is interpreted: "percent" | "fixed" | "person".
-      finance_cleaning_type: String(values.get("finance_cleaning_type") ?? "fixed"),
-      finance_beach_type: String(values.get("finance_beach_type") ?? "person"),
-      finance_car_type: String(values.get("finance_car_type") ?? "percent"),
-      finance_food_type: String(values.get("finance_food_type") ?? "percent"),
+      // What the platform keeps of a business's revenue when that business
+      // carries no rate of its own. Whole percent.
+      finance_default_commission_pct: Number(values.get("finance_default_commission_pct") ?? 10),
       lives_direct_enabled: bool(values.get("lives_direct_enabled")),
     };
   }
@@ -1836,16 +1830,9 @@ export class AdminService {
     const updates: Record<string, unknown> = {};
     for (const key of [
       "min_subscription_weeks", "max_subscription_weeks", "platform_fee_percent",
-      "finance_cleaning_cost_cents", "finance_beach_extra_cents",
-      "finance_car_commission_pct", "finance_food_commission_pct",
+      "finance_default_commission_pct",
     ]) {
       if (input[key] !== undefined) updates[key] = Number(input[key]);
-    }
-    for (const key of [
-      "finance_cleaning_type", "finance_beach_type",
-      "finance_car_type", "finance_food_type",
-    ]) {
-      if (input[key] !== undefined) updates[key] = String(input[key]);
     }
     for (const key of AdminService.CATEGORY_KEYS) {
       if (input[key] !== undefined) updates[key] = Boolean(input[key]);

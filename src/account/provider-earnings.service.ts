@@ -16,18 +16,12 @@ import { Injectable, Logger, ServiceUnavailableException } from "@nestjs/common"
  * this shares its defaults to avoid.
  */
 
-type TakeType = "percent" | "fixed" | "person";
 type FinanceKey = "cleaning" | "beach" | "food";
 
-const TAKE_KEYS: Record<FinanceKey, { valueKey: string; typeKey: string; kind: "cost" | "take" }> = {
-  cleaning: { valueKey: "finance_cleaning_cost_cents", typeKey: "finance_cleaning_type", kind: "cost" },
-  beach:    { valueKey: "finance_beach_extra_cents",   typeKey: "finance_beach_type",    kind: "take" },
-  food:     { valueKey: "finance_food_commission_pct", typeKey: "finance_food_type",     kind: "take" },
-};
-const DEFAULT_TYPE: Record<FinanceKey, TakeType> = { cleaning: "fixed", beach: "person", food: "percent" };
-const DEFAULT_RAW: Record<FinanceKey, number> = { cleaning: 75000, beach: 1000, food: 10 };
+/** The platform's rate when a provider carries none of its own. */
+const DEFAULT_COMMISSION_PCT = 10;
+const DEFAULT_COMMISSION_KEY = "finance_default_commission_pct";
 
-const AVG_DAYS_PER_MONTH = 365.25 / 12;
 const ALL_TIME_START = new Date(2020, 0, 1);
 
 function dayIndex(input: Date | string): number {
@@ -74,6 +68,8 @@ export interface EarningsSummary {
   /** earned − committed, floored at zero. The cap on a payout request. */
   availableCents: number;
   financeSource: FinanceKey | null;
+  /** The rate applied, so the Money tab can state it rather than guess. */
+  commissionPct: number;
 }
 
 @Injectable()
@@ -85,25 +81,28 @@ export class ProviderEarningsService {
    * who under-drew in March can draw it in April.
    */
   async summarize(providerId: string): Promise<EarningsSummary> {
-    const provider = await this.rest<Array<{ source_service_key: string | null; source_provider_id: string | null; archetype_key: string | null }>>(
-      `providers?id=eq.${encodeURIComponent(providerId)}&select=source_service_key,source_provider_id,archetype_key`,
+    const provider = await this.rest<Array<{
+      source_service_key: string | null; source_provider_id: string | null;
+      archetype_key: string | null; commission_pct: number | string | null;
+    }>>(
+      `providers?id=eq.${encodeURIComponent(providerId)}` +
+      `&select=source_service_key,source_provider_id,archetype_key,commission_pct`,
     );
     const row = provider?.[0];
     const source = this.financeSourceFor(row?.source_service_key ?? row?.archetype_key ?? null);
     const legacyId = row?.source_provider_id ?? null;
 
     const end = new Date();
-    const { revenue, units, serviceDays } = await this.fetchEarned(source, legacyId, ALL_TIME_START, end, providerId);
+    const { revenue } = await this.fetchEarned(source, legacyId, ALL_TIME_START, end, providerId);
 
     const settings = await this.readSettings();
-    // Months of SERVICE, not months since an epoch. A per-month rate multiplied
-    // by the age of the platform is how a cleaning provider with $1,573 of
-    // sales gets told they may withdraw $59,000 — the window has to be the
-    // period they actually delivered in.
-    const months = serviceDays > 0 ? serviceDays / AVG_DAYS_PER_MONTH : 0;
-    const earnedCents = source && serviceDays > 0
-      ? this.providerShare(source, settings, revenue, units, months)
-      : 0;
+    const commissionPct = this.commissionPct(row?.commission_pct, settings);
+    // One model: the platform keeps its percentage, the business keeps the
+    // rest. Clamped to what actually came in, so a rate somebody typed as 150
+    // cannot make a provider owe money for a period they earned in.
+    const rate = Math.min(Math.max(commissionPct, 0), 100);
+    const platformCents = Math.min(Math.round((revenue * rate) / 100), Math.max(0, revenue));
+    const earnedCents = Math.max(0, revenue - platformCents);
 
     const committedCents = await this.committed(providerId);
     return {
@@ -112,7 +111,16 @@ export class ProviderEarningsService {
       committedCents,
       availableCents: Math.max(0, earnedCents - committedCents),
       financeSource: source,
+      commissionPct: rate,
     };
+  }
+
+  /** The provider's own rate, or the platform's. */
+  private commissionPct(providerPct: unknown, settings: Record<string, unknown>): number {
+    if (providerPct != null && Number.isFinite(Number(providerPct))) return Number(providerPct);
+    const fallback = settings[DEFAULT_COMMISSION_KEY];
+    if (fallback != null && Number.isFinite(Number(fallback))) return Number(fallback);
+    return DEFAULT_COMMISSION_PCT;
   }
 
   // ─── Revenue ────────────────────────────────────────────────────────────────
@@ -124,42 +132,21 @@ export class ProviderEarningsService {
     end: Date,
     /** The universal `providers.id` — what scopes services whose money lives in the universal tables. */
     providerId?: string,
-  ): Promise<{ revenue: number; units: number; serviceDays: number }> {
-    const acc = (
-      rows: Array<Record<string, any>> | null,
-      toInput: (r: any) => Recognition,
-      unit?: (r: any) => number,
-    ) => {
-      let revenue = 0;
-      let units = 0;
-      // The union would be more precise than the envelope, but a provider with
-      // a gap between subscriptions is not being paid a retainer for the gap
-      // either — clamped to today so future-dated plans cannot buy months.
-      let first = Number.POSITIVE_INFINITY;
-      let last = Number.NEGATIVE_INFINITY;
-      const todayIdx = dayIndex(end);
-      (rows ?? []).forEach((r) => {
-        const input = toInput(r);
-        const cents = recognizedCents(input, start, end);
-        if (cents <= 0) return;
-        revenue += cents;
-        units += unit ? unit(r) : 1;
-        const s = span(input);
-        if (s) {
-          first = Math.min(first, s.start);
-          last = Math.max(last, Math.min(s.end, todayIdx + 1));
-        }
-      });
-      const serviceDays = Number.isFinite(first) && last > first ? last - first : 0;
-      return { revenue, units, serviceDays };
-    };
+  ): Promise<{ revenue: number }> {
+    // Straight-line recognition, same as the admin's finance pages: a
+    // three-month plan contributes a third of its value to each month it
+    // covers. The old per-unit and per-month models needed a headcount and a
+    // span as well; a percentage needs only the money.
+    const acc = (rows: Array<Record<string, any>> | null, toInput: (r: any) => Recognition) => ({
+      revenue: (rows ?? []).reduce((sum, r) => sum + recognizedCents(toInput(r), start, end), 0),
+    });
 
     if (source === "cleaning") {
-      if (!legacyId) return { revenue: 0, units: 0, serviceDays: 0 };
+      if (!legacyId) return { revenue: 0 };
       const pkgs = await this.rest<Array<{ id: string }>>(
         `cleaning_packages?provider_id=eq.${encodeURIComponent(legacyId)}&select=id`);
       const ids = (pkgs ?? []).map((p) => p.id);
-      if (!ids.length) return { revenue: 0, units: 0, serviceDays: 0 };
+      if (!ids.length) return { revenue: 0 };
       const rows = await this.rest<Array<Record<string, any>>>(
         `cleaning_subscriptions?package_id=in.(${ids.join(",")})&payment_status=eq.paid&deleted_at=is.null` +
         `&select=total_price_cents,monthly_price_cents,created_at,service_start_date,service_end_date,start_date,end_date`);
@@ -177,7 +164,7 @@ export class ProviderEarningsService {
     }
 
     if (source === "food") {
-      if (!legacyId) return { revenue: 0, units: 0, serviceDays: 0 };
+      if (!legacyId) return { revenue: 0 };
       const rows = await this.rest<Array<Record<string, any>>>(
         `food_subscriptions?provider_id=eq.${encodeURIComponent(legacyId)}&payment_status=eq.paid` +
         `&status=in.(active,paused,expired)` +
@@ -202,43 +189,19 @@ export class ProviderEarningsService {
       // revenue — and this figure is the cap the payout request is checked
       // against. Memberships are universal rows; the legacy table is their
       // shadow, and totalling the shadow is how one payment becomes two.
-      if (!providerId) return { revenue: 0, units: 0, serviceDays: 0 };
+      if (!providerId) return { revenue: 0 };
       const rows = await this.rest<Array<Record<string, any>>>(
         `provider_subscriptions?provider_id=eq.${encodeURIComponent(providerId)}&payment_status=eq.paid` +
-        `&select=total_cents:price_cents,people:metadata->people,created_at,start_date,end_date`);
-      return acc(rows,
-        (r) => ({ totalCents: r.total_cents || 0, serviceStart: r.start_date || r.created_at, serviceEnd: r.end_date, fallbackDays: 30 }),
-        (r) => r.people || 0);
+        `&select=total_cents:price_cents,created_at,start_date,end_date`);
+      return acc(rows, (r) => ({
+        totalCents: r.total_cents || 0,
+        serviceStart: r.start_date || r.created_at,
+        serviceEnd: r.end_date,
+        fallbackDays: 30,
+      }));
     }
 
-    return { revenue: 0, units: 0, serviceDays: 0 };
-  }
-
-  private providerShare(
-    source: FinanceKey,
-    settings: Record<string, unknown>,
-    revenueCents: number,
-    units: number,
-    months: number,
-  ): number {
-    const meta = TAKE_KEYS[source];
-    const rawSetting = settings[meta.valueKey];
-    const typeSetting = settings[meta.typeKey];
-    const type = (typeSetting != null && String(typeSetting) ? String(typeSetting) : DEFAULT_TYPE[source]) as TakeType;
-    const raw = rawSetting != null && Number.isFinite(Number(rawSetting)) ? Number(rawSetting) : DEFAULT_RAW[source];
-
-    const amount =
-      type === "percent" ? Math.round((revenueCents * raw) / 100)
-      : type === "fixed" ? Math.round(raw * Math.max(0, months))
-      : Math.round(raw * Math.max(0, units));
-
-    // A `cost` source inverts: the platform buys the service outright, so the
-    // agreed price IS the provider's earnings. Two clamps the admin's P&L does
-    // not need: never negative, and never more than customers actually paid.
-    // The P&L is allowed to show the platform losing money on a contract; a
-    // withdrawal limit that exceeds the cash collected is a different thing.
-    if (meta.kind === "cost") return Math.max(0, Math.min(amount, revenueCents));
-    return Math.max(0, revenueCents - Math.min(amount, revenueCents));
+    return { revenue: 0 };
   }
 
   private financeSourceFor(key: string | null): FinanceKey | null {
