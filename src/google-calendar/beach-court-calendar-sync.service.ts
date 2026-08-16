@@ -85,6 +85,8 @@ export class BeachCourtCalendarSyncService {
    */
   async pullExternalBookings(input: {
     courtId: string;
+    /** The calendar in `bookable_resources` — where a booking actually lives. */
+    resourceId: string;
     courtName: string;
     courtGoogleCalendarId: string;
     daysAhead?: number;
@@ -104,7 +106,7 @@ export class BeachCourtCalendarSyncService {
     }
 
     // Existing mirror-bookings for this court in the window, keyed by google_calendar_event_id.
-    const existing = await this.fetchExistingBookings(input.courtId);
+    const existing = await this.fetchExistingBookings(input.resourceId);
     const seenEventIds = new Set<string>();
 
     for (const ev of events) {
@@ -145,20 +147,36 @@ export class BeachCourtCalendarSyncService {
         ? String(ev.summary).replace(/\s+—\s+.*$/, "").trim().slice(0, 200) // strip "— Court name" suffix
         : null;
 
+      // Honduras wall clock carried as an explicit offset, so the instant is
+      // exact rather than whatever zone the server happens to run in.
+      const hh = (h: number) => String(h).padStart(2, "0");
+      const startAt = `${dateStr}T${hh(startHour)}:00:00-06:00`;
+      const endAt = `${dateStr}T${hh(Math.min(endHour, 23))}:00:00-06:00`;
+
       if (mirror) {
-        // Already mirrored; nothing to do unless times moved.
-        if (mirror.date !== dateStr || mirror.start_hour !== startHour || mirror.end_hour !== endHour) {
-          await this.updateBookingRow(mirror.id, { date: dateStr, start_hour: startHour, end_hour: endHour, member_name: memberName });
+        const moved =
+          new Date(mirror.start_at).getTime() !== new Date(startAt).getTime() ||
+          new Date(mirror.end_at).getTime() !== new Date(endAt).getTime();
+        if (moved) {
+          await this.updateBookingRow(mirror.id, {
+            start_at: startAt,
+            end_at: endAt,
+            slot_key: `${input.resourceId}|${dateStr}|${hh(startHour)}:00`,
+            label: memberName,
+          });
         }
         continue;
       }
 
       const insertResult = await this.insertBookingRow({
-        court_id: input.courtId,
-        date: dateStr,
-        start_hour: startHour,
-        end_hour: endHour,
-        member_name: memberName,
+        resource_id: input.resourceId,
+        start_at: startAt,
+        end_at: endAt,
+        slot_key: `${input.resourceId}|${dateStr}|${hh(startHour)}:00`,
+        // Nobody's account made this booking — it was blocked in Google by the
+        // business itself, and the label is whatever they wrote there.
+        subject_ref: null,
+        label: memberName,
         notes: ev.description ? String(ev.description).slice(0, 500) : null,
         google_calendar_event_id: eventId,
       });
@@ -200,20 +218,34 @@ export class BeachCourtCalendarSyncService {
     });
   }
 
-  private async fetchExistingBookings(courtId: string): Promise<Map<string, { id: string; date: string; start_hour: number; end_hour: number }>> {
+  /**
+   * Bookings this calendar has already mirrored from Google, keyed by event.
+   *
+   * These used to live in `beach_club_court_bookings`, which the engine
+   * cutover emptied — so an event created directly in Google landed in a
+   * table nothing read, and the slot stayed bookable in the app. They are
+   * engine bookings now, like every other booking.
+   */
+  private async fetchExistingBookings(resourceId: string): Promise<Map<string, { id: string; start_at: string; end_at: string }>> {
     const rows = await this.supabaseRest<Array<any>>(
-      `/beach_club_court_bookings?court_id=eq.${encodeURIComponent(courtId)}&google_calendar_event_id=not.is.null&status=eq.booked&select=id,date,start_hour,end_hour,google_calendar_event_id`,
+      `/bookings?resource_id=eq.${encodeURIComponent(resourceId)}` +
+        `&google_calendar_event_id=not.is.null&status=in.(held,confirmed)` +
+        `&select=id,start_at,end_at,google_calendar_event_id`,
     ).catch(() => []);
-    const m = new Map<string, { id: string; date: string; start_hour: number; end_hour: number }>();
-    for (const r of rows ?? []) m.set(String(r.google_calendar_event_id), { id: r.id, date: r.date, start_hour: r.start_hour, end_hour: r.end_hour });
+    const m = new Map<string, { id: string; start_at: string; end_at: string }>();
+    for (const r of rows ?? []) {
+      m.set(String(r.google_calendar_event_id), { id: r.id, start_at: r.start_at, end_at: r.end_at });
+    }
     return m;
   }
 
   private async insertBookingRow(row: Record<string, unknown>): Promise<"ok" | "conflict" | "error"> {
     try {
-      await this.supabaseRest(`/beach_club_court_bookings`, {
+      await this.supabaseRest(`/bookings`, {
         method: "POST",
-        body: JSON.stringify({ ...row, status: "booked", source: "google_calendar", google_calendar_sync_status: "synced" }),
+        // Confirmed, not held: a time blocked in the provider's own calendar is
+        // taken, and a hold would expire and hand it back out.
+        body: JSON.stringify({ ...row, status: "confirmed", google_calendar_sync_status: "synced" }),
       });
       return "ok";
     } catch (e) {
@@ -223,14 +255,24 @@ export class BeachCourtCalendarSyncService {
   }
 
   private async updateBookingRow(id: string, patch: Record<string, unknown>): Promise<void> {
-    await this.supabaseRest(`/beach_club_court_bookings?id=eq.${encodeURIComponent(id)}`, {
+    await this.supabaseRest(`/bookings?id=eq.${encodeURIComponent(id)}`, {
       method: "PATCH",
       body: JSON.stringify({ ...patch, updated_at: new Date().toISOString() }),
     }).catch(() => { /* best effort */ });
   }
 
+  /**
+   * The Google event is gone, so the time is free again.
+   *
+   * Cancelled rather than deleted: the engine keeps what happened, a cancelled
+   * booking frees its slot, and a deleted row would take the audit trail of a
+   * reservation somebody actually held with it.
+   */
   private async deleteBookingRow(id: string): Promise<void> {
-    await this.supabaseRest(`/beach_club_court_bookings?id=eq.${encodeURIComponent(id)}`, { method: "DELETE" }).catch(() => { /* best effort */ });
+    await this.supabaseRest(`/bookings?id=eq.${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: "cancelled", updated_at: new Date().toISOString() }),
+    }).catch(() => { /* best effort */ });
   }
 
   /** Delete the Google Calendar event tied to this booking, if any. Best-effort. */

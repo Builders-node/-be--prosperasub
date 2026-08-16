@@ -184,6 +184,85 @@ export class BookingService {
   }
 
   /**
+   * Every booking a customer holds, across every business.
+   *
+   * The customer's own history read `beach_club_court_bookings`, which the
+   * cutover emptied — so a member who books courts every week saw nothing
+   * there. Bookings live in one table now and this is the only way to ask for
+   * "mine", because that table is service-role only.
+   */
+  async listForSubject(subjectRef: string, opts: { from?: string; to?: string; limit?: number } = {}) {
+    if (!this.prisma.isAvailable()) return [];
+    const rows = await this.prisma.booking.findMany({
+      where: {
+        subjectRef,
+        status: { in: ["held", "confirmed", "completed", "no_show"] },
+        ...(opts.from || opts.to
+          ? {
+              startAt: {
+                ...(opts.from ? { gte: new Date(`${opts.from}T00:00:00Z`) } : {}),
+                ...(opts.to ? { lt: new Date(`${opts.to}T23:59:59Z`) } : {}),
+              },
+            }
+          : {}),
+      },
+      orderBy: { startAt: "desc" },
+      take: Math.min(Math.max(opts.limit ?? 100, 1), 500),
+    });
+    return this.decorate(rows);
+  }
+
+  /** Every booking on a provider's calendars in a window — their day, their week. */
+  async listForProvider(providerId: string, opts: { from?: string; to?: string } = {}) {
+    if (!this.prisma.isAvailable()) return [];
+    // `provider_id` is denormalised onto the booking, but rows written before
+    // that column existed carry only the resource — so resolve the provider's
+    // resources too rather than losing their history.
+    const resources = await this.resources.listResources({ providerId });
+    const resourceIds = resources.map((r) => r.id);
+    const rows = await this.prisma.booking.findMany({
+      where: {
+        OR: [{ providerId }, ...(resourceIds.length ? [{ resourceId: { in: resourceIds } }] : [])],
+        status: { in: ["held", "confirmed", "completed", "no_show"] },
+        ...(opts.from || opts.to
+          ? {
+              startAt: {
+                ...(opts.from ? { gte: new Date(`${opts.from}T00:00:00Z`) } : {}),
+                ...(opts.to ? { lt: new Date(`${opts.to}T23:59:59Z`) } : {}),
+              },
+            }
+          : {}),
+      },
+      orderBy: { startAt: "asc" },
+      take: 500,
+    });
+    return this.decorate(rows);
+  }
+
+  /** Bookings with the name of what was booked — an id tells a customer nothing. */
+  private async decorate(rows: Array<Record<string, any>>) {
+    const ids = [...new Set(rows.map((r) => r.resourceId))];
+    const names = new Map<string, { name: string; provider_id: string | null }>();
+    for (const id of ids) {
+      const r = await this.resources.getResource(id);
+      if (r) names.set(id, { name: r.name, provider_id: r.provider_id ?? null });
+    }
+    return rows.map((b) => ({
+      id: b.id,
+      resource_id: b.resourceId,
+      resource_name: names.get(b.resourceId)?.name ?? null,
+      provider_id: b.providerId ?? names.get(b.resourceId)?.provider_id ?? null,
+      subject_ref: b.subjectRef,
+      start_at: b.startAt,
+      end_at: b.endAt,
+      slot_key: b.slotKey,
+      status: b.status,
+      label: b.label ?? null,
+      notes: b.notes ?? null,
+    }));
+  }
+
+  /**
    * The provider's rules about the customer, enforced where it counts.
    *
    * The membership gate used to live only in the page: the endpoint took

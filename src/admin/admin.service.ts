@@ -188,8 +188,17 @@ export class AdminService {
     const court = courts?.[0];
     if (!court) return { ok: false, error: "Court not found" };
     if (!court.google_calendar_id) return { ok: false, skipped: true, reason: "no_calendar" as const };
+    // court → calendar: a booking belongs to the resource, not to the legacy
+    // court row, which is only where the Google calendar id happens to live.
+    const resources = await this.supabaseRest<Array<Record<string, any>>>(
+      `/bookable_resources?source_service_key=eq.beach&source_resource_id=eq.${encodeURIComponent(courtId)}&select=id&limit=1`,
+    );
+    const resourceId = resources?.[0]?.id;
+    if (!resourceId) return { ok: false, error: "Court → calendar bridge not found" };
+
     const result = await this.beachCourtCalendarSync.pullExternalBookings({
       courtId: String(court.id),
+      resourceId: String(resourceId),
       courtName: String(court.name),
       courtGoogleCalendarId: String(court.google_calendar_id),
     });

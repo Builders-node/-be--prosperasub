@@ -109,13 +109,10 @@ export class OccurrencesService {
       return this.load(occurrenceId);
     }
 
-    if (svc === "beach" && occ.source_record_id && legacyStatus) {
-      await this.patch(`beach_club_court_bookings?id=eq.${this.enc(occ.source_record_id)}`, {
-        status: legacyStatus,
-        updated_at: new Date().toISOString(),
-      });
-      return this.load(occurrenceId);
-    }
+    // The beach has no legacy twin to write back to any more: its bookings
+    // are the engine's, and `beach_club_court_bookings` is gone. Such an
+    // occurrence falls through to the universal write below, like any service
+    // that never had one.
 
     // No legacy twin (a generated occurrence for a service that has none).
     await this.patch(`service_occurrences?id=eq.${this.enc(occurrenceId)}`, {

@@ -604,73 +604,36 @@ export class IntegrationsService {
   }
 
   private async listBeachBookings(userId: string, from: string, to: string): Promise<IntegrationBooking[]> {
-    // Legacy court bookings (beach_club_court_bookings) — book by user_id.
-    // The DDD engine's `bookings` table also holds beach court reservations
-    // with subject_ref="user:<id>"; include those too so the response covers
-    // both pre- and post-cutover data.
-    const [legacy, ddd] = await Promise.all([
-      this.rest<Array<{
-        id: string; court_id: string | null; date: string;
-        start_time: string; end_time: string | null; status: string; notes: string | null;
-      }>>(
-        `beach_club_court_bookings?select=id,court_id,date,start_time,end_time,status,notes` +
-          `&user_id=eq.${userId}&date=gte.${from}&date=lte.${to}&order=date.asc,start_time.asc`,
-      ),
-      this.rest<Array<{
-        id: string; resource_id: string; start_at: string; end_at: string;
-        status: string; notes: string | null;
-      }>>(
-        `bookings?select=id,resource_id,start_at,end_at,status,notes` +
-          `&subject_ref=eq.user:${userId}` +
-          `&start_at=gte.${from}T00:00:00&start_at=lte.${to}T23:59:59` +
-          `&order=start_at.asc`,
-      ),
-    ]);
+    // One source. `beach_club_court_bookings` was merged in beside the engine
+    // during the cutover and has been empty ever since; keeping the union
+    // meant every reader of this feed paid for a query against a dead table
+    // and had to be told which half a row came from.
+    const rows = await this.rest<Array<{
+      id: string; resource_id: string; start_at: string; end_at: string;
+      status: string; notes: string | null;
+    }>>(
+      `bookings?select=id,resource_id,start_at,end_at,status,notes` +
+        `&subject_ref=eq.user:${userId}` +
+        `&start_at=gte.${from}T00:00:00&start_at=lte.${to}T23:59:59` +
+        `&order=start_at.asc`,
+    );
+    const resourceIds = Array.from(new Set((rows ?? []).map((r) => r.resource_id)));
+    const resources = resourceIds.length
+      ? await this.rest<Array<{ id: string; name: string; provider_id: string }>>(
+          `bookable_resources?select=id,name,provider_id&id=in.(${resourceIds.join(",")})`)
+      : [];
+    const byId = new Map((resources ?? []).map((r) => [r.id, r]));
 
-    // Court name lookup for both sources
-    const legacyCourtIds = Array.from(new Set((legacy ?? []).map((r) => r.court_id).filter((id): id is string => !!id)));
-    const dddResourceIds = Array.from(new Set((ddd ?? []).map((r) => r.resource_id)));
-
-    const [courts, resources] = await Promise.all([
-      legacyCourtIds.length
-        ? this.rest<Array<{ id: string; name: string }>>(`beach_club_courts?select=id,name&id=in.(${legacyCourtIds.join(",")})`)
-        : Promise.resolve([] as Array<{ id: string; name: string }>),
-      dddResourceIds.length
-        ? this.rest<Array<{ id: string; name: string; source_resource_id: string | null }>>(
-            `bookable_resources?select=id,name,source_resource_id&id=in.(${dddResourceIds.join(",")})&source_service_key=eq.beach`)
-        : Promise.resolve([] as Array<{ id: string; name: string; source_resource_id: string | null }>),
-    ]);
-    const courtMap = new Map((courts ?? []).map((c) => [c.id, c.name]));
-    const resourceMap = new Map((resources ?? []).map((r) => [r.id, r.name]));
-
-    const fromLegacy: IntegrationBooking[] = (legacy ?? []).map((r) => ({
+    return (rows ?? []).map((r) => ({
       service: "beach",
       id: r.id,
-      plan_name: r.court_id ? courtMap.get(r.court_id) ?? null : null,
+      plan_name: byId.get(r.resource_id)?.name ?? null,
       provider_name: "Beach Club",
-      start_at: this.toHNOffsetISO(r.date, r.start_time),
-      end_at: r.end_time ? this.toHNOffsetISO(r.date, r.end_time) : null,
+      start_at: this.dateToHNOffsetISO(r.start_at),
+      end_at: this.dateToHNOffsetISO(r.end_at),
       status: r.status,
       notes: r.notes,
     }));
-
-    // Filter DDD rows to beach only — subject_ref queries are user-scoped
-    // but resource_id could theoretically be non-beach; the resource lookup
-    // above already scoped to source_service_key=beach so we drop unknowns.
-    const fromDdd: IntegrationBooking[] = (ddd ?? [])
-      .filter((r) => resourceMap.has(r.resource_id))
-      .map((r) => ({
-        service: "beach",
-        id: r.id,
-        plan_name: resourceMap.get(r.resource_id) ?? null,
-        provider_name: "Beach Club",
-        start_at: this.dateToHNOffsetISO(r.start_at),
-        end_at: this.dateToHNOffsetISO(r.end_at),
-        status: r.status,
-        notes: r.notes,
-      }));
-
-    return [...fromLegacy, ...fromDdd];
   }
 
   // ─── User upsert ───────────────────────────────────────────────────────────

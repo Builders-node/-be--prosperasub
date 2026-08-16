@@ -39,6 +39,25 @@ export class BookingController {
     return this.booking.listBookings(resourceId, date);
   }
 
+  @ApiOperation({ summary: "Every booking the authenticated subject holds" })
+  @UseGuards(AccountAuthGuard)
+  @Get("mine")
+  mine(@Req() req: AccountRequest, @Query("from") from?: string, @Query("to") to?: string) {
+    return this.booking.listForSubject(`user:${req.authUser!.id}`, { from, to });
+  }
+
+  @ApiOperation({ summary: "Every booking on a provider's calendars in a window" })
+  @UseGuards(AccountAuthGuard)
+  @Get("by-provider")
+  byProvider(
+    @Query("providerId") providerId?: string,
+    @Query("from") from?: string,
+    @Query("to") to?: string,
+  ) {
+    if (!providerId) throw new BadRequestException("providerId is required");
+    return this.booking.listForProvider(providerId, { from, to });
+  }
+
   @ApiOperation({ summary: "Hold a slot (TTL) for the authenticated subject" })
   @UseGuards(AccountAuthGuard)
   @Post("hold")
