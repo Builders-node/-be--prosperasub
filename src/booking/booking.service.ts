@@ -356,13 +356,13 @@ export class BookingService {
       `providers?select=source_service_key,source_provider_id&id=eq.${encodeURIComponent(providerId)}&limit=1`,
     ))?.[0];
 
-    // 1. The universal table. Rows carrying a source key are a stale backfill
-    //    of legacy subscriptions (see CLAUDE.md) — the legacy read below is the
-    //    live answer for those, so counting them here would double-count.
+    // 1. The universal table. A source key on a row usually means the stale
+    //    2026 backfill, which the legacy read below answers for — except
+    //    'beach', whose memberships were migrated and are now written here.
     const universal = await this.rest<Array<{ plan_id: string | null }>>(
       `provider_subscriptions?select=plan_id&user_id=eq.${uid}` +
         `&provider_id=eq.${encodeURIComponent(providerId)}` +
-        `&status=eq.active&source_service_key=is.null`,
+        `&status=eq.active&or=(source_service_key.is.null,source_service_key.eq.beach)`,
     );
     const universalPlanIds = (universal ?? []).map((r) => r.plan_id).filter((id): id is string => !!id);
 
@@ -401,15 +401,8 @@ export class BookingService {
     const key = provider?.source_service_key ?? "";
     const legacyProvider = provider?.source_provider_id ?? "";
 
-    if (key === "beach" || key === "beach_club") {
-      // Platform-owned and singular: a beach membership is not scoped to a
-      // provider column because there is only one.
-      const rows = await this.rest<Array<{ plan_id: string | null }>>(
-        `beach_club_subscriptions?select=plan_id&user_id=eq.${uid}` +
-          `&status=eq.active&payment_status=eq.paid&end_date=gte.${today}`,
-      );
-      return { subscribed: !!rows?.length, planIds: ids(rows, "plan_id") };
-    }
+    // The beach has no legacy branch any more: its memberships are universal
+    // rows, read above like any other.
 
     if (key === "cleaning" && legacyProvider) {
       const rows = await this.rest<Array<{ package_id: string | null }>>(
