@@ -54,7 +54,45 @@ export interface Schedule {
   maxAdvanceDays: number;
   blockedDates: string[];
   blockedRanges: BlockedRange[];
+  /**
+   * Who may book, and how much of it.
+   *
+   * The schedule above says WHEN a slot exists. This says who is allowed to
+   * take one and how many they may hold — the questions that decide whether a
+   * booking page is usable by a business rather than only by a demo. Every
+   * value is the provider's to set; nothing here is hard-coded policy.
+   */
+  policy: BookingPolicy;
 }
+
+export interface BookingPolicy {
+  /**
+   * Only customers with an active subscription to this provider may book.
+   * The beach club's courts are included with membership, so the answer there
+   * is yes; a court sold by the hour to anybody would say no.
+   */
+  requiresMembership: boolean;
+  /** Upcoming bookings one customer may hold at once. 0 = no limit. */
+  maxActiveBookings: number;
+  /** Slots one customer may take on a single day. 0 = no limit. */
+  maxPerDay: number;
+  /**
+   * How close to the start a customer may still cancel, in hours. Past that
+   * the slot is theirs — cancelling at the last minute leaves a court empty
+   * that somebody else would have taken.
+   */
+  cancelNoticeHours: number;
+}
+
+export const DEFAULT_POLICY: BookingPolicy = {
+  // Off by default: turning a restriction on is a decision, and inheriting one
+  // nobody chose would lock customers out of every provider that never opened
+  // this screen.
+  requiresMembership: false,
+  maxActiveBookings: 0,
+  maxPerDay: 0,
+  cancelNoticeHours: 0,
+};
 
 export const DEFAULT_SCHEDULE: Schedule = {
   timezone: "America/Tegucigalpa",
@@ -74,6 +112,7 @@ export const DEFAULT_SCHEDULE: Schedule = {
   maxAdvanceDays: 30,
   blockedDates: [],
   blockedRanges: [],
+  policy: DEFAULT_POLICY,
 };
 
 export function toMinutes(hhmm: string): number {
@@ -93,6 +132,18 @@ export function mondayFirstIndex(jsDay: number): number {
 }
 
 /** Backfill any missing/partial fields so old or absent config stays usable. */
+/** Absent or malformed means "no restriction", never "locked". */
+export function normalizePolicy(raw: unknown): BookingPolicy {
+  const p = (raw ?? {}) as Partial<BookingPolicy>;
+  const count = (v: unknown) => (Number(v) > 0 ? Math.floor(Number(v)) : 0);
+  return {
+    requiresMembership: p.requiresMembership === true,
+    maxActiveBookings: count(p.maxActiveBookings),
+    maxPerDay: count(p.maxPerDay),
+    cancelNoticeHours: Math.max(0, Number(p.cancelNoticeHours) || 0),
+  };
+}
+
 export function normalizeSchedule(raw: unknown): Schedule {
   const d = DEFAULT_SCHEDULE;
   const s = (raw ?? {}) as Partial<Schedule>;
@@ -120,5 +171,6 @@ export function normalizeSchedule(raw: unknown): Schedule {
           .filter((r): r is BlockedRange => !!r && typeof r.from === "string" && typeof r.to === "string")
           .map((r) => ({ ...r, date: typeof r.date === "string" && r.date !== "" ? r.date : null }))
       : [],
+    policy: normalizePolicy(s.policy),
   };
 }

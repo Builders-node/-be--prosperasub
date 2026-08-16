@@ -57,11 +57,16 @@ export class BookingController {
     return this.booking.confirm(id, body.order_ref);
   }
 
-  @ApiOperation({ summary: "Cancel a booking" })
+  @ApiOperation({ summary: "Cancel a booking — your own, or anyone's if you are staff" })
   @UseGuards(AccountAuthGuard)
   @Post("bookings/:id/cancel")
-  cancel(@Param("id") id: string) {
-    return this.booking.cancel(id);
+  cancel(@Param("id") id: string, @Req() req: AccountRequest) {
+    // Roles ride on the access token, so the provider's own desk can cancel on
+    // a customer's behalf — a court freed by a phone call is still freed —
+    // while a customer may only cancel what is theirs.
+    const roles = req.authUser?.roles ?? [];
+    const isStaff = roles.some((r) => ["admin", "super_admin", "manager"].includes(String(r)));
+    return this.booking.cancel(id, { subjectRef: `user:${req.authUser!.id}`, isStaff });
   }
 
   @ApiOperation({ summary: "Join the waitlist for a slot" })

@@ -5,7 +5,7 @@ import { EventBusService } from "../events/event-bus.service";
 import { ResourceService } from "../resource/resource.service";
 import { generateSlots, type Slot } from "./slot-engine";
 import { zonedDayRange, zonedWallClockToInstant } from "./zoned-time";
-import { normalizeSchedule } from "./schedule";
+import { BookingPolicy, DEFAULT_SCHEDULE, normalizeSchedule } from "./schedule";
 
 export interface AvailabilityResult {
   resourceId: string;
@@ -113,6 +113,11 @@ export class BookingService {
     const schedule = normalizeSchedule(
       await this.loadEffectiveBookingSettings(resource?.provider_id ?? null, resource ?? {}),
     );
+    // Who may take this slot, and how many they already have. The schedule
+    // decides that the slot exists; this decides that this customer may have
+    // it. Both come from the provider's own settings.
+    await this.assertPolicyAllows(schedule.policy, resource, input);
+
     const slotKey = `${input.resourceId}|${input.date}|${input.from}`;
     // `new Date("...T18:00:00")` with no offset is parsed in the PROCESS's
     // timezone — UTC on Vercel. An 18:00 Honduras slot was therefore stored as
@@ -154,6 +159,74 @@ export class BookingService {
     }
   }
 
+  /**
+   * The provider's rules about the customer, enforced where it counts.
+   *
+   * The membership gate used to live only in the page: the endpoint took
+   * anyone with an account, so a non-member could book a court by calling the
+   * API directly, and nothing stopped one member taking every slot of every
+   * court for a month.
+   *
+   * Each rule is off unless the provider turned it on — see DEFAULT_POLICY.
+   */
+  private async assertPolicyAllows(
+    policy: BookingPolicy,
+    resource: { provider_id?: string | null; source_service_key?: string | null } | null,
+    input: { subjectRef?: string; date: string },
+  ): Promise<void> {
+    const subject = input.subjectRef ?? "";
+    if (!subject) throw new BadRequestException("subject_required");
+
+    if (policy.requiresMembership) {
+      const ok = await this.hasActiveMembership(subject, resource ?? {});
+      if (!ok) throw new BadRequestException("membership_required");
+    }
+
+    if (policy.maxActiveBookings > 0) {
+      const active = await this.prisma.booking.count({
+        where: {
+          subjectRef: subject,
+          status: { in: ["held", "confirmed"] },
+          startAt: { gte: new Date() },
+        },
+      });
+      if (active >= policy.maxActiveBookings) throw new BadRequestException("too_many_bookings");
+    }
+
+    if (policy.maxPerDay > 0) {
+      const { start, end } = zonedDayRange(input.date, DEFAULT_SCHEDULE.timezone);
+      const sameDay = await this.prisma.booking.count({
+        where: {
+          subjectRef: subject,
+          status: { in: ["held", "confirmed"] },
+          startAt: { gte: start, lt: end },
+        },
+      });
+      if (sameDay >= policy.maxPerDay) throw new BadRequestException("daily_limit_reached");
+    }
+  }
+
+  /**
+   * Does this subject hold a live subscription to the resource's provider?
+   *
+   * Beach memberships are the only subscriptions that gate a resource today,
+   * and they live in the legacy table keyed by whatever id the token carried —
+   * so both the uuid and the raw subject are tried rather than assuming one.
+   */
+  private async hasActiveMembership(
+    subjectRef: string,
+    resource: { source_service_key?: string | null },
+  ): Promise<boolean> {
+    const userId = subjectRef.startsWith("user:") ? subjectRef.slice(5) : subjectRef;
+    if (!userId) return false;
+    const today = new Date().toISOString().slice(0, 10);
+    const rows = await this.rest<Array<{ id: string }>>(
+      `beach_club_subscriptions?select=id&user_id=eq.${encodeURIComponent(userId)}` +
+      `&status=eq.active&payment_status=eq.paid&end_date=gte.${today}&limit=1`,
+    );
+    return !!rows?.[0];
+  }
+
   /** Confirm a hold (e.g. once its Order is paid). */
   async confirm(bookingId: string, orderRef?: string) {
     this.assertDb();
@@ -172,10 +245,26 @@ export class BookingService {
   }
 
   /** Cancel a booking and promote the next waitlisted subject for its slot. */
-  async cancel(bookingId: string) {
+  async cancel(bookingId: string, actor?: { subjectRef?: string; isStaff?: boolean }) {
     this.assertDb();
     const b = await this.prisma.booking.findUnique({ where: { id: bookingId } });
     if (!b) throw new BadRequestException("booking_not_found");
+
+    // Whose booking this is. Before this check the endpoint cancelled any
+    // booking by id, so one customer could cancel another's court with nothing
+    // but the id — staff still can, and that is the point of the exception.
+    if (actor && !actor.isStaff) {
+      if (!actor.subjectRef || actor.subjectRef !== b.subjectRef) {
+        throw new BadRequestException("not_your_booking");
+      }
+      const schedule = normalizeSchedule(
+        await this.loadEffectiveBookingSettings(b.providerId ?? null, {}),
+      );
+      const noticeMs = schedule.policy.cancelNoticeHours * 3600_000;
+      if (noticeMs > 0 && b.startAt.getTime() - Date.now() < noticeMs) {
+        throw new BadRequestException("cancel_window_passed");
+      }
+    }
     await this.prisma.booking.update({ where: { id: bookingId }, data: { status: "cancelled" } });
     await this.eventBus.publish({
       type: "booking.BookingCancelled",
