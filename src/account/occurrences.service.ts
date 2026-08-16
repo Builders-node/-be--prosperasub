@@ -45,6 +45,14 @@ export interface OccurrenceRow {
 const STATUSES = ["scheduled", "done", "failed", "cancelled", "rescheduled"] as const;
 type Status = (typeof STATUSES)[number];
 
+/** What the booking engine calls the same states on its own row. */
+const BOOKING_STATUS: Partial<Record<Status, string>> = {
+  scheduled: "confirmed",
+  done: "completed",
+  failed: "no_show",
+  cancelled: "cancelled",
+};
+
 /** What each service calls a finished occurrence in its own table. */
 const LEGACY_STATUS: Record<string, Partial<Record<Status, string>>> = {
   food:     { done: "delivered", failed: "failed", cancelled: "cancelled", scheduled: "pending" },
@@ -109,10 +117,20 @@ export class OccurrencesService {
       return this.load(occurrenceId);
     }
 
-    // The beach has no legacy twin to write back to any more: its bookings
-    // are the engine's, and `beach_club_court_bookings` is gone. Such an
-    // occurrence falls through to the universal write below, like any service
-    // that never had one.
+    // The beach's twin is the engine's `bookings` row — that is where the hour
+    // is actually held, so marking it here has to write there or the court
+    // stays booked for a session the provider just cancelled. The mirror
+    // trigger carries the change back into this occurrence.
+    if (svc === "beach" && occ.source_record_id) {
+      const bookingStatus = BOOKING_STATUS[status];
+      if (bookingStatus) {
+        await this.patch(`bookings?id=eq.${this.enc(occ.source_record_id)}`, {
+          status: bookingStatus,
+          updated_at: new Date().toISOString(),
+        });
+        return this.load(occurrenceId);
+      }
+    }
 
     // No legacy twin (a generated occurrence for a service that has none).
     await this.patch(`service_occurrences?id=eq.${this.enc(occurrenceId)}`, {
