@@ -172,14 +172,15 @@ export class BookingService {
   private async assertPolicyAllows(
     policy: BookingPolicy,
     resource: { provider_id?: string | null; source_service_key?: string | null } | null,
-    input: { subjectRef?: string; date: string },
+    input: { subjectRef?: string; date: string; resourceId: string },
   ): Promise<void> {
     const subject = input.subjectRef ?? "";
     if (!subject) throw new BadRequestException("subject_required");
 
     if (policy.requiresMembership) {
-      const ok = await this.hasActiveMembership(subject, resource ?? {});
-      if (!ok) throw new BadRequestException("membership_required");
+      const ok = await this.membershipCoversResource(subject, input.resourceId);
+      if (ok === "none") throw new BadRequestException("membership_required");
+      if (ok === "other_resource") throw new BadRequestException("resource_not_in_plan");
     }
 
     if (policy.maxActiveBookings > 0) {
@@ -209,22 +210,46 @@ export class BookingService {
   /**
    * Does this subject hold a live subscription to the resource's provider?
    *
-   * Beach memberships are the only subscriptions that gate a resource today,
-   * and they live in the legacy table keyed by whatever id the token carried —
-   * so both the uuid and the raw subject are tried rather than assuming one.
+   * Beach memberships are the only subscriptions that gate a resource today.
+   *
+   * Three answers, not two: no membership at all, a membership that does not
+   * include THIS court, and yes. The middle one exists because a plan can now
+   * name the courts it opens — a tennis-only membership should be told it is
+   * the wrong court, not that it is not a member.
    */
-  private async hasActiveMembership(
+  private async membershipCoversResource(
     subjectRef: string,
-    resource: { source_service_key?: string | null },
-  ): Promise<boolean> {
+    resourceId: string,
+  ): Promise<"ok" | "none" | "other_resource"> {
     const userId = subjectRef.startsWith("user:") ? subjectRef.slice(5) : subjectRef;
-    if (!userId) return false;
+    if (!userId) return "none";
     const today = new Date().toISOString().slice(0, 10);
-    const rows = await this.rest<Array<{ id: string }>>(
-      `beach_club_subscriptions?select=id&user_id=eq.${encodeURIComponent(userId)}` +
-      `&status=eq.active&payment_status=eq.paid&end_date=gte.${today}&limit=1`,
+
+    // The live memberships this customer holds, and what each was bought from.
+    const subs = await this.rest<Array<{ plan_id: string | null }>>(
+      `beach_club_subscriptions?select=plan_id&user_id=eq.${encodeURIComponent(userId)}` +
+      `&status=eq.active&payment_status=eq.paid&end_date=gte.${today}`,
     );
-    return !!rows?.[0];
+    if (!subs?.length) return "none";
+
+    // What each plan grants. A plan naming no resources grants all of its
+    // provider's — which is what a single all-access membership means, and
+    // what every plan written before this column existed still means.
+    const planIds = [...new Set(subs.map((s) => s.plan_id).filter((id): id is string => !!id))];
+    if (!planIds.length) return "ok";
+
+    const plans = await this.rest<Array<{ resource_ids: unknown }>>(
+      `provider_plans?select=resource_ids&source_service_key=eq.beach` +
+      `&source_plan_id=in.(${planIds.map((id) => encodeURIComponent(id)).join(",")})`,
+    );
+    // No mirror row yet is not a reason to refuse a paying member.
+    if (!plans?.length) return "ok";
+
+    for (const plan of plans) {
+      const ids = Array.isArray(plan.resource_ids) ? plan.resource_ids.map(String) : [];
+      if (ids.length === 0 || ids.includes(resourceId)) return "ok";
+    }
+    return "other_resource";
   }
 
   /** Confirm a hold (e.g. once its Order is paid). */
