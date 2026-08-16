@@ -93,7 +93,7 @@ export class ProviderEarningsService {
     const legacyId = row?.source_provider_id ?? null;
 
     const end = new Date();
-    const { revenue, units, serviceDays } = await this.fetchEarned(source, legacyId, ALL_TIME_START, end);
+    const { revenue, units, serviceDays } = await this.fetchEarned(source, legacyId, ALL_TIME_START, end, providerId);
 
     const settings = await this.readSettings();
     // Months of SERVICE, not months since an epoch. A per-month rate multiplied
@@ -122,6 +122,8 @@ export class ProviderEarningsService {
     legacyId: string | null,
     start: Date,
     end: Date,
+    /** The universal `providers.id` — what scopes services whose money lives in the universal tables. */
+    providerId?: string,
   ): Promise<{ revenue: number; units: number; serviceDays: number }> {
     const acc = (
       rows: Array<Record<string, any>> | null,
@@ -193,12 +195,16 @@ export class ProviderEarningsService {
     }
 
     if (source === "beach") {
-      // One club, platform-owned — not scoped further, same as every other
-      // beach figure on the platform.
-      // Memberships are universal rows; the legacy table is their shadow, and
-      // totalling the shadow is how one payment becomes two.
+      // Scoped to THIS business, not to the service.
+      //
+      // `financeSourceFor` answers "beach" for the whole Lifestyle archetype,
+      // so an unscoped total handed every provider on it the beach club's
+      // revenue — and this figure is the cap the payout request is checked
+      // against. Memberships are universal rows; the legacy table is their
+      // shadow, and totalling the shadow is how one payment becomes two.
+      if (!providerId) return { revenue: 0, units: 0, serviceDays: 0 };
       const rows = await this.rest<Array<Record<string, any>>>(
-        `provider_subscriptions?source_service_key=eq.beach&payment_status=eq.paid` +
+        `provider_subscriptions?provider_id=eq.${encodeURIComponent(providerId)}&payment_status=eq.paid` +
         `&select=total_cents:price_cents,people:metadata->people,created_at,start_date,end_date`);
       return acc(rows,
         (r) => ({ totalCents: r.total_cents || 0, serviceStart: r.start_date || r.created_at, serviceEnd: r.end_date, fallbackDays: 30 }),

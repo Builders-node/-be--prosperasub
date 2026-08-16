@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, Put, Query, Req, UseGuards } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Param, Patch, Post, Put, Query, Req, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiOperation, ApiProperty, ApiQuery, ApiTags } from "@nestjs/swagger";
 import { IsBoolean, IsInt, IsOptional, IsString, Min, MinLength } from "class-validator";
 import { AccountAuthGuard, type AccountRequest } from "./account-auth.guard";
@@ -8,6 +8,7 @@ import { AccountPreferencesService } from "./account-preferences.service";
 import { AccountCancellationService } from "./account-cancellation.service";
 import { ProviderPayoutsService } from "./provider-payouts.service";
 import { OccurrencesService } from "./occurrences.service";
+import { ProviderMembersService } from "./provider-members.service";
 import { AccountPaymentService } from "./account-payment.service";
 import { AccountCleaningService } from "./account-cleaning.service";
 import { CleaningReminderService } from "./cleaning-reminder.service";
@@ -79,6 +80,30 @@ class OccurrenceCompletionDto {
   completedBy?: string | null;
 }
 
+class AddProviderMemberDto {
+  @ApiProperty({ required: false, description: "users.id of the person, when picked from the user list." })
+  @IsOptional()
+  @IsString()
+  userId?: string;
+
+  @ApiProperty({ required: false, description: "Their email — resolved to an account server-side." })
+  @IsOptional()
+  @IsString()
+  userEmail?: string;
+
+  @ApiProperty({ required: false, description: "Display name for the team list." })
+  @IsOptional()
+  @IsString()
+  userName?: string;
+}
+
+class SetProviderOwnerDto {
+  @ApiProperty({ required: false, nullable: true, description: "users.id of the new owner; null hands it back to the platform." })
+  @IsOptional()
+  @IsString()
+  userId?: string | null;
+}
+
 class RequestPayoutDto {
   @ApiProperty({ example: 25000, description: "Cents. Capped server-side by what the business earned." })
   @IsInt()
@@ -134,6 +159,7 @@ export class AccountController {
     private readonly cancellation: AccountCancellationService,
     private readonly payouts: ProviderPayoutsService,
     private readonly occurrences: OccurrencesService,
+    private readonly members: ProviderMembersService,
   ) {}
 
   // ── Cleaning self-service ────────────────────────────────────────────────────
@@ -341,6 +367,59 @@ export class AccountController {
   completeOccurrence(@Req() req: AccountRequest, @Param("id") id: string, @Body() body: OccurrenceCompletionDto) {
     const isAdmin = (req.authUser?.roles ?? []).includes("SUPER_ADMIN");
     return this.occurrences.complete(req.authUser!.id, id, isAdmin, body);
+  }
+
+  /**
+   * Who runs a business.
+   *
+   * These four used to be direct writes from the Team tab. `provider_members`
+   * is what decides whether somebody may see a provider's day — addresses and
+   * all — and `providers.admin_user_id` is what the payout endpoint calls
+   * ownership, so with a world-writable table the anon key was enough to
+   * become either. The table now refuses anon writes and this is the door.
+   */
+  @ApiOperation({ summary: "Who runs a business you own" })
+  @Get("providers/:providerId/members")
+  listProviderMembers(@Req() req: AccountRequest, @Param("providerId") providerId: string) {
+    const isAdmin = (req.authUser?.roles ?? []).includes("SUPER_ADMIN");
+    return this.members.list(req.authUser!.id, providerId, isAdmin);
+  }
+
+  @ApiOperation({ summary: "Add a manager to a business you own" })
+  @Post("providers/:providerId/members")
+  addProviderMember(
+    @Req() req: AccountRequest,
+    @Param("providerId") providerId: string,
+    @Body() body: AddProviderMemberDto,
+  ) {
+    const isAdmin = (req.authUser?.roles ?? []).includes("SUPER_ADMIN");
+    return this.members.add(req.authUser!.id, providerId, isAdmin, {
+      userId: body.userId ?? null,
+      userEmail: body.userEmail ?? null,
+      userName: body.userName ?? null,
+    });
+  }
+
+  @ApiOperation({ summary: "Remove a manager from a business you own" })
+  @Delete("providers/:providerId/members/:memberId")
+  removeProviderMember(
+    @Req() req: AccountRequest,
+    @Param("providerId") providerId: string,
+    @Param("memberId") memberId: string,
+  ) {
+    const isAdmin = (req.authUser?.roles ?? []).includes("SUPER_ADMIN");
+    return this.members.remove(req.authUser!.id, providerId, isAdmin, memberId);
+  }
+
+  @ApiOperation({ summary: "Hand a business you own to somebody else" })
+  @Put("providers/:providerId/owner")
+  setProviderOwner(
+    @Req() req: AccountRequest,
+    @Param("providerId") providerId: string,
+    @Body() body: SetProviderOwnerDto,
+  ) {
+    const isAdmin = (req.authUser?.roles ?? []).includes("SUPER_ADMIN");
+    return this.members.setOwner(req.authUser!.id, providerId, isAdmin, body.userId ?? null);
   }
 
   @ApiOperation({ summary: "What this business may withdraw right now" })
