@@ -353,8 +353,13 @@ export class AdminService {
 
   async sendBeachPaymentReminder(subscriptionId: string) {
     const rows = await this.supabaseRest<Array<Record<string, any>>>(
-      `/beach_club_subscriptions?id=eq.${encodeURIComponent(subscriptionId)}` +
-      `&select=id,user_id,customer_name,customer_email,plan_name,total_cents,payment_status,status&limit=1`,
+      // Either id: the reminder is fired from a list that still shows legacy
+      // ids, and from screens that have moved.
+      `/provider_subscriptions?source_service_key=eq.beach` +
+      `&or=(id.eq.${encodeURIComponent(subscriptionId)},source_subscription_id.eq.${encodeURIComponent(subscriptionId)})` +
+      `&select=id,user_id,payment_status,status,total_cents:price_cents,` +
+      `customer_name:metadata->>customer_name,customer_email:metadata->>customer_email,` +
+      `plan_name:metadata->>plan_name&limit=1`,
     );
     const sub = rows?.[0];
     if (!sub) throw new NotFoundException("Subscription not found");
@@ -385,7 +390,7 @@ export class AdminService {
       path = `/cleaning_subscriptions?select=id&payment_status=neq.paid&subscription_status=neq.cancelled&deleted_at=is.null`;
       send = (id) => this.sendCleaningPaymentReminder(id);
     } else {
-      path = `/beach_club_subscriptions?select=id&payment_status=neq.paid&status=neq.cancelled`;
+      path = `/provider_subscriptions?select=id&source_service_key=eq.beach&payment_status=neq.paid&status=neq.cancelled`;
       send = (id) => this.sendBeachPaymentReminder(id);
     }
     const rows = await this.supabaseRest<Array<{ id: string }>>(path).catch(() => []);

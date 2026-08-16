@@ -77,7 +77,9 @@ export class LegacySubscriptionSource implements SubscriptionSource {
 
   private async fetchBeachClub(userId: string): Promise<SubscriptionView[]> {
     const rows = await this.rest<Array<Record<string, unknown>>>(
-      `beach_club_subscriptions?select=id,plan_name,status,payment_status,end_date&user_id=eq.${encodeURIComponent(userId)}`
+      `provider_subscriptions?source_service_key=eq.beach` +
+      `&select=id,plan_name:metadata->>plan_name,status,payment_status,end_date` +
+      `&user_id=eq.${encodeURIComponent(userId)}`
     );
     if (!rows?.length) return [];
     return rows.map((r) => {

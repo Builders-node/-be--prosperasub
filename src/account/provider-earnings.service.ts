@@ -195,8 +195,11 @@ export class ProviderEarningsService {
     if (source === "beach") {
       // One club, platform-owned — not scoped further, same as every other
       // beach figure on the platform.
+      // Memberships are universal rows; the legacy table is their shadow, and
+      // totalling the shadow is how one payment becomes two.
       const rows = await this.rest<Array<Record<string, any>>>(
-        `beach_club_subscriptions?payment_status=eq.paid&select=total_cents,people,created_at,start_date,end_date`);
+        `provider_subscriptions?source_service_key=eq.beach&payment_status=eq.paid` +
+        `&select=total_cents:price_cents,people:metadata->people,created_at,start_date,end_date`);
       return acc(rows,
         (r) => ({ totalCents: r.total_cents || 0, serviceStart: r.start_date || r.created_at, serviceEnd: r.end_date, fallbackDays: 30 }),
         (r) => r.people || 0);

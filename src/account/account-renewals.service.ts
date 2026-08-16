@@ -193,7 +193,10 @@ export class AccountRenewalsService {
     // the legacy row instead would leave the platform's own record of the
     // membership sitting at its old end date.
     await this.patch(
-      `provider_subscriptions?source_service_key=eq.beach&source_subscription_id=eq.${this.enc(subId)}`,
+      // Either id, matching the read above — a renewal that silently patches
+      // no rows is a customer who paid and got no time.
+      `provider_subscriptions?source_service_key=eq.beach` +
+        `&or=(id.eq.${this.enc(subId)},source_subscription_id.eq.${this.enc(subId)})`,
       {
         start_date: nextStart,
         end_date: newEnd,
@@ -357,7 +360,12 @@ export class AccountRenewalsService {
 
   private async fetchBeach(id: string): Promise<BeachSubRow> {
     const rows = await this.rest<BeachSubRow[]>(
-      `beach_club_subscriptions?id=eq.${this.enc(id)}&select=id,user_id,status,start_date,end_date,total_cents,plan_id,plan_name&limit=1`,
+      // The row is universal; the id in hand may be either, because the lists
+      // that offer "renew" have not all moved.
+      `provider_subscriptions?source_service_key=eq.beach` +
+      `&or=(id.eq.${this.enc(id)},source_subscription_id.eq.${this.enc(id)})` +
+      `&select=id,user_id,status,start_date,end_date,plan_id,` +
+      `total_cents:price_cents,plan_name:metadata->>plan_name&limit=1`,
     );
     const sub = rows?.[0];
     if (!sub) throw new NotFoundException("Beach Club subscription not found");
