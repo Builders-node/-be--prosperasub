@@ -189,15 +189,21 @@ export class AccountRenewalsService {
       };
     }
 
-    await this.patch(`beach_club_subscriptions?id=eq.${this.enc(subId)}`, {
-      start_date: nextStart,
-      end_date: newEnd,
-      status: "active",
-      payment_status: "paid",
-      payment_method: payload.payment_method,
-      payment_reference: payload.payment_reference,
-      updated_at: new Date().toISOString(),
-    });
+    // Renew the universal row — the legacy one follows by trigger. Renewing
+    // the legacy row instead would leave the platform's own record of the
+    // membership sitting at its old end date.
+    await this.patch(
+      `provider_subscriptions?source_service_key=eq.beach&source_subscription_id=eq.${this.enc(subId)}`,
+      {
+        start_date: nextStart,
+        end_date: newEnd,
+        status: "active",
+        payment_status: "paid",
+        payment_method: payload.payment_method,
+        payment_reference: payload.payment_reference,
+        updated_at: new Date().toISOString(),
+      },
+    );
 
     return {
       ok: true,

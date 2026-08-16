@@ -150,7 +150,7 @@ export class SubscriptionExpirationService {
   private async expireOverdueBeachSubscriptions(todayStr: string): Promise<void> {
     try {
       await this.supabaseRest(
-        `/beach_club_subscriptions?status=eq.active&end_date=lt.${todayStr}`,
+        `/provider_subscriptions?source_service_key=eq.beach&status=eq.active&end_date=lt.${todayStr}`,
         { method: "PATCH", body: JSON.stringify({ status: "expired", updated_at: new Date().toISOString() }) },
       );
     } catch (err) {

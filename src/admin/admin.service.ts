@@ -115,6 +115,7 @@ export class AdminService {
   private subAmountCents(table: string, sub: Record<string, any>): number | null {
     if (table === "cleaning_subscriptions") return Number(sub.total_price_cents) || Number(sub.monthly_price_cents) || null;
     if (table === "beach_club_subscriptions") return Number(sub.total_cents) || null;
+    if (table === "provider_subscriptions") return Number(sub.price_cents) || null;
     if (table === "food_subscriptions") {
       const weekly = Number(sub.weekly_price_cents) || 0;
       const weeks = (Number(sub.commitment_weeks) || 1) * (Number(sub.periods_paid) || 1);
@@ -1448,7 +1449,9 @@ export class AdminService {
     const scopes = [
       { table: "cleaning_subscriptions", statusCol: "subscription_status", extraFilters: "&deleted_at=is.null" },
       { table: "food_subscriptions",     statusCol: "status",              extraFilters: "" },
-      { table: "beach_club_subscriptions", statusCol: "status",            extraFilters: "" },
+      // Beach memberships are universal rows; the legacy twin follows by
+      // trigger. Reconciling the old table would mark a copy paid.
+      { table: "provider_subscriptions", statusCol: "status",              extraFilters: "&source_service_key=eq.beach" },
     ] as const;
 
     const checkPaid = async (sub: Record<string, any>): Promise<boolean> => {

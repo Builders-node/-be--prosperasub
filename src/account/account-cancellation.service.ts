@@ -46,7 +46,9 @@ const SERVICES: Record<string, ServiceShape> = {
     label: "meal plan",
   },
   beach: {
-    table: "beach_club_subscriptions",
+    // Universal, like every other membership. The legacy row follows by
+    // trigger for the readers that have not moved.
+    table: "provider_subscriptions",
     statusCol: "status",
     cancellable: ["active", "paused"],
     label: "membership",

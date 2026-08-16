@@ -27,7 +27,10 @@ import { BillingService } from "../billing/billing.service";
 const SUB_TABLES = [
   { table: "cleaning_subscriptions", extra: "&deleted_at=is.null" },
   { table: "food_subscriptions",     extra: "" },
-  { table: "beach_club_subscriptions", extra: "" },
+  // The beach's memberships are universal rows; the legacy twin follows by
+  // trigger, so verifying the old table would confirm a payment against a
+  // copy and leave the row this platform now considers the real one pending.
+  { table: "provider_subscriptions", extra: "&source_service_key=eq.beach" },
 ] as const;
 
 /** How many pending rows the blind fallback will verify in one call. */
