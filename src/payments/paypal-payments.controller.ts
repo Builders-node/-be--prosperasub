@@ -84,10 +84,19 @@ export class PayPalPaymentsController {
   async capture(@Body() body: CapturePayPalOrderDto) {
     const result = await this.paypal.captureOrder(body.order_id);
     if (result.paid) {
-      await this.notifications.notifyPaymentSucceededForProviderRef(PAYPAL_PROVIDER, body.order_id, {
-        paymentStatus: "paid",
-        paidAt: new Date()
-      });
+      // Who paid, from PayPal itself. The checkout screen's own fields are
+      // preferred when it sent any (they name the plan and the customer as the
+      // platform knows them), but a screen that sent nothing used to produce a
+      // notification of five "Not provided" lines about real money.
+      await this.notifications.notifyPaymentSucceededForProviderRef(
+        PAYPAL_PROVIDER,
+        body.order_id,
+        { paymentStatus: "paid", paidAt: new Date() },
+        // Only where the checkout screen said nothing: the platform's own
+        // record of whose subscription this is beats the PayPal account that
+        // happened to authorise it.
+        { clientName: result.payer?.name ?? null, clientEmail: result.payer?.email ?? null },
+      );
 
       // Billing domain records the payment + emits billing.PaymentCaptured (idempotent).
       await this.billing.recordCaptured({

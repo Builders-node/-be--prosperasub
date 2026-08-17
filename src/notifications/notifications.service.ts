@@ -109,7 +109,19 @@ export class NotificationsService {
     }
   }
 
-  async notifyPaymentSucceededForProviderRef(provider: string, providerPaymentId: string, overrides: Partial<AdminPaymentNotificationPayload> = {}) {
+  /**
+   * @param overrides win over everything — what the caller knows for certain.
+   * @param fallbacks are used only where neither the override nor the recorded
+   *        checkout session has an answer: the payment rail's own idea of who
+   *        paid, which is better than "Not provided" and worse than the
+   *        platform's own record of whose subscription this is.
+   */
+  async notifyPaymentSucceededForProviderRef(
+    provider: string,
+    providerPaymentId: string,
+    overrides: Partial<AdminPaymentNotificationPayload> = {},
+    fallbacks: Partial<AdminPaymentNotificationPayload> = {},
+  ) {
     let session: Awaited<ReturnType<typeof this.prisma.paymentCheckoutSession.findUnique>> | null = null;
 
     if (this.dbAvailable) {
@@ -130,10 +142,10 @@ export class NotificationsService {
     return this.notifyPaymentSucceeded({
       provider,
       providerPaymentId,
-      serviceName: overrides.serviceName || session?.serviceName || "EverySub payment",
-      clientName: overrides.clientName ?? session?.clientName ?? null,
-      clientEmail: overrides.clientEmail ?? session?.clientEmail ?? null,
-      clientPhone: overrides.clientPhone ?? session?.clientPhone ?? null,
+      serviceName: overrides.serviceName || session?.serviceName || fallbacks.serviceName || "EverySub payment",
+      clientName: overrides.clientName ?? session?.clientName ?? fallbacks.clientName ?? null,
+      clientEmail: overrides.clientEmail ?? session?.clientEmail ?? fallbacks.clientEmail ?? null,
+      clientPhone: overrides.clientPhone ?? session?.clientPhone ?? fallbacks.clientPhone ?? null,
       amountCents: overrides.amountCents ?? session?.amountCents ?? null,
       amountSats: overrides.amountSats ?? session?.amountSats ?? null,
       currency: overrides.currency ?? session?.currency ?? "USD",

@@ -1,6 +1,26 @@
 import { Injectable, ServiceUnavailableException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 
+/**
+ * Who PayPal says paid.
+ *
+ * The most reliable answer there is: it is the account that authorised the
+ * money, not something a checkout screen remembered to send. PayPal puts it on
+ * the order, and a capture returns the order — so this survives every checkout
+ * that forgets to pass a name, and every payment made while signed out.
+ */
+export function payerOf(order: any): { name: string | null; email: string | null } {
+  const payer = order?.payer ?? order?.purchase_units?.[0]?.payee ?? null;
+  const given = payer?.name?.given_name ?? "";
+  const surname = payer?.name?.surname ?? "";
+  const full = `${given} ${surname}`.trim();
+  const shipping = order?.purchase_units?.[0]?.shipping?.name?.full_name ?? null;
+  return {
+    name: full || shipping || null,
+    email: payer?.email_address ?? null,
+  };
+}
+
 @Injectable()
 export class PayPalService {
   constructor(private readonly config: ConfigService) {}
@@ -50,13 +70,22 @@ export class PayPalService {
       });
       const capture = res?.purchase_units?.[0]?.payments?.captures?.[0];
       const paid = res?.status === "COMPLETED" || capture?.status === "COMPLETED";
-      return { paid: Boolean(paid), capture_id: capture?.id ?? orderId, status: res?.status ?? "unknown", provider: "paypal" };
+      return {
+        paid: Boolean(paid),
+        capture_id: capture?.id ?? orderId,
+        status: res?.status ?? "unknown",
+        provider: "paypal",
+        payer: payerOf(res),
+      };
     } catch (err) {
       // If it was already captured, treat as paid by reading the order status.
       const order = await this.getOrder(orderId).catch(() => null);
       if (order?.status === "COMPLETED") {
         const capture = order?.purchase_units?.[0]?.payments?.captures?.[0];
-        return { paid: true, capture_id: capture?.id ?? orderId, status: "COMPLETED", provider: "paypal" };
+        return {
+          paid: true, capture_id: capture?.id ?? orderId, status: "COMPLETED",
+          provider: "paypal", payer: payerOf(order),
+        };
       }
       throw err;
     }
