@@ -40,6 +40,16 @@ export interface OccurrenceRow {
   completion: Record<string, unknown> | null;
   user_id: string | null;
   slot_id: string | null;
+  /**
+   * Who the work is for — resolved from `user_id`, not stored.
+   *
+   * The day's list showed a time, a court and a status, and the one question
+   * the person doing the work asks — "whose is this?" — could only be answered
+   * by leaving for the customer list and matching by time. It travels with the
+   * row now; the table itself keeps holding only the id.
+   */
+  customer_name?: string | null;
+  customer_email?: string | null;
 }
 
 const STATUSES = ["scheduled", "done", "failed", "cancelled", "rescheduled"] as const;
@@ -79,7 +89,7 @@ export class OccurrencesService {
     const rows = await this.rest<OccurrenceRow[]>(
       `service_occurrences?${filters.join("&")}&select=*&order=starts_at.asc&limit=2000`,
     );
-    return rows ?? [];
+    return this.withCustomers(rows ?? []);
   }
 
   /**
@@ -259,6 +269,31 @@ export class OccurrencesService {
       meal_type: occ.item_key,
       status: legacyStatus,
       reason,
+    });
+  }
+
+  /**
+   * Names for the rows' customers, in one query.
+   *
+   * Best effort: an occurrence generated before anybody signed in, or one for a
+   * walk-in, simply has no name and the screen says so rather than inventing
+   * one.
+   */
+  private async withCustomers(rows: OccurrenceRow[]): Promise<OccurrenceRow[]> {
+    const ids = [...new Set(rows.map((r) => r.user_id).filter((id): id is string => !!id))];
+    if (!ids.length) return rows;
+
+    const users = await this.rest<Array<{ id: string; name: string | null; display_name: string | null; email: string | null }>>(
+      `users?select=id,name,display_name,email&id=in.(${ids.map((i) => this.enc(i)).join(",")})`,
+    );
+    const byId = new Map((users ?? []).map((u) => [u.id, u]));
+    return rows.map((r) => {
+      const u = r.user_id ? byId.get(r.user_id) : null;
+      return {
+        ...r,
+        customer_name: u ? (u.display_name || u.name || u.email || null) : null,
+        customer_email: u?.email ?? null,
+      };
     });
   }
 
