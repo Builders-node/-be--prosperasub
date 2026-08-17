@@ -46,6 +46,21 @@ export class BookingController {
     return this.booking.listForSubject(`user:${req.authUser!.id}`, { from, to });
   }
 
+  /**
+   * What the caller's plans open here.
+   *
+   * The booking screen asks this so a calendar a plan does not include is
+   * shown as not included, rather than refusing the tap with
+   * `resource_not_in_plan` after the customer has chosen a time.
+   */
+  @ApiOperation({ summary: "Which of a provider's calendars your plans include" })
+  @UseGuards(AccountAuthGuard)
+  @Get("coverage")
+  coverage(@Req() req: AccountRequest, @Query("providerId") providerId?: string) {
+    if (!providerId) throw new BadRequestException("providerId is required");
+    return this.booking.coverageFor(`user:${req.authUser!.id}`, providerId);
+  }
+
   @ApiOperation({ summary: "Every booking on a provider's calendars in a window" })
   @UseGuards(AccountAuthGuard)
   @Get("by-provider")

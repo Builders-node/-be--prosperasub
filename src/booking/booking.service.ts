@@ -311,6 +311,39 @@ export class BookingService {
   }
 
   /**
+   * Which of a provider's calendars this customer's plans open.
+   *
+   * The same decision as `membershipCoversResource`, asked for the whole list
+   * at once so the booking screen can say what is included BEFORE somebody
+   * taps a court they cannot have. Narrowing a plan without this turns a
+   * pricing decision into a surprise error.
+   *
+   * `all: true` means every calendar — either the provider does not gate on
+   * membership, or the plans name nothing, which is what all-access means.
+   */
+  async coverageFor(
+    subjectRef: string,
+    providerId: string,
+  ): Promise<{ member: boolean; all: boolean; resourceIds: string[] }> {
+    const userId = subjectRef.startsWith("user:") ? subjectRef.slice(5) : subjectRef;
+    if (!userId || !providerId) return { member: false, all: false, resourceIds: [] };
+
+    const plans = await this.plansHeldBy(userId, providerId);
+    if (plans === null) return { member: false, all: false, resourceIds: [] };
+    if (!plans.length) return { member: true, all: true, resourceIds: [] };
+
+    const named = new Set<string>();
+    for (const plan of plans) {
+      const ids = grantedResourceIds(plan);
+      // A plan that names nothing opens everything, and one such plan is
+      // enough — no point listing calendars after that.
+      if (!ids.length) return { member: true, all: true, resourceIds: [] };
+      ids.forEach((id) => named.add(id));
+    }
+    return { member: true, all: false, resourceIds: [...named] };
+  }
+
+  /**
    * Does this subject hold a live subscription that opens this calendar?
    *
    * Three answers, not two: no subscription at all, a subscription whose plan
