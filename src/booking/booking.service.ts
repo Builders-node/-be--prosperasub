@@ -44,6 +44,8 @@ function slotHours(dateISO: string, from: string, to: string, timeZone: string):
   return Math.round((ms / 3_600_000) * 100) / 100;
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /** Honduras does not observe DST, so one offset is the whole story. */
 const PLATFORM_UTC_OFFSET_MINUTES = -360;
 
@@ -258,7 +260,16 @@ export class BookingService {
     return this.decorate(rows);
   }
 
-  /** Bookings with the name of what was booked — an id tells a customer nothing. */
+  /**
+   * Bookings with the name of what was booked AND of who booked it — an id
+   * tells nobody anything.
+   *
+   * The customer's name was the piece missing: a booking carries
+   * `subject_ref = "user:<uuid>"`, and `label` is only ever set when staff took
+   * the booking over the counter. So the provider's own calendar showed the
+   * court's name in the customer's place, which they already knew, and the one
+   * thing they needed — who is coming — was nowhere on the screen.
+   */
   private async decorate(rows: Array<Record<string, any>>) {
     const ids = [...new Set(rows.map((r) => r.resourceId))];
     const names = new Map<string, { name: string; provider_id: string | null }>();
@@ -266,12 +277,16 @@ export class BookingService {
       const r = await this.resources.getResource(id);
       if (r) names.set(id, { name: r.name, provider_id: r.provider_id ?? null });
     }
+
+    const people = await this.subjectNames(rows.map((r) => r.subjectRef));
+
     return rows.map((b) => ({
       id: b.id,
       resource_id: b.resourceId,
       resource_name: names.get(b.resourceId)?.name ?? null,
       provider_id: b.providerId ?? names.get(b.resourceId)?.provider_id ?? null,
       subject_ref: b.subjectRef,
+      customer_name: b.label ?? people.get(String(b.subjectRef ?? "")) ?? null,
       start_at: b.startAt,
       end_at: b.endAt,
       slot_key: b.slotKey,
@@ -279,6 +294,32 @@ export class BookingService {
       label: b.label ?? null,
       notes: b.notes ?? null,
     }));
+  }
+
+  /**
+   * Names for `user:<uuid>` subjects, in one query.
+   *
+   * Best effort by design: a booking whose subject is not a platform user (a
+   * walk-in taken by staff, an old row) simply has no name, and the caller
+   * falls back to whatever label it was given.
+   */
+  private async subjectNames(subjectRefs: Array<string | null | undefined>): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    const ids = [...new Set(
+      subjectRefs
+        .map((r) => (typeof r === "string" && r.startsWith("user:") ? r.slice(5) : null))
+        .filter((id): id is string => !!id && UUID_RE.test(id)),
+    )];
+    if (!ids.length) return out;
+
+    const rows = await this.rest<Array<{ id: string; name: string | null; display_name: string | null; email: string | null }>>(
+      `users?select=id,name,display_name,email&id=in.(${ids.map(encodeURIComponent).join(",")})`,
+    );
+    (rows ?? []).forEach((u) => {
+      const name = u.display_name || u.name || u.email;
+      if (name) out.set(`user:${u.id}`, name);
+    });
+    return out;
   }
 
   /**
