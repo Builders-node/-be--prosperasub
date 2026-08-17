@@ -56,9 +56,15 @@ export class BookingController {
   @ApiOperation({ summary: "Which of a provider's calendars your plans include" })
   @UseGuards(AccountAuthGuard)
   @Get("coverage")
-  coverage(@Req() req: AccountRequest, @Query("providerId") providerId?: string) {
+  coverage(
+    @Req() req: AccountRequest,
+    @Query("providerId") providerId?: string,
+    @Query("resourceId") resourceId?: string,
+  ) {
     if (!providerId) throw new BadRequestException("providerId is required");
-    return this.booking.coverageFor(`user:${req.authUser!.id}`, providerId);
+    // The allowance is per calendar — a plan can cap one court and not another
+    // — so the screen names the one it is showing.
+    return this.booking.coverageFor(`user:${req.authUser!.id}`, providerId, resourceId);
   }
 
   @ApiOperation({ summary: "Every booking on a provider's calendars in a window" })

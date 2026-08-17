@@ -6,6 +6,9 @@ import { ResourceService } from "../resource/resource.service";
 import { generateSlots, type Slot } from "./slot-engine";
 import { zonedDayRange, zonedWallClockToInstant } from "./zoned-time";
 import { BookingPolicy, DEFAULT_SCHEDULE, normalizeSchedule } from "./schedule";
+import {
+  bookedHours, hourAllowanceFor, periodWindow, type AllowancePeriod,
+} from "./allowance";
 
 export interface AvailabilityResult {
   resourceId: string;
@@ -33,6 +36,17 @@ function ids(rows: Array<Record<string, unknown>> | null, column: string): strin
  * `resource_ids` column and the per-line `resource_ids` inside `entitlements`.
  * Empty means "all of them" and the caller reads it that way.
  */
+/** How long a slot is, in hours, from the wall-clock times the schedule gave. */
+function slotHours(dateISO: string, from: string, to: string, timeZone: string): number {
+  const start = zonedWallClockToInstant(dateISO, from, timeZone).getTime();
+  const end = zonedWallClockToInstant(dateISO, to, timeZone).getTime();
+  const ms = end > start ? end - start : 3_600_000;
+  return Math.round((ms / 3_600_000) * 100) / 100;
+}
+
+/** Honduras does not observe DST, so one offset is the whole story. */
+const PLATFORM_UTC_OFFSET_MINUTES = -360;
+
 function grantedResourceIds(plan: { resource_ids?: unknown; entitlements?: unknown }): string[] {
   const out = new Set<string>();
   const collect = (value: unknown) => {
@@ -140,7 +154,12 @@ export class BookingService {
     // Who may take this slot, and how many they already have. The schedule
     // decides that the slot exists; this decides that this customer may have
     // it. Both come from the provider's own settings.
-    await this.assertPolicyAllows(schedule.policy, resource, input);
+    await this.assertPolicyAllows(schedule.policy, resource, {
+      ...input,
+      // The slot's real length, so an allowance of "4 hours" is four hours and
+      // not four bookings of whatever size this calendar happens to sell.
+      hours: slotHours(input.date, input.from, slot.to, schedule.timezone),
+    });
 
     const slotKey = `${input.resourceId}|${input.date}|${input.from}`;
     // `new Date("...T18:00:00")` with no offset is parsed in the PROCESS's
@@ -275,7 +294,7 @@ export class BookingService {
   private async assertPolicyAllows(
     policy: BookingPolicy,
     resource: { provider_id?: string | null; source_service_key?: string | null } | null,
-    input: { subjectRef?: string; date: string; resourceId: string },
+    input: { subjectRef?: string; date: string; resourceId: string; hours?: number },
   ): Promise<void> {
     const subject = input.subjectRef ?? "";
     if (!subject) throw new BadRequestException("subject_required");
@@ -284,6 +303,16 @@ export class BookingService {
       const ok = await this.membershipCoversResource(subject, input.resourceId);
       if (ok === "none") throw new BadRequestException("membership_required");
       if (ok === "other_resource") throw new BadRequestException("resource_not_in_plan");
+    }
+
+    // How much of the plan's allowance is left. Independent of
+    // `requiresMembership`: if a customer's plan grants a number of hours, that
+    // number is what they have, whether or not the calendar is members-only.
+    if (resource?.provider_id) {
+      const usage = await this.hourUsage(subject, resource.provider_id, input.resourceId);
+      if (usage && usage.used + (input.hours ?? 1) > usage.limit + 1e-6) {
+        throw new BadRequestException("hour_allowance_reached");
+      }
     }
 
     if (policy.maxActiveBookings > 0) {
@@ -324,23 +353,87 @@ export class BookingService {
   async coverageFor(
     subjectRef: string,
     providerId: string,
-  ): Promise<{ member: boolean; all: boolean; resourceIds: string[] }> {
+    resourceId?: string,
+  ): Promise<{
+    member: boolean; all: boolean; resourceIds: string[];
+    allowance: { limit: number; used: number; remaining: number; period: string; resetsOn: string } | null;
+  }> {
     const userId = subjectRef.startsWith("user:") ? subjectRef.slice(5) : subjectRef;
-    if (!userId || !providerId) return { member: false, all: false, resourceIds: [] };
+    const empty = { member: false, all: false, resourceIds: [] as string[], allowance: null };
+    if (!userId || !providerId) return empty;
 
     const plans = await this.plansHeldBy(userId, providerId);
-    if (plans === null) return { member: false, all: false, resourceIds: [] };
-    if (!plans.length) return { member: true, all: true, resourceIds: [] };
+    if (plans === null) return empty;
+
+    // The allowance is asked about one calendar, because a plan may cap one and
+    // not another. Without a calendar named, answer for the first one it opens.
+    const askAbout = resourceId ?? grantedResourceIds(plans[0] ?? {})[0] ?? "";
+    const usage = askAbout ? await this.hourUsage(subjectRef, providerId, askAbout) : null;
+    const allowance = usage
+      ? {
+          limit: usage.limit, used: usage.used, remaining: usage.remaining,
+          period: usage.period, resetsOn: usage.resetsOn.toISOString(),
+        }
+      : null;
+
+    if (!plans.length) return { member: true, all: true, resourceIds: [], allowance };
 
     const named = new Set<string>();
     for (const plan of plans) {
       const ids = grantedResourceIds(plan);
       // A plan that names nothing opens everything, and one such plan is
       // enough — no point listing calendars after that.
-      if (!ids.length) return { member: true, all: true, resourceIds: [] };
+      if (!ids.length) return { member: true, all: true, resourceIds: [], allowance };
       ids.forEach((id) => named.add(id));
     }
-    return { member: true, all: false, resourceIds: [...named] };
+    return { member: true, all: false, resourceIds: [...named], allowance };
+  }
+
+  /**
+   * The allowance on this calendar and how much of it is gone, or null when
+   * the customer's plans do not count hours.
+   *
+   * Counts every hold and confirmed booking the customer has in the current
+   * period on the calendars the allowance covers — a hold is a reservation, so
+   * it spends the allowance until it expires or is released.
+   */
+  private async hourUsage(
+    subjectRef: string,
+    providerId: string,
+    resourceId: string,
+  ): Promise<{ limit: number; used: number; remaining: number; period: AllowancePeriod; resetsOn: Date } | null> {
+    const userId = subjectRef.startsWith("user:") ? subjectRef.slice(5) : subjectRef;
+    if (!userId) return null;
+
+    const plans = await this.plansHeldBy(userId, providerId);
+    const allowance = hourAllowanceFor(plans, resourceId);
+    if (!allowance) return null;
+
+    const { start, end } = periodWindow(allowance.period, new Date(), PLATFORM_UTC_OFFSET_MINUTES);
+    // Scoped to the calendars the allowance is about: naming a court in a plan
+    // narrows what it opens, so it must also narrow what it counts.
+    const covered = new Set<string>();
+    (plans ?? []).forEach((p) => grantedResourceIds(p).forEach((id) => covered.add(id)));
+
+    const spans = await this.prisma.booking.findMany({
+      where: {
+        subjectRef,
+        providerId,
+        status: { in: ["held", "confirmed", "completed"] },
+        startAt: { gte: start, lt: end },
+        ...(covered.size ? { resourceId: { in: [...covered] } } : {}),
+      },
+      select: { startAt: true, endAt: true },
+    });
+
+    const used = bookedHours(spans);
+    return {
+      limit: allowance.limit,
+      used,
+      remaining: Math.max(0, Math.round((allowance.limit - used) * 100) / 100),
+      period: allowance.period,
+      resetsOn: end,
+    };
   }
 
   /**
@@ -381,7 +474,7 @@ export class BookingService {
   private async plansHeldBy(
     userId: string,
     providerId: string,
-  ): Promise<Array<{ resource_ids?: unknown; entitlements?: unknown }> | null> {
+  ): Promise<Array<{ id?: string | null; period?: string | null; resource_ids?: unknown; entitlements?: unknown }> | null> {
     const today = new Date().toISOString().slice(0, 10);
     const uid = encodeURIComponent(userId);
 
@@ -419,8 +512,11 @@ export class BookingService {
     }
     if (!clauses.length) return [];
 
-    const rows = await this.rest<Array<{ resource_ids: unknown; entitlements: unknown }>>(
-      `provider_plans?select=resource_ids,entitlements&or=(${clauses.join(",")})`,
+    const rows = await this.rest<Array<{ id: string; period: string | null; resource_ids: unknown; entitlements: unknown }>>(
+      // `id` and `period` are the allowance's: one plan counts once however
+      // many subscriptions to it a customer holds, and a line with no period of
+      // its own inherits the plan's.
+      `provider_plans?select=id,period,resource_ids,entitlements&or=(${clauses.join(",")})`,
     );
     return rows ?? [];
   }
