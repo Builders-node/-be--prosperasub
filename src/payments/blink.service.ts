@@ -249,6 +249,8 @@ export class BlinkService {
     }
     const walletId = this.walletId;
     const amount = Math.round(input.amountCents);
+    // Sent with the payout key, not the checkout one. See `payoutApiKey`.
+    const key = this.payoutApiKey;
 
     const result = input.destination.kind === "lightning_address"
       ? await this.request<{ lnAddressPaymentSend?: { status?: string; errors?: BlinkGraphQLError[] } }>(
@@ -261,6 +263,7 @@ export class BlinkService {
             }
           `,
           { input: { walletId, lnAddress: input.destination.value, amount } },
+          key,
         ).then((r) => r.lnAddressPaymentSend)
       : await this.request<{ onChainUsdPaymentSend?: { status?: string; errors?: BlinkGraphQLError[] } }>(
           `
@@ -272,6 +275,7 @@ export class BlinkService {
             }
           `,
           { input: { walletId, address: input.destination.value, amount, memo: input.memo } },
+          key,
         ).then((r) => r.onChainUsdPaymentSend);
 
     const error = result?.errors?.find((e) => e.message)?.message ?? null;
@@ -293,17 +297,34 @@ export class BlinkService {
    */
   get payoutsEnabled(): boolean {
     const flag = String(this.config.get<string>("BLINK_PAYOUTS_ENABLED") ?? "").toLowerCase();
-    return ["1", "true", "yes", "on"].includes(flag) && !!this.apiKey && !!this.walletId;
+    return ["1", "true", "yes", "on"].includes(flag) && !!this.payoutApiKey && !!this.walletId;
   }
 
-  private async request<T>(query: string, variables: Record<string, unknown>): Promise<T> {
+  /**
+   * The key that may spend, kept apart from the key that may receive.
+   *
+   * Blink scopes a key at creation — Read, Write, Receive — and one key has
+   * always done everything here: `Receive` to raise a checkout invoice, `Read`
+   * to poll it. Adding `Write` to that key would make the credential the
+   * storefront uses capable of emptying the wallet, and swapping it for a
+   * write-only one would break checkout instead.
+   *
+   * So sending looks for `BLINK_PAYOUT_API_KEY` first. Set that to a Write key
+   * and the checkout key never changes; leave it unset and the single key is
+   * used, which is only sensible if it already carries Write.
+   */
+  private get payoutApiKey(): string {
+    return this.config.get<string>("BLINK_PAYOUT_API_KEY") || this.apiKey;
+  }
+
+  private async request<T>(query: string, variables: Record<string, unknown>, apiKey?: string): Promise<T> {
     this.assertConfigured();
 
     const response = await fetch(this.graphqlUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-API-KEY": this.apiKey
+        "X-API-KEY": apiKey || this.apiKey
       },
       body: JSON.stringify({ query, variables })
     });

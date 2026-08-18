@@ -153,3 +153,39 @@ describe("BlinkService", () => {
     ).rejects.toBeInstanceOf(ServiceUnavailableException);
   });
 });
+
+/**
+ * Which key signs a payment.
+ *
+ * The checkout key needs Receive and Read; sending needs Write. Keeping one
+ * key for both would mean the credential the storefront uses could empty the
+ * wallet, so the send path looks for its own first.
+ */
+describe("BlinkService payout key", () => {
+  const svc = (env: Record<string, string | undefined>) =>
+    new (require("./blink.service").BlinkService)({ get: (k: string) => env[k] } as any);
+
+  it("is off unless the flag is set, whatever keys exist", () => {
+    expect(svc({ BLINK_API_KEY: "receive-key", BLINK_WALLET_ID: "w" }).payoutsEnabled).toBe(false);
+  });
+
+  it("is on with the flag and the checkout key, for an account whose single key can write", () => {
+    expect(svc({
+      BLINK_PAYOUTS_ENABLED: "true", BLINK_API_KEY: "one-key-does-all", BLINK_WALLET_ID: "w",
+    }).payoutsEnabled).toBe(true);
+  });
+
+  it("prefers the dedicated payout key, so the checkout key never needs Write", () => {
+    const s: any = svc({
+      BLINK_PAYOUTS_ENABLED: "true", BLINK_API_KEY: "receive-key",
+      BLINK_PAYOUT_API_KEY: "write-key", BLINK_WALLET_ID: "w",
+    });
+    expect(s.payoutApiKey).toBe("write-key");
+    expect(s.apiKey).toBe("receive-key");
+    expect(s.payoutsEnabled).toBe(true);
+  });
+
+  it("stays off when the flag is on but no key can send", () => {
+    expect(svc({ BLINK_PAYOUTS_ENABLED: "true", BLINK_WALLET_ID: "w" }).payoutsEnabled).toBe(false);
+  });
+});
