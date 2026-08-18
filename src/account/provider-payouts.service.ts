@@ -73,8 +73,16 @@ export class ProviderPayoutsService {
    * The cap is recomputed here and only here. The Money tab shows the same
    * number, but a limit the browser calculates is a suggestion — this endpoint
    * is what stops a request for money that was never earned. Requests land as
-   * `requested`; an admin approves and marks them paid, because money leaving
-   * the platform is not something a screen should do unattended.
+   * When the platform can send (a write-scoped Blink key), this pays out
+   * **immediately** — the provider presses Withdraw and the money goes. There
+   * is no approval step to wait for, because there is nothing a person adds
+   * to it: the amount was already earned, the ceiling is computed here and not
+   * in the browser, and an admin approving would only be re-reading the same
+   * number a day later.
+   *
+   * What replaces the person is the claim-then-verify below. Without sending
+   * configured it falls back to the old behaviour: a `requested` row for an
+   * admin to approve and pay by hand.
    */
   async request(input: RequestPayoutInput, userId: string, isAdmin = false): Promise<PayoutRow> {
     await this.assertOwner(userId, input.providerId, isAdmin);
@@ -102,11 +110,25 @@ export class ProviderPayoutsService {
       );
     }
 
+    const instant = this.blink.payoutsEnabled;
+
+    // A floor, because each payout is a real Lightning payment that costs the
+    // platform a fee to route. Without one, "withdraw" is a button that can be
+    // pressed a hundred times for a cent.
+    if (instant) {
+      const min = await this.minimumCents();
+      if (amount < min) {
+        throw new BadRequestException(`The smallest withdrawal is $${(min / 100).toFixed(2)}.`);
+      }
+    }
+
     const now = new Date().toISOString();
     const created = await this.post<PayoutRow[]>("provider_payouts", {
       provider_id: input.providerId,
       amount_cents: amount,
-      status: "requested",
+      // Claimed before it is sent. `sending` counts as committed, so the row
+      // itself is what stops a second withdrawal racing this one — see below.
+      status: instant ? "sending" : "requested",
       destination,
       note: input.note || null,
       requested_by: userId,
@@ -116,10 +138,41 @@ export class ProviderPayoutsService {
     });
     const row = created?.[0];
     if (!row) throw new BadRequestException("The request could not be recorded.");
-    this.logger.log(`[payout] request ${amount} from provider ${input.providerId} by ${userId}`);
-    await this.notifyAdminsOfRequest(row).catch((err) =>
-      this.logger.warn(`[payout] ${row.id}: could not notify admins — ${String(err)}`));
-    return row;
+
+    if (!instant) {
+      this.logger.log(`[payout] request ${amount} from provider ${input.providerId} by ${userId}`);
+      await this.notifyAdminsOfRequest(row).catch((err) =>
+        this.logger.warn(`[payout] ${row.id}: could not notify admins — ${String(err)}`));
+      return row;
+    }
+
+    // Verify AFTER claiming. The check above read a balance and then acted on
+    // it, which is fine one at a time and wrong when two withdrawals arrive
+    // together: both would see the same room and both would pass. Now each one
+    // has already written its claim, so re-reading the total tells us whether
+    // the two of them together exceed what was earned — and the one that finds
+    // it does voids itself rather than sending.
+    const after = await this.earnings.summarize(input.providerId);
+    if (after.committedCents > after.earnedCents) {
+      await this.finish(row.id, "rejected", {
+        decision_note: "Another withdrawal was in flight; this one would have exceeded the balance.",
+      });
+      throw new BadRequestException(
+        "Another withdrawal is already in progress. Check your payouts and try again.",
+      );
+    }
+
+    this.logger.log(`[payout] instant ${amount} for provider ${input.providerId} by ${userId}`);
+    return this.dispatch(row);
+  }
+
+  /** The smallest payout worth a routing fee. */
+  private async minimumCents(): Promise<number> {
+    const rows = await this.rest<Array<{ value: unknown }>>(
+      "global_settings?key=eq.payouts_min_cents&select=value&limit=1",
+    );
+    const value = Number(rows?.[0]?.value);
+    return Number.isFinite(value) && value > 0 ? Math.round(value) : 100;
   }
 
   /** What a provider may withdraw right now, and the arithmetic behind it. */
@@ -210,6 +263,22 @@ export class ProviderPayoutsService {
     );
     if (!claimed?.length) throw new BadRequestException("That payout is already on its way.");
 
+    return this.dispatch(claimed[0]);
+  }
+
+  /**
+   * Pay a row that has already been claimed as `sending`, and land it.
+   *
+   * Both ways to a payment end here — an admin pressing Send, and a provider
+   * withdrawing straight from their own screen — so there is one description
+   * of what SUCCESS, PENDING and failure each mean, rather than two that drift
+   * apart the first time one of them is fixed.
+   */
+  private async dispatch(payout: PayoutRow): Promise<PayoutRow> {
+    const id = payout.id;
+    const dest = classifyPayoutDestination(payout.destination) as
+      { kind: "lightning_address" | "onchain"; value: string };
+
     const memo = `EverySub payout ${id.slice(0, 8)}`;
     let result: { status: string; error: string | null };
     try {
@@ -240,6 +309,10 @@ export class ProviderPayoutsService {
       });
       this.logger.log(`[payout] ${id}: sent ${payout.amount_cents}c via ${dest.kind}`);
       await this.notifyDecision(paid, "paid", null).catch(() => undefined);
+      // With no approval step, this is the only moment an admin hears that
+      // money left the wallet. Best-effort, like every notification here.
+      await this.notifyAdminsOfPayment(paid).catch((err) =>
+        this.logger.warn(`[payout] ${id}: could not notify admins — ${String(err)}`));
       return paid;
     }
 
@@ -399,6 +472,17 @@ export class ProviderPayoutsService {
    * request is recorded whether or not anyone could be told about it.
    */
   private async notifyAdminsOfRequest(row: PayoutRow): Promise<void> {
+    await this.notifyAdmins(row, {
+      type: "payout_requested",
+      title: "Payout requested",
+      body: (name, dollars) => `${name} asked to withdraw ${dollars}.`,
+    });
+  }
+
+  private async notifyAdmins(
+    row: PayoutRow,
+    copy: { type: string; title: string; body: (name: string, dollars: string) => string },
+  ): Promise<void> {
     const [provider, admins] = await Promise.all([
       this.rest<Array<{ name: string }>>(
         `providers?id=eq.${encodeURIComponent(row.provider_id)}&select=name&limit=1`,
@@ -415,13 +499,22 @@ export class ProviderPayoutsService {
     await Promise.all(recipients.map((recipient) => this.post("user_notifications", {
       recipient_user_id: recipient,
       category: "payout",
-      type: "payout_requested",
-      title: "Payout requested",
-      body: `${name} asked to withdraw ${dollars}.`,
+      type: copy.type,
+      title: copy.title,
+      body: copy.body(name, dollars),
       related_entity_type: "provider_payout",
       related_entity_id: row.id,
       action_url: "/admin/payments",
     })));
+  }
+
+  /** Tell the admins money left the wallet. */
+  private async notifyAdminsOfPayment(row: PayoutRow): Promise<void> {
+    await this.notifyAdmins(row, {
+      type: "payout_sent",
+      title: "Payout sent",
+      body: (name, dollars) => `${dollars} went to ${name}.`,
+    });
   }
 
   /**

@@ -11,13 +11,17 @@ import { ProviderPayoutsService } from "./provider-payouts.service";
 
 type Row = Record<string, any>;
 
-function serviceWith(row: Row, blink: Partial<{ payoutsEnabled: boolean; sendPayout: jest.Mock }> = {}) {
+function serviceWith(
+  row: Row,
+  blink: Partial<{ payoutsEnabled: boolean; sendPayout: jest.Mock }> = {},
+  summarize?: jest.Mock,
+) {
   const store: Row = { ...row };
   const sendPayout = blink.sendPayout ?? jest.fn().mockResolvedValue({ status: "SUCCESS", error: null });
 
   const svc = new ProviderPayoutsService(
     { get: () => undefined } as any,
-    { summarize: jest.fn() } as any,
+    { summarize: summarize ?? jest.fn() } as any,
     { payoutsEnabled: blink.payoutsEnabled ?? true, sendPayout } as any,
   );
 
@@ -27,6 +31,7 @@ function serviceWith(row: Row, blink: Partial<{ payoutsEnabled: boolean; sendPay
   (svc as any).rest = jest.fn(async (path: string) => {
     if (path.startsWith("provider_payouts?id=eq.")) return [{ ...store }];
     if (path.startsWith("providers?id=eq.")) return [{ admin_user_id: "owner-1", name: "Beach Club" }];
+    if (path.startsWith("global_settings?key=eq.payouts_min_cents")) return [];
     return [];
   });
   (svc as any).patch = jest.fn(async (path: string, body: Row) => {
@@ -117,5 +122,108 @@ describe("ProviderPayoutsService.send", () => {
     const { svc, sendPayout } = serviceWith(APPROVED, { payoutsEnabled: false });
     await expect(svc.send(APPROVED.id, "admin-1")).rejects.toThrow(/switched off/);
     expect(sendPayout).not.toHaveBeenCalled();
+  });
+});
+
+
+/**
+ * Withdrawing with no approval in the way.
+ *
+ * With sending configured the provider's own button pays them, so the ceiling
+ * and the race are the only things standing between a balance and the wallet.
+ */
+describe("ProviderPayoutsService.request — instant", () => {
+  const OWNER = "owner-1";
+  const PROVIDER = "p1";
+
+  function instantService(opts: {
+    available: number; earned?: number; committedAfter?: number;
+    payoutsEnabled?: boolean; sendPayout?: jest.Mock;
+  }) {
+    const earned = opts.earned ?? opts.available;
+    const summarize = jest.fn()
+      // The check before the claim…
+      .mockResolvedValueOnce({
+        availableCents: opts.available, earnedCents: earned, committedCents: earned - opts.available,
+      })
+      // …and the re-read after it, which is what catches a concurrent one.
+      .mockResolvedValue({
+        availableCents: 0, earnedCents: earned, committedCents: opts.committedAfter ?? earned,
+      });
+
+    const { svc, store, sendPayout } = serviceWith(
+      { id: "row-1", provider_id: PROVIDER, status: "sending", destination: "elias@blink.sv", amount_cents: 0 },
+      { payoutsEnabled: opts.payoutsEnabled, sendPayout: opts.sendPayout },
+      summarize,
+    );
+    (svc as any).assertOwner = jest.fn();
+    (svc as any).post = jest.fn(async (_path: string, body: Row) => {
+      Object.assign(store, body, { id: "row-1" });
+      return [{ ...store }];
+    });
+    return { svc, store, sendPayout };
+  }
+
+  it("pays immediately instead of filing a request", async () => {
+    const { svc, store, sendPayout } = instantService({ available: 10_000 });
+    const row = await svc.request(
+      { providerId: PROVIDER, amountCents: 4_000, destination: "elias@blink.sv" },
+      OWNER,
+    );
+    expect(row.status).toBe("paid");
+    expect(store.paid_at).toBeTruthy();
+    expect(sendPayout).toHaveBeenCalledWith(expect.objectContaining({ amountCents: 4_000 }));
+  });
+
+  it("still files a request when the platform cannot send", async () => {
+    const { svc, sendPayout } = instantService({ available: 10_000, payoutsEnabled: false });
+    (svc as any).notifyAdminsOfRequest = jest.fn().mockResolvedValue(undefined);
+    const row = await svc.request(
+      { providerId: PROVIDER, amountCents: 4_000, destination: "elias@blink.sv" },
+      OWNER,
+    );
+    expect(row.status).toBe("requested");
+    expect(sendPayout).not.toHaveBeenCalled();
+  });
+
+  it("refuses more than the balance, with no person in the way to catch it", async () => {
+    const { svc, sendPayout } = instantService({ available: 3_000 });
+    await expect(svc.request(
+      { providerId: PROVIDER, amountCents: 4_000, destination: "elias@blink.sv" },
+      OWNER,
+    )).rejects.toThrow(/withdraw up to/);
+    expect(sendPayout).not.toHaveBeenCalled();
+  });
+
+  it("voids itself rather than sending when another withdrawal claimed the same money", async () => {
+    // The re-read after claiming reports more committed than earned — which is
+    // what two concurrent withdrawals of the same balance look like.
+    const { svc, store, sendPayout } = instantService({
+      available: 5_000, earned: 5_000, committedAfter: 9_000,
+    });
+    await expect(svc.request(
+      { providerId: PROVIDER, amountCents: 5_000, destination: "elias@blink.sv" },
+      OWNER,
+    )).rejects.toThrow(/already in progress/);
+    expect(sendPayout).not.toHaveBeenCalled();
+    expect(store.status).toBe("rejected");
+  });
+
+  it("refuses dust, which would cost more in routing than it moves", async () => {
+    const { svc, sendPayout } = instantService({ available: 10_000 });
+    await expect(svc.request(
+      { providerId: PROVIDER, amountCents: 40, destination: "elias@blink.sv" },
+      OWNER,
+    )).rejects.toThrow(/smallest withdrawal/);
+    expect(sendPayout).not.toHaveBeenCalled();
+  });
+
+  it("refuses a destination it cannot pay before writing anything", async () => {
+    const { svc, store } = instantService({ available: 10_000 });
+    await expect(svc.request(
+      { providerId: PROVIDER, amountCents: 4_000, destination: "not an address" },
+      OWNER,
+    )).rejects.toThrow(/Lightning address/);
+    expect(store.status).toBe("sending"); // untouched fixture, nothing was written
   });
 });
