@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger, ServiceUnavailableException } from "@nestjs/common";
+import { BadRequestException, ForbiddenException, Injectable, Logger, ServiceUnavailableException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "../prisma/prisma.service";
 import { EventBusService } from "../events/event-bus.service";
@@ -143,7 +143,17 @@ export class BookingService {
 
   // ── Write side ───────────────────────────────────────────────────────────
   /** Tentatively hold a slot (TTL). Rejects if the slot isn't generated or is already claimed. */
-  async hold(input: { resourceId: string; date: string; from: string; subjectRef?: string; ttlMinutes?: number; label?: string | null; notes?: string | null }) {
+  async hold(input: {
+    resourceId: string; date: string; from: string; subjectRef?: string;
+    ttlMinutes?: number; label?: string | null; notes?: string | null;
+    /**
+     * Skip the customer-facing policy (membership required, hours per period,
+     * how far ahead one may book). Only ever set for a booking the provider's
+     * own desk is taking: a walk-in paying cash has no membership, and the
+     * business deciding to seat them is the business's call, not the engine's.
+     */
+    bypassPolicy?: boolean;
+  }) {
     this.assertDb();
     const avail = await this.getAvailability(input.resourceId, input.date);
     const slot = avail.slots.find((s) => s.from === input.from);
@@ -156,7 +166,7 @@ export class BookingService {
     // Who may take this slot, and how many they already have. The schedule
     // decides that the slot exists; this decides that this customer may have
     // it. Both come from the provider's own settings.
-    await this.assertPolicyAllows(schedule.policy, resource, {
+    if (!input.bypassPolicy) await this.assertPolicyAllows(schedule.policy, resource, {
       ...input,
       // The slot's real length, so an allowance of "4 hours" is four hours and
       // not four bookings of whatever size this calendar happens to sell.
@@ -631,6 +641,76 @@ export class BookingService {
       payload: { bookingId, resourceId: b?.resourceId ?? null, orderRef: orderRef ?? null },
     });
     return { confirmed: true, bookingId };
+  }
+
+  /**
+   * A booking taken by the business, for someone else.
+   *
+   * Every write on this engine binds the booking to whoever called it, which
+   * is right for a customer and useless for a front desk: a provider phoning
+   * back a member, or seating a walk-in, could only book the court under their
+   * own name. This is the one path where the subject comes from the body, so
+   * it is also the one that has to prove who is asking.
+   *
+   * `customerUserId` is preferred — the booking then shows up in that person's
+   * own list and counts against their allowance. Without one it is a named
+   * walk-in: the label carries the name, and nothing else about them is
+   * invented.
+   */
+  async bookForCustomer(input: {
+    resourceId: string;
+    date: string;
+    from: string;
+    customerUserId?: string | null;
+    customerName?: string | null;
+    notes?: string | null;
+  }, actor: { userId: string; isStaff: boolean }) {
+    this.assertDb();
+    const resource = await this.resources.getResource(input.resourceId);
+    if (!resource) throw new BadRequestException("resource_not_found");
+    await this.assertRunsProvider(resource.provider_id ?? null, actor);
+
+    const name = (input.customerName ?? "").trim();
+    if (!input.customerUserId && !name) {
+      throw new BadRequestException("Say who this booking is for.");
+    }
+
+    const held = await this.hold({
+      resourceId: input.resourceId,
+      date: input.date,
+      from: input.from,
+      subjectRef: input.customerUserId ? `user:${input.customerUserId}` : `desk:${actor.userId}`,
+      // The desk decides. See hold().
+      bypassPolicy: true,
+      label: name || null,
+      notes: input.notes ?? null,
+    });
+    if (!held.held || !held.bookingId) {
+      throw new BadRequestException(held.reason === "slot_taken" ? "That slot is already taken." : "slot_unavailable");
+    }
+    await this.confirm(held.bookingId);
+    return { bookingId: held.bookingId };
+  }
+
+  /**
+   * Does this person run this business? Same rule as the occurrences endpoints:
+   * a platform admin, the provider's owner, or one of its managers. A provider
+   * with no owner (Apartment Cleaning is platform-run) is not therefore
+   * everybody's — it still takes a membership row or an admin.
+   */
+  private async assertRunsProvider(providerId: string | null, actor: { userId: string; isStaff: boolean }) {
+    if (actor.isStaff) return;
+    if (!providerId) throw new ForbiddenException("You don't run this business.");
+
+    const rows = await this.rest<Array<{ admin_user_id: string | null }>>(
+      `providers?id=eq.${encodeURIComponent(providerId)}&select=admin_user_id&limit=1`,
+    );
+    if (rows?.[0]?.admin_user_id && String(rows[0].admin_user_id) === String(actor.userId)) return;
+
+    const members = await this.rest<Array<{ id: string }>>(
+      `provider_members?provider_id=eq.${encodeURIComponent(providerId)}&user_id=eq.${encodeURIComponent(actor.userId)}&select=id&limit=1`,
+    );
+    if (!members?.length) throw new ForbiddenException("You don't run this business.");
   }
 
   /** Cancel a booking and promote the next waitlisted subject for its slot. */

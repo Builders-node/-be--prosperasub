@@ -12,6 +12,14 @@ class HoldDto {
   @IsOptional() @IsString() notes?: string;
 }
 class WaitlistDto extends HoldDto {}
+class DeskBookingDto {
+  @IsString() resource_id!: string;
+  @IsString() date!: string; // YYYY-MM-DD
+  @IsString() from!: string; // HH:MM
+  @IsOptional() @IsString() customer_user_id?: string;
+  @IsOptional() @IsString() customer_name?: string;
+  @IsOptional() @IsString() notes?: string;
+}
 class ConfirmDto {
   @IsOptional() @IsString() order_ref?: string;
 }
@@ -95,6 +103,28 @@ export class BookingController {
   @Post("holds/:id/confirm")
   confirm(@Param("id") id: string, @Body() body: ConfirmDto) {
     return this.booking.confirm(id, body.order_ref);
+  }
+
+  @ApiOperation({ summary: "Take a booking for a customer (provider desk / admin)" })
+  @UseGuards(AccountAuthGuard)
+  @Post("bookings/for-customer")
+  bookForCustomer(@Req() req: AccountRequest, @Body() body: DeskBookingDto) {
+    // The one endpoint where the subject comes from the body rather than the
+    // token — a front desk books for someone else by definition. The service
+    // proves the caller runs the business that owns the calendar.
+    const roles = req.authUser?.roles ?? [];
+    return this.booking.bookForCustomer(
+      {
+        resourceId: body.resource_id, date: body.date, from: body.from,
+        customerUserId: body.customer_user_id ?? null,
+        customerName: body.customer_name ?? null,
+        notes: body.notes ?? null,
+      },
+      {
+        userId: req.authUser!.id,
+        isStaff: roles.some((r) => ["admin", "super_admin"].includes(String(r))),
+      },
+    );
   }
 
   @ApiOperation({ summary: "Cancel a booking — your own, or anyone's if you are staff" })
