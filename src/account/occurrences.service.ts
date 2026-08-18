@@ -294,14 +294,25 @@ export class OccurrencesService {
       throw new BadRequestException("This delivery has no restaurant record to file against.");
     }
 
-    await this.post("food_delivery_logs", {
-      subscription_id: occ.source_subscription_id,
-      provider_id: legacyProvider,
-      delivery_date: day,
-      meal_type: occ.item_key,
-      status: legacyStatus,
-      reason,
-    });
+    // A real upsert, on the key the table actually enforces.
+    //
+    // This was a bare insert, and `food_delivery_logs` is unique on
+    // (subscription_id, delivery_date, meal_type). Any log already filed for
+    // that meal — by the generator, by a duplicate occurrence, by an earlier
+    // mark from a row that has since been re-created — turned a click on Done
+    // into a red 409 quoting a constraint name at the provider. Merging on
+    // conflict makes marking the same delivery twice a no-op instead.
+    await this.upsert(
+      "food_delivery_logs?on_conflict=subscription_id,delivery_date,meal_type",
+      {
+        subscription_id: occ.source_subscription_id,
+        provider_id: legacyProvider,
+        delivery_date: day,
+        meal_type: occ.item_key,
+        status: legacyStatus,
+        reason,
+      },
+    );
   }
 
   /**
@@ -404,6 +415,23 @@ export class OccurrencesService {
     if (!res.ok) {
       const text = await res.text().catch(() => "");
       throw new BadRequestException(`Update failed (${res.status}): ${text}`);
+    }
+  }
+
+  /** POST that updates the existing row when the unique key already matches. */
+  private async upsert(path: string, body: Record<string, unknown>): Promise<void> {
+    const { base } = this.creds();
+    const res = await fetch(`${base}/rest/v1/${path}`, {
+      method: "POST",
+      headers: this.headers({
+        "Content-Type": "application/json",
+        Prefer: "return=minimal,resolution=merge-duplicates",
+      }),
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new BadRequestException(`Save failed (${res.status}): ${text}`);
     }
   }
 
