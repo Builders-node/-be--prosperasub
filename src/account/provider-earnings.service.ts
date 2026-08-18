@@ -63,7 +63,7 @@ export interface EarningsSummary {
   revenueCents: number;
   /** The provider's share of it. */
   earnedCents: number;
-  /** Already requested, approved or sent — anything not rejected. */
+  /** Requested, approved, in flight or paid — everything except rejected and failed. */
   committedCents: number;
   /** earned − committed, floored at zero. The cap on a payout request. */
   availableCents: number;
@@ -216,7 +216,10 @@ export class ProviderEarningsService {
   private async committed(providerId: string): Promise<number> {
     const rows = await this.rest<Array<{ amount_cents: number }>>(
       `provider_payouts?provider_id=eq.${encodeURIComponent(providerId)}` +
-      `&status=in.(requested,approved,paid)&select=amount_cents`);
+      // `sending` is money Blink has already been told to move. Leaving it out
+      // would hand the provider a balance they could request a second time
+      // while the first payment was still routing.
+      `&status=in.(requested,approved,sending,paid)&select=amount_cents`);
     return (rows ?? []).reduce((sum, r) => sum + Number(r.amount_cents || 0), 0);
   }
 

@@ -1,6 +1,8 @@
 import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from "@nestjs/common";
 import { ProviderEarningsService } from "./provider-earnings.service";
 import { ConfigService } from "@nestjs/config";
+import { BlinkService } from "../payments/blink.service";
+import { classifyPayoutDestination, payoutDestinationProblem } from "../payments/payout-destination";
 
 /**
  * The payout ledger.
@@ -31,6 +33,9 @@ export interface PayoutRow {
   paid_at: string;
   created_by: string | null;
   created_at: string;
+  status?: "requested" | "approved" | "sending" | "paid" | "failed" | "rejected";
+  destination?: string | null;
+  send_error?: string | null;
 }
 
 export interface CreatePayoutInput {
@@ -59,6 +64,7 @@ export class ProviderPayoutsService {
   constructor(
     private readonly config: ConfigService,
     private readonly earnings: ProviderEarningsService,
+    private readonly blink: BlinkService,
   ) {}
 
   /**
@@ -81,6 +87,11 @@ export class ProviderPayoutsService {
     if (!destination) {
       throw new BadRequestException("Where should the money go? Add a Lightning or Bitcoin address.");
     }
+    // Checked here as well as at send time. The field used to take anything,
+    // so a typo could sit approved for days and only surface at the wallet —
+    // by which point the provider had been told the money was on its way.
+    const problem = payoutDestinationProblem(classifyPayoutDestination(destination));
+    if (problem) throw new BadRequestException(problem);
 
     const summary = await this.earnings.summarize(input.providerId);
     if (amount > summary.availableCents) {
@@ -106,6 +117,8 @@ export class ProviderPayoutsService {
     const row = created?.[0];
     if (!row) throw new BadRequestException("The request could not be recorded.");
     this.logger.log(`[payout] request ${amount} from provider ${input.providerId} by ${userId}`);
+    await this.notifyAdminsOfRequest(row).catch((err) =>
+      this.logger.warn(`[payout] ${row.id}: could not notify admins — ${String(err)}`));
     return row;
   }
 
@@ -135,6 +148,126 @@ export class ProviderPayoutsService {
     // rather than leaving them to poll the Money tab.
     await this.notifyDecision(row, decision, note ?? null).catch((err) =>
       this.logger.warn(`[payout] ${id}: could not notify — ${String(err)}`));
+    return row;
+  }
+
+  /**
+   * Actually send an approved payout, over Lightning or on-chain.
+   *
+   * The one place on this platform where money leaves. Everything about it is
+   * shaped by that:
+   *
+   *   • **It cannot double-send.** The row is moved `approved → sending` with
+   *     a conditional write, and the update is rejected if anything else got
+   *     there first. Two admins on two laptops, or one admin double-clicking,
+   *     produce one payment. This is why `sending` exists as a state rather
+   *     than being tracked in memory.
+   *
+   *   • **A failure never reads as paid.** Only SUCCESS writes `paid` and
+   *     stamps `paid_at`; a refusal writes `failed` with Blink's own words,
+   *     which releases the amount back into the provider's available balance
+   *     because `committed` counts requested/approved/sending/paid and not
+   *     failed.
+   *
+   *   • **PENDING stays in flight.** A Lightning payment still routing, or an
+   *     on-chain one broadcast and unconfirmed, is money already gone. It
+   *     stays `sending` — committed, not payable again — rather than being
+   *     retried into a second payment.
+   *
+   *   • **The amount is the approved one**, in cents, sent from the USD
+   *     wallet. No sats conversion sits in between, so a BTC price that moved
+   *     since approval cannot change what the provider receives.
+   */
+  async send(id: string, adminId: string | null): Promise<PayoutRow> {
+    if (!this.blink.payoutsEnabled) {
+      throw new BadRequestException(
+        "Sending from Blink is switched off. Set BLINK_PAYOUTS_ENABLED with a write-scoped key, or mark the payout as paid by hand.",
+      );
+    }
+
+    const rows = await this.rest<PayoutRow[]>(
+      `provider_payouts?id=eq.${encodeURIComponent(id)}&select=*&limit=1`,
+    );
+    const payout = rows?.[0];
+    if (!payout) throw new NotFoundException("Payout not found.");
+    if (payout.status !== "approved") {
+      throw new BadRequestException(
+        payout.status === "sending" ? "That payout is already on its way."
+        : payout.status === "paid" ? "That payout has already been paid."
+        : "Approve the payout first.",
+      );
+    }
+
+    const dest = classifyPayoutDestination(payout.destination);
+    const problem = payoutDestinationProblem(dest);
+    if (problem) throw new BadRequestException(problem);
+
+    // Claim it. `status=eq.approved` in the filter is the lock: whoever writes
+    // second gets no rows back and stops here rather than paying again.
+    const claimed = await this.patch<PayoutRow[]>(
+      `provider_payouts?id=eq.${encodeURIComponent(id)}&status=eq.approved`,
+      { status: "sending", send_error: null, decided_by: adminId, decided_at: new Date().toISOString() },
+    );
+    if (!claimed?.length) throw new BadRequestException("That payout is already on its way.");
+
+    const memo = `EverySub payout ${id.slice(0, 8)}`;
+    let result: { status: string; error: string | null };
+    try {
+      result = await this.blink.sendPayout({
+        destination: dest as { kind: "lightning_address" | "onchain"; value: string },
+        amountCents: payout.amount_cents,
+        memo,
+      });
+    } catch (err) {
+      // The call itself blew up — a network error, a bad key, Blink down. We
+      // do not know whether anything left, so this does NOT go back to
+      // approved: a human reads the error and the wallet before retrying.
+      const message = err instanceof Error ? err.message : String(err);
+      const stuck = await this.finish(id, "failed", { send_error: `Could not reach Blink: ${message}` });
+      this.logger.error(`[payout] ${id}: send threw — ${message}`);
+      return stuck;
+    }
+
+    if (result.status === "SUCCESS") {
+      const paid = await this.finish(id, "paid", {
+        paid_at: new Date().toISOString(),
+        method: dest.kind === "onchain" ? "onchain" : "lightning",
+        // Blink's send mutations answer with a status, not a hash. The memo is
+        // what ties this row to the entry in the wallet's own history, so it
+        // is what we keep rather than inventing a reference we do not have.
+        reference: memo,
+        send_error: null,
+      });
+      this.logger.log(`[payout] ${id}: sent ${payout.amount_cents}c via ${dest.kind}`);
+      await this.notifyDecision(paid, "paid", null).catch(() => undefined);
+      return paid;
+    }
+
+    if (result.status === "PENDING") {
+      this.logger.log(`[payout] ${id}: pending at Blink`);
+      return this.finish(id, "sending", {
+        method: dest.kind === "onchain" ? "onchain" : "lightning",
+        reference: memo,
+        send_error: null,
+      });
+    }
+
+    const reason = result.error
+      ?? (result.status === "ALREADY_PAID" ? "Blink says this was already paid." : "Blink refused the payment.");
+    this.logger.warn(`[payout] ${id}: ${result.status} — ${reason}`);
+    const failed = await this.finish(id, "failed", { send_error: reason });
+    await this.notifyDecision(failed, "failed", reason).catch(() => undefined);
+    return failed;
+  }
+
+  /** Land a payout in its final state. Separate so every exit writes the same shape. */
+  private async finish(id: string, status: string, extra: Record<string, unknown>): Promise<PayoutRow> {
+    const updated = await this.patch<PayoutRow[]>(
+      `provider_payouts?id=eq.${encodeURIComponent(id)}`,
+      { status, ...extra },
+    );
+    const row = updated?.[0];
+    if (!row) throw new NotFoundException("Payout not found.");
     return row;
   }
 
@@ -193,6 +326,41 @@ export class ProviderPayoutsService {
   }
 
   /**
+   * Tell the admins a provider is waiting to be paid.
+   *
+   * The provider is promised "you'll be notified once it's sent", and that
+   * promise only worked in one direction: a request landed in the queue and
+   * nothing said so, so it was seen whenever somebody happened to open
+   * Finance. Best-effort, like every other notification here — a payout
+   * request is recorded whether or not anyone could be told about it.
+   */
+  private async notifyAdminsOfRequest(row: PayoutRow): Promise<void> {
+    const [provider, admins] = await Promise.all([
+      this.rest<Array<{ name: string }>>(
+        `providers?id=eq.${encodeURIComponent(row.provider_id)}&select=name&limit=1`,
+      ),
+      this.rest<Array<{ user_id: string }>>(
+        `user_roles?select=user_id,roles!inner(name)&roles.name=in.(admin,super_admin)`,
+      ),
+    ]);
+    const name = provider?.[0]?.name ?? "A business";
+    const recipients = [...new Set((admins ?? []).map((r) => String(r.user_id)).filter(Boolean))];
+    if (!recipients.length) return;
+
+    const dollars = `$${(row.amount_cents / 100).toFixed(2)}`;
+    await Promise.all(recipients.map((recipient) => this.post("user_notifications", {
+      recipient_user_id: recipient,
+      category: "payout",
+      type: "payout_requested",
+      title: "Payout requested",
+      body: `${name} asked to withdraw ${dollars}.`,
+      related_entity_type: "provider_payout",
+      related_entity_id: row.id,
+      action_url: "/admin/payments",
+    })));
+  }
+
+  /**
    * Tell the owner. Best-effort by design: a notification that fails to send
    * must not roll back a decision an admin has already made.
    */
@@ -207,6 +375,13 @@ export class ProviderPayoutsService {
     const copy =
       decision === "paid"     ? { title: "Payout sent", body: `${dollars} is on its way to you.` }
       : decision === "approved" ? { title: "Payout approved", body: `${dollars} was approved and will be sent shortly.` }
+      // A send that did not go through is not a refusal, and telling a provider
+      // they were "declined" when the wallet simply could not route would be a
+      // lie they would act on. The money is back in their balance.
+      : decision === "failed" ? {
+          title: "Payout could not be sent",
+          body: `${dollars} did not go through and is available again.${note ? ` ${note}` : ""}`,
+        }
       : { title: "Payout declined", body: `Your ${dollars} request was declined.${note ? ` ${note}` : ""}` };
 
     await this.post("user_notifications", {

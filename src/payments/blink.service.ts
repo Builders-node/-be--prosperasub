@@ -222,6 +222,80 @@ export class BlinkService {
     return { paid, address, provider: "blink", status: paid ? "paid" : "pending" };
   }
 
+  /**
+   * Send money out of the platform's USD wallet.
+   *
+   * Everything else in this service RECEIVES; this is the one method that
+   * moves funds the other way, and it is only ever reached from an admin
+   * pressing Send on an approved payout. Two consequences worth stating:
+   *
+   *   • It is amount-in-cents, from the USD wallet, both for a Lightning
+   *     address and for an on-chain address. No sats arithmetic and no BTC
+   *     price lookup sits between the figure an admin approved and the figure
+   *     that leaves — a rate that moved between approval and send cannot
+   *     change what the provider is paid.
+   *
+   *   • PENDING is not failure. A Lightning payment can still be routing and
+   *     an on-chain one is broadcast but unconfirmed; the caller keeps such a
+   *     payout in flight rather than paying it twice.
+   */
+  async sendPayout(input: {
+    destination: { kind: "lightning_address" | "onchain"; value: string };
+    amountCents: number;
+    memo: string;
+  }): Promise<{ status: "SUCCESS" | "PENDING" | "FAILURE" | "ALREADY_PAID"; error: string | null }> {
+    if (!Number.isFinite(input.amountCents) || input.amountCents <= 0) {
+      throw new ServiceUnavailableException("A payout needs a positive amount.");
+    }
+    const walletId = this.walletId;
+    const amount = Math.round(input.amountCents);
+
+    const result = input.destination.kind === "lightning_address"
+      ? await this.request<{ lnAddressPaymentSend?: { status?: string; errors?: BlinkGraphQLError[] } }>(
+          `
+            mutation SendToLnAddress($input: LnAddressPaymentSendInput!) {
+              lnAddressPaymentSend(input: $input) {
+                status
+                errors { message }
+              }
+            }
+          `,
+          { input: { walletId, lnAddress: input.destination.value, amount } },
+        ).then((r) => r.lnAddressPaymentSend)
+      : await this.request<{ onChainUsdPaymentSend?: { status?: string; errors?: BlinkGraphQLError[] } }>(
+          `
+            mutation SendOnChain($input: OnChainUsdPaymentSendInput!) {
+              onChainUsdPaymentSend(input: $input) {
+                status
+                errors { message }
+              }
+            }
+          `,
+          { input: { walletId, address: input.destination.value, amount, memo: input.memo } },
+        ).then((r) => r.onChainUsdPaymentSend);
+
+    const error = result?.errors?.find((e) => e.message)?.message ?? null;
+    const status = (result?.status ?? (error ? "FAILURE" : "PENDING")).toUpperCase();
+    const known = ["SUCCESS", "PENDING", "FAILURE", "ALREADY_PAID"].includes(status);
+    return {
+      status: (known ? status : "FAILURE") as "SUCCESS" | "PENDING" | "FAILURE" | "ALREADY_PAID",
+      error,
+    };
+  }
+
+  /**
+   * Whether the platform is set up to send, as opposed to only receive.
+   *
+   * Paying out needs an API key with write scope, which the receive-only key
+   * does not have, so this is a separate switch: with it off the admin panel
+   * keeps the manual "mark as paid" it has always had and never offers a
+   * button that would fail at the wallet.
+   */
+  get payoutsEnabled(): boolean {
+    const flag = String(this.config.get<string>("BLINK_PAYOUTS_ENABLED") ?? "").toLowerCase();
+    return ["1", "true", "yes", "on"].includes(flag) && !!this.apiKey && !!this.walletId;
+  }
+
   private async request<T>(query: string, variables: Record<string, unknown>): Promise<T> {
     this.assertConfigured();
 

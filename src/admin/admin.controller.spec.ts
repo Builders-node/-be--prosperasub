@@ -14,6 +14,7 @@ describe("AdminController", () => {
       {} as any,
       {} as any,
       {} as any,
+      {} as any,
       {} as any
     );
 

@@ -18,6 +18,7 @@ import { ProviderCalendarService } from "../google-calendar/provider-calendar.se
 import { NotificationsService } from "../notifications/notifications.service";
 import { AdminAuthGuard, type AdminRequest } from "./admin-auth.guard";
 import { ProviderPayoutsService } from "../account/provider-payouts.service";
+import { BlinkService } from "../payments/blink.service";
 import { CreateProviderPayoutDto, DecideProviderPayoutDto } from "./dto/provider-payout.dto";
 import { AdminContentService } from "./admin-content.service";
 import { AdminPermission, RequireAdminPermission } from "./admin-permissions";
@@ -53,6 +54,7 @@ export class AdminController {
     private readonly providerCalendar: ProviderCalendarService,
     private readonly content: AdminContentService,
     private readonly payouts: ProviderPayoutsService,
+    private readonly blink: BlinkService,
   ) {}
 
   @ApiOperation({ summary: "Get platform overview metrics" })
@@ -786,6 +788,25 @@ export class AdminController {
   @RequireAdminPermission(AdminPermission.PaymentsRead)
   listPayoutRequests() {
     return this.payouts.pendingRequests();
+  }
+
+  @ApiOperation({ summary: "Whether the platform can send payouts itself" })
+  @Get("payouts/config")
+  @RequireAdminPermission(AdminPermission.PaymentsRead)
+  payoutConfig() {
+    // So the panel can show "Send now" or fall back to "Mark as paid" instead
+    // of offering a button that would answer with a configuration error.
+    return { blinkSendEnabled: this.blink.payoutsEnabled };
+  }
+
+  @ApiOperation({ summary: "Send an approved payout over Lightning or on-chain (Blink)" })
+  @Post("payouts/:id/send")
+  @RequireAdminPermission(AdminPermission.PaymentsWrite)
+  sendProviderPayout(@Param("id") id: string, @Req() request: AdminRequest) {
+    // The only endpoint on this platform that moves money outward. It refuses
+    // anything not already `approved`, so approving stays the deliberate step
+    // and this is the mechanical one.
+    return this.payouts.send(id, request.adminUser?.id ?? null);
   }
 
   @ApiOperation({ summary: "Approve, reject, or mark a payout request paid" })
