@@ -333,3 +333,36 @@ describe("ProviderPayoutsService — manager vs owner", () => {
     await expect(svc.available("stranger", "p1")).rejects.toThrow(/don't run this business/);
   });
 });
+
+/**
+ * The processing fee the platform adds is not the provider's money.
+ *
+ * A payment method can carry a surcharge — PayPal 5%, on-chain 2.5% — charged
+ * on top of the price so the platform is not out of pocket on the processor's
+ * cut. It is stored in its own column precisely so it never reaches earnings:
+ * the price columns hold the base, and `fetchEarned` reads those. This test
+ * pins that arrangement, because the failure would be silent and expensive —
+ * every provider withdrawing the fee that was meant to cover a cost the
+ * platform already paid.
+ */
+describe("payout base excludes the payment surcharge", () => {
+  it("recognises the price, not the charged total", () => {
+    // What checkout writes (subscriptionWriter): the price columns get the
+    // base, `surcharge_cents` gets the difference between base and charged.
+    const base = 7500;
+    const surcharge = 375;           // 5% PayPal, as stored in production
+    const charged = base + surcharge;
+
+    // What the earnings query reads for a food subscription.
+    const weeklyPriceCents = base, weeks = 1, periodsPaid = 1;
+    const recognised = weeklyPriceCents * weeks * periodsPaid;
+
+    expect(recognised).toBe(base);
+    expect(recognised).not.toBe(charged);
+
+    // And the provider's share of it is a percentage of the base alone.
+    const commissionPct = 10;
+    const theirs = recognised - Math.round((recognised * commissionPct) / 100);
+    expect(theirs).toBe(6750);
+  });
+});

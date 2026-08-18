@@ -137,6 +137,12 @@ export class ProviderEarningsService {
     // three-month plan contributes a third of its value to each month it
     // covers. The old per-unit and per-month models needed a headcount and a
     // span as well; a percentage needs only the money.
+    //
+    // Every column read below is the PRICE, never the charged total. A payment
+    // method's surcharge (PayPal 5%, on-chain 2.5%) is added on top at checkout
+    // and stored in `surcharge_cents` of its own — it exists to cover what the
+    // processor takes, so it is not revenue and must never reach a payout. Do
+    // not "fix" these sums by adding it back.
     const acc = (rows: Array<Record<string, any>> | null, toInput: (r: any) => Recognition) => ({
       revenue: (rows ?? []).reduce((sum, r) => sum + recognizedCents(toInput(r), start, end), 0),
     });
