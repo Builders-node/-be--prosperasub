@@ -189,3 +189,75 @@ describe("BlinkService payout key", () => {
     expect(svc({ BLINK_PAYOUTS_ENABLED: "true", BLINK_WALLET_ID: "w" }).payoutsEnabled).toBe(false);
   });
 });
+
+/**
+ * The unit each rail counts in.
+ *
+ * A $1.00 payout once left as 100 sats — $0.07 — because cents were handed to
+ * a mutation whose schema says SatAmount. These are the tests that stop that
+ * from being possible again.
+ */
+describe("BlinkService.sendPayout units", () => {
+  const RATE = { realtimePrice: { btcSatPrice: { base: 64130968750, offset: 12 } } };
+
+  function svc(sendResult: any = { status: "SUCCESS" }, rate: any = RATE) {
+    const s: any = new (require("./blink.service").BlinkService)({
+      get: (k: string) => ({
+        BLINK_API_KEY: "k", BLINK_WALLET_ID: "usd-wallet", BLINK_PAYOUTS_ENABLED: "true",
+      } as any)[k],
+    } as any);
+    const calls: any[] = [];
+    s.request = jest.fn(async (query: string, vars: any) => {
+      calls.push({ query, vars });
+      if (query.includes("realtimePrice")) return rate;
+      if (query.includes("lnAddressPaymentSend")) return { lnAddressPaymentSend: sendResult };
+      return { onChainUsdPaymentSend: sendResult };
+    });
+    return { s, calls };
+  }
+
+  it("converts cents to sats for a Lightning address", async () => {
+    const { s, calls } = svc();
+    // 100 cents at 0.0641309…c per sat ≈ 1559 sats, not 100.
+    const out = await s.sendPayout({
+      destination: { kind: "lightning_address", value: "elias@blink.sv" },
+      amountCents: 100, memo: "m",
+    });
+    const send = calls.find((c) => c.query.includes("lnAddressPaymentSend"));
+    expect(send.vars.input.amount).toBe(1559);
+    expect(out).toMatchObject({ sentAmount: 1559, sentUnit: "sat" });
+  });
+
+  it("passes cents straight through on-chain, where the schema wants CentAmount", async () => {
+    const { s, calls } = svc();
+    const out = await s.sendPayout({
+      destination: { kind: "onchain", value: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq" },
+      amountCents: 2500, memo: "m",
+    });
+    const send = calls.find((c) => c.query.includes("onChainUsdPaymentSend"));
+    expect(send.vars.input.amount).toBe(2500);
+    expect(out).toMatchObject({ sentAmount: 2500, sentUnit: "cent" });
+    expect(calls.some((c) => c.query.includes("realtimePrice"))).toBe(false);
+  });
+
+  it("sends nothing when it cannot get a rate", async () => {
+    const { s, calls } = svc({ status: "SUCCESS" }, { realtimePrice: null });
+    await expect(s.sendPayout({
+      destination: { kind: "lightning_address", value: "elias@blink.sv" },
+      amountCents: 100, memo: "m",
+    })).rejects.toThrow(/Could not price/);
+    expect(calls.some((c) => c.query.includes("PaymentSend"))).toBe(false);
+  });
+
+  it("sends nothing when the rate is absurd", async () => {
+    // base/10^offset here implies roughly $6.41 per BTC.
+    const { s, calls } = svc({ status: "SUCCESS" }, {
+      realtimePrice: { btcSatPrice: { base: 64130968750, offset: 21 } },
+    });
+    await expect(s.sendPayout({
+      destination: { kind: "lightning_address", value: "elias@blink.sv" },
+      amountCents: 100, memo: "m",
+    })).rejects.toThrow(/rate looked wrong/);
+    expect(calls.some((c) => c.query.includes("PaymentSend"))).toBe(false);
+  });
+});

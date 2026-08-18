@@ -229,11 +229,12 @@ export class BlinkService {
    * moves funds the other way, and it is only ever reached from an admin
    * pressing Send on an approved payout. Two consequences worth stating:
    *
-   *   • It is amount-in-cents, from the USD wallet, both for a Lightning
-   *     address and for an on-chain address. No sats arithmetic and no BTC
-   *     price lookup sits between the figure an admin approved and the figure
-   *     that leaves — a rate that moved between approval and send cannot
-   *     change what the provider is paid.
+   *   • **The two rails count in different units, and Blink's schema is the
+   *     authority on which.** `onChainUsdPaymentSend.amount` is a CentAmount,
+   *     so on-chain takes the figure as-is. `lnAddressPaymentSend.amount` is a
+   *     **SatAmount** — passing cents there sent 100 sats for a $1.00 payout
+   *     ($0.07 arrived) because the number was read as sats. Lightning is
+   *     therefore priced through `satsForCents` immediately before sending.
    *
    *   • PENDING is not failure. A Lightning payment can still be routing and
    *     an on-chain one is broadcast but unconfirmed; the caller keeps such a
@@ -243,14 +244,25 @@ export class BlinkService {
     destination: { kind: "lightning_address" | "onchain"; value: string };
     amountCents: number;
     memo: string;
-  }): Promise<{ status: "SUCCESS" | "PENDING" | "FAILURE" | "ALREADY_PAID"; error: string | null }> {
+  }): Promise<{
+    status: "SUCCESS" | "PENDING" | "FAILURE" | "ALREADY_PAID";
+    error: string | null;
+    /** What actually left, in the unit Blink counted it in. */
+    sentAmount: number;
+    sentUnit: "sat" | "cent";
+  }> {
     if (!Number.isFinite(input.amountCents) || input.amountCents <= 0) {
       throw new ServiceUnavailableException("A payout needs a positive amount.");
     }
     const walletId = this.walletId;
-    const amount = Math.round(input.amountCents);
+    const cents = Math.round(input.amountCents);
     // Sent with the payout key, not the checkout one. See `payoutApiKey`.
     const key = this.payoutApiKey;
+
+    // Lightning is denominated in sats by the schema; on-chain USD in cents.
+    const amount = input.destination.kind === "lightning_address"
+      ? await this.satsForCents(cents)
+      : cents;
 
     const result = input.destination.kind === "lightning_address"
       ? await this.request<{ lnAddressPaymentSend?: { status?: string; errors?: BlinkGraphQLError[] } }>(
@@ -284,7 +296,57 @@ export class BlinkService {
     return {
       status: (known ? status : "FAILURE") as "SUCCESS" | "PENDING" | "FAILURE" | "ALREADY_PAID",
       error,
+      sentAmount: amount,
+      sentUnit: input.destination.kind === "lightning_address" ? "sat" : "cent",
     };
+  }
+
+  /**
+   * USD cents as sats, at Blink's own rate.
+   *
+   * `lnAddressPaymentSend` takes a SatAmount, so a payout figure that lives in
+   * cents everywhere else has to be converted at the last moment — and by the
+   * same house that is about to move the money, so our number and theirs
+   * cannot disagree.
+   *
+   * Unlike the balance check, this **fails closed**. A payment we could not
+   * price is exactly the failure that already happened once: sending a number
+   * whose unit nobody had established. Better a refusal than a payout at a
+   * rate nobody chose.
+   */
+  private async satsForCents(cents: number): Promise<number> {
+    const result = await this.request<{
+      realtimePrice?: { btcSatPrice?: { base?: number; offset?: number } };
+    }>(
+      `
+        query PayoutRate($currency: DisplayCurrency) {
+          realtimePrice(currency: $currency) {
+            btcSatPrice { base offset }
+          }
+        }
+      `,
+      { currency: "USD" },
+      this.payoutApiKey,
+    );
+
+    const base = Number(result.realtimePrice?.btcSatPrice?.base);
+    const offset = Number(result.realtimePrice?.btcSatPrice?.offset);
+    if (!Number.isFinite(base) || base <= 0 || !Number.isFinite(offset) || offset < 0) {
+      throw new ServiceUnavailableException("Could not price this payout — nothing was sent.");
+    }
+
+    // `btcSatPrice` is what one sat costs in cents, scaled by 10^offset.
+    const centsPerSat = base / 10 ** offset;
+    const sats = Math.round(cents / centsPerSat);
+
+    // A price feed that has gone strange must not become a payout a hundred
+    // times too big. One BTC is 100,000,000 sats; this brackets the implied
+    // price to somewhere between $1k and $10M and refuses outside it.
+    const impliedBtcUsd = (centsPerSat * 100_000_000) / 100;
+    if (!Number.isFinite(sats) || sats <= 0 || impliedBtcUsd < 1_000 || impliedBtcUsd > 10_000_000) {
+      throw new ServiceUnavailableException("The exchange rate looked wrong — nothing was sent.");
+    }
+    return sats;
   }
 
   /**

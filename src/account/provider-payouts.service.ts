@@ -306,7 +306,7 @@ export class ProviderPayoutsService {
       { kind: "lightning_address" | "onchain"; value: string };
 
     const memo = `EverySub payout ${id.slice(0, 8)}`;
-    let result: { status: string; error: string | null };
+    let result: { status: string; error: string | null; sentAmount?: number; sentUnit?: string };
     try {
       result = await this.blink.sendPayout({
         destination: dest as { kind: "lightning_address" | "onchain"; value: string },
@@ -328,9 +328,12 @@ export class ProviderPayoutsService {
         paid_at: new Date().toISOString(),
         method: dest.kind === "onchain" ? "onchain" : "lightning",
         // Blink's send mutations answer with a status, not a hash. The memo is
-        // what ties this row to the entry in the wallet's own history, so it
-        // is what we keep rather than inventing a reference we do not have.
-        reference: memo,
+        // what ties this row to the entry in the wallet's own history — and
+        // the amount in the unit Blink counted goes beside it, because the one
+        // time those two disagreed the ledger said $1.00 and 100 sats left.
+        reference: result.sentAmount != null
+          ? `${memo} · ${result.sentAmount} ${result.sentUnit}`
+          : memo,
         send_error: null,
       });
       this.logger.log(`[payout] ${id}: sent ${payout.amount_cents}c via ${dest.kind}`);
