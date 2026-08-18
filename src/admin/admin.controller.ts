@@ -783,6 +783,24 @@ export class AdminController {
     );
   }
 
+  @ApiOperation({ summary: "What each business is owed right now, before any settlement" })
+  @Get("payouts/outstanding")
+  @RequireAdminPermission(AdminPermission.PaymentsRead)
+  listOutstanding() {
+    return this.payouts.outstanding();
+  }
+
+  @ApiOperation({ summary: "Record that everything owed to this business has been settled" })
+  @Post("providers/:providerId/payouts/settle")
+  @RequireAdminPermission(AdminPermission.PaymentsWrite)
+  settleProvider(
+    @Param("providerId") providerId: string,
+    @Body() body: { note?: string },
+    @Req() request: AdminRequest,
+  ) {
+    return this.payouts.settle(providerId, request.adminUser?.id ?? null, body?.note ?? null);
+  }
+
   @ApiOperation({ summary: "Open payout requests across every provider" })
   @Get("payouts/requests")
   @RequireAdminPermission(AdminPermission.PaymentsRead)

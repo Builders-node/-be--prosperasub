@@ -271,6 +271,70 @@ export class ProviderPayoutsService {
     return row;
   }
 
+  /**
+   * Draw a line: everything earned up to now has already been settled.
+   *
+   * This platform started paying providers before it could pay them. All of
+   * that money has changed hands outside the system, so on the day the send
+   * button appeared every business was owed its entire history over again —
+   * `available` is all-time earnings minus recorded payouts, and there were no
+   * recorded payouts.
+   *
+   * Rather than a cut-off date bolted onto the revenue query, the settlement
+   * is written where every other payment is: one `paid` row for exactly what
+   * is outstanding, marked as settled outside the platform. The arithmetic
+   * stays "earned minus paid" with nothing special in it, the history says
+   * plainly what happened, and tomorrow's newly recognised revenue is the only
+   * thing left to withdraw.
+   *
+   * It stays useful after the one-off, too — a provider paid by hand in cash
+   * is the same event, and this is how it gets into the ledger.
+   */
+  async settle(providerId: string, adminId: string | null, note?: string | null): Promise<PayoutRow> {
+    const summary = await this.earnings.summarize(providerId);
+    if (summary.availableCents <= 0) {
+      throw new BadRequestException("There is nothing outstanding for this business.");
+    }
+
+    const row = await this.create({
+      providerId,
+      amountCents: summary.availableCents,
+      method: "settlement",
+      reference: "settled-outside-platform",
+      note: note?.trim()
+        || "Settled outside the platform — everything earned up to this date was already paid.",
+    }, adminId);
+
+    this.logger.log(`[payout] settled ${summary.availableCents}c for provider ${providerId} by ${adminId ?? "unknown"}`);
+    return row;
+  }
+
+  /**
+   * What settling would record, without recording it.
+   *
+   * An admin about to write a payment into the ledger should see the figure
+   * first, per business, and see it come from the same calculation the button
+   * will use rather than from a screen that might be a minute stale.
+   */
+  async outstanding(): Promise<Array<{ providerId: string; name: string; availableCents: number; commissionPct: number }>> {
+    const providers = await this.rest<Array<{ id: string; name: string; status: string | null }>>(
+      `providers?select=id,name,status&order=name`,
+    );
+    const out: Array<{ providerId: string; name: string; availableCents: number; commissionPct: number }> = [];
+    for (const p of providers ?? []) {
+      const summary = await this.earnings.summarize(p.id);
+      if (summary.availableCents > 0) {
+        out.push({
+          providerId: p.id,
+          name: p.name,
+          availableCents: summary.availableCents,
+          commissionPct: summary.commissionPct,
+        });
+      }
+    }
+    return out;
+  }
+
   /** Every open request across all providers — the admin's queue. */
   async pendingRequests(): Promise<PayoutRow[]> {
     const rows = await this.rest<PayoutRow[]>(
