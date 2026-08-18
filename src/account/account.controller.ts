@@ -358,6 +358,13 @@ export class AccountController {
   }
 
   @ApiOperation({ summary: "Move an occurrence to another time" })
+  @ApiOperation({ summary: "Remove an occurrence — cancels what it holds, then deletes it" })
+  @Delete("occurrences/:id")
+  removeOccurrence(@Req() req: AccountRequest, @Param("id") id: string) {
+    const isAdmin = (req.authUser?.roles ?? []).includes("SUPER_ADMIN");
+    return this.occurrences.remove(req.authUser!.id, id, isAdmin);
+  }
+
   @Post("occurrences/:id/reschedule")
   rescheduleOccurrence(@Req() req: AccountRequest, @Param("id") id: string, @Body() body: OccurrenceRescheduleDto) {
     const isAdmin = (req.authUser?.roles ?? []).includes("SUPER_ADMIN");

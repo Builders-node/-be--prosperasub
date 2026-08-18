@@ -149,6 +149,38 @@ export class OccurrencesService {
     return this.load(occurrenceId);
   }
 
+  /**
+   * Take an occurrence off the list for good.
+   *
+   * Deleting the row alone would leave the thing it mirrors still standing —
+   * a court held for a booking nobody can see, a cleaning slot still counted
+   * against capacity. So this cancels first, through the same path the
+   * Cancel action uses, and only then removes the row. The order matters: if
+   * the cancel fails, nothing is deleted and the provider still has something
+   * to act on.
+   *
+   * This is for rows that should never have existed — a test, a duplicate, a
+   * booking taken by mistake. A real occurrence that simply did not happen
+   * belongs in `failed`, where it stays visible and counts against nothing.
+   */
+  async remove(userId: string, occurrenceId: string, isAdmin: boolean): Promise<{ ok: true }> {
+    const occ = await this.load(occurrenceId);
+    await this.assertOwner(userId, occ.provider_id, isAdmin);
+
+    // Free whatever it holds. Already-cancelled rows skip straight to the
+    // delete — cancelling twice is not an error, but it is a wasted write.
+    if (occ.status !== "cancelled") {
+      await this.setStatus(userId, occurrenceId, isAdmin, {
+        status: "cancelled",
+        reason: "Removed by the provider",
+      });
+    }
+
+    await this.del(`service_occurrences?id=eq.${this.enc(occurrenceId)}`);
+    this.logger.log(`[occurrence] ${occurrenceId} removed by ${userId}`);
+    return { ok: true };
+  }
+
   /** Who is doing it, and anything the provider wants written on it. */
   async annotate(userId: string, occurrenceId: string, isAdmin: boolean, input: {
     assignee?: string | null; notes?: string | null;
@@ -372,6 +404,18 @@ export class OccurrencesService {
     if (!res.ok) {
       const text = await res.text().catch(() => "");
       throw new BadRequestException(`Update failed (${res.status}): ${text}`);
+    }
+  }
+
+  private async del(path: string): Promise<void> {
+    const { base } = this.creds();
+    const res = await fetch(`${base}/rest/v1/${path}`, {
+      method: "DELETE",
+      headers: this.headers({ Prefer: "return=minimal" }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new BadRequestException(`Delete failed (${res.status}): ${text}`);
     }
   }
 

@@ -201,8 +201,23 @@ export class ProviderPayoutsService {
 
   /** What a provider may withdraw right now, and the arithmetic behind it. */
   async available(userId: string, providerId: string, isAdmin = false) {
-    await this.assertOwner(userId, providerId, isAdmin);
-    return this.earnings.summarize(providerId);
+    // A manager may read it. Only the owner may act on it — see `request`.
+    await this.assertRuns(userId, providerId, isAdmin);
+    const summary = await this.earnings.summarize(providerId);
+    // Answered by the same rule the write path enforces, so the screen cannot
+    // offer a button the endpoint will refuse. The browser used to decide this
+    // for itself and disagreed: a `provider_members` row with role "owner"
+    // counted there and does not here.
+    return { ...summary, canWithdraw: await this.mayWithdraw(userId, providerId, isAdmin) };
+  }
+
+  private async mayWithdraw(userId: string, providerId: string, isAdmin: boolean): Promise<boolean> {
+    try {
+      await this.assertOwner(userId, providerId, isAdmin);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /** Admin decision on a request: approve, reject, or mark the money sent. */
@@ -447,7 +462,7 @@ export class ProviderPayoutsService {
 
   /** Payouts for one provider, newest first. Throws unless the caller owns it. */
   async listForOwner(userId: string, providerId: string, isAdmin = false): Promise<PayoutRow[]> {
-    await this.assertOwner(userId, providerId, isAdmin);
+    await this.assertRuns(userId, providerId, isAdmin);
     return this.list(providerId);
   }
 
@@ -582,6 +597,38 @@ export class ProviderPayoutsService {
     });
   }
 
+  /**
+   * Anyone who runs this business: the owner, one of its managers, or a
+   * platform admin.
+   *
+   * Deliberately weaker than `assertOwner`, and used only for reading. A
+   * manager runs the day and needs to see what came in, what the platform
+   * kept and what has been paid — the tab would be an error card otherwise.
+   * What they cannot do is move it.
+   */
+  private async assertRuns(userId: string, providerId: string, isAdmin: boolean): Promise<void> {
+    if (isAdmin) return;
+    const rows = await this.rest<Array<{ admin_user_id: string | null }>>(
+      `providers?id=eq.${encodeURIComponent(providerId)}&select=admin_user_id&limit=1`,
+    );
+    const row = rows?.[0];
+    if (!row) throw new NotFoundException("Provider not found.");
+    if (row.admin_user_id && String(row.admin_user_id) === String(userId)) return;
+
+    const members = await this.rest<Array<{ id: string }>>(
+      `provider_members?provider_id=eq.${encodeURIComponent(providerId)}` +
+      `&user_id=eq.${encodeURIComponent(userId)}&select=id&limit=1`,
+    );
+    if (!members?.length) throw new ForbiddenException("You don't run this business.");
+  }
+
+  /**
+   * The owner alone, or a platform admin.
+   *
+   * This is the line the whole feature turns on: a manager can see every
+   * figure on the Money tab and cannot send a cent of it. Membership is not
+   * consulted here on purpose.
+   */
   private async assertOwner(userId: string, providerId: string, isAdmin: boolean): Promise<void> {
     if (isAdmin) return;
     const rows = await this.rest<Array<{ admin_user_id: string | null }>>(

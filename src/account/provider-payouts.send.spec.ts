@@ -268,3 +268,68 @@ describe("ProviderPayoutsService — the wallet has to cover it", () => {
     expect(sendPayout).toHaveBeenCalledTimes(1);
   });
 });
+
+/**
+ * Who may see the money, and who may move it.
+ *
+ * A manager runs the business day to day; the payout ledger is the owner's.
+ * These two rules used to be one, which is why the Money tab was hidden from
+ * managers entirely rather than shown without its button.
+ */
+describe("ProviderPayoutsService — manager vs owner", () => {
+  function svcFor(provider: { admin_user_id: string | null }, members: string[]) {
+    const svc = new ProviderPayoutsService(
+      { get: () => undefined } as any,
+      { summarize: jest.fn().mockResolvedValue({ availableCents: 500, earnedCents: 500, committedCents: 0 }) } as any,
+      { payoutsEnabled: false } as any,
+    );
+    (svc as any).rest = jest.fn(async (path: string) => {
+      if (path.startsWith("providers?id=eq.")) return [provider];
+      if (path.startsWith("provider_members?")) {
+        const uid = /user_id=eq\.([^&]+)/.exec(path)?.[1];
+        return members.includes(String(uid)) ? [{ id: "m1" }] : [];
+      }
+      return [];
+    });
+    return svc;
+  }
+
+  const OWNED = { admin_user_id: "owner-1" };
+
+  it("lets a manager read the balance, and says they cannot withdraw", async () => {
+    const svc = svcFor(OWNED, ["manager-1"]);
+    const out: any = await svc.available("manager-1", "p1");
+    expect(out.availableCents).toBe(500);
+    expect(out.canWithdraw).toBe(false);
+  });
+
+  it("tells the owner they can", async () => {
+    const svc = svcFor(OWNED, []);
+    const out: any = await svc.available("owner-1", "p1");
+    expect(out.canWithdraw).toBe(true);
+  });
+
+  it("refuses a manager's withdrawal outright", async () => {
+    const svc = svcFor(OWNED, ["manager-1"]);
+    (svc as any).post = jest.fn();
+    await expect(svc.request(
+      { providerId: "p1", amountCents: 100, destination: "elias@blink.sv" },
+      "manager-1",
+    )).rejects.toThrow(/don't own this business/);
+    expect((svc as any).post).not.toHaveBeenCalled();
+  });
+
+  it("refuses a stranger even the reading", async () => {
+    const svc = svcFor(OWNED, []);
+    await expect(svc.available("nobody", "p1")).rejects.toThrow(/don't run this business/);
+  });
+
+  it("a platform-run business with no owner is not therefore everyone's", async () => {
+    // Beach Club has admin_user_id NULL. A manager may read it; nobody but a
+    // platform admin may withdraw from it.
+    const svc = svcFor({ admin_user_id: null }, ["manager-1"]);
+    const out: any = await svc.available("manager-1", "p1");
+    expect(out.canWithdraw).toBe(false);
+    await expect(svc.available("stranger", "p1")).rejects.toThrow(/don't run this business/);
+  });
+});
