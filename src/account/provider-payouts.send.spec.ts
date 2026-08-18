@@ -22,7 +22,11 @@ function serviceWith(
   const svc = new ProviderPayoutsService(
     { get: () => undefined } as any,
     { summarize: summarize ?? jest.fn() } as any,
-    { payoutsEnabled: blink.payoutsEnabled ?? true, sendPayout } as any,
+    {
+      payoutsEnabled: blink.payoutsEnabled ?? true,
+      sendPayout,
+      usdBalanceCents: (blink as any).usdBalanceCents ?? jest.fn().mockResolvedValue(1_000_000),
+    } as any,
   );
 
   // Stand in for the REST helpers. `patch` honours a `status=eq.` filter the
@@ -138,7 +142,7 @@ describe("ProviderPayoutsService.request — instant", () => {
 
   function instantService(opts: {
     available: number; earned?: number; committedAfter?: number;
-    payoutsEnabled?: boolean; sendPayout?: jest.Mock;
+    payoutsEnabled?: boolean; sendPayout?: jest.Mock; usdBalanceCents?: jest.Mock;
   }) {
     const earned = opts.earned ?? opts.available;
     const summarize = jest.fn()
@@ -153,7 +157,8 @@ describe("ProviderPayoutsService.request — instant", () => {
 
     const { svc, store, sendPayout } = serviceWith(
       { id: "row-1", provider_id: PROVIDER, status: "sending", destination: "elias@blink.sv", amount_cents: 0 },
-      { payoutsEnabled: opts.payoutsEnabled, sendPayout: opts.sendPayout },
+      { payoutsEnabled: opts.payoutsEnabled, sendPayout: opts.sendPayout,
+        usdBalanceCents: opts.usdBalanceCents } as any,
       summarize,
     );
     (svc as any).assertOwner = jest.fn();
@@ -225,5 +230,41 @@ describe("ProviderPayoutsService.request — instant", () => {
       OWNER,
     )).rejects.toThrow(/Lightning address/);
     expect(store.status).toBe("sending"); // untouched fixture, nothing was written
+  });
+});
+
+
+describe("ProviderPayoutsService — the wallet has to cover it", () => {
+  const ROW: Row = {
+    id: "11111111-2222-3333-4444-555555555555",
+    provider_id: "p1", amount_cents: 5000, status: "approved", destination: "elias@blink.sv",
+  };
+
+  it("refuses before claiming when the USD wallet is short", async () => {
+    const { svc, store, sendPayout } = serviceWith(ROW, {
+      usdBalanceCents: jest.fn().mockResolvedValue(1_000),
+    } as any);
+    await expect(svc.send(ROW.id, "admin-1")).rejects.toThrow(/temporarily unavailable/);
+    expect(sendPayout).not.toHaveBeenCalled();
+    // Untouched — nothing to unwind, because nothing was claimed.
+    expect(store.status).toBe("approved");
+  });
+
+  it("sends when the balance covers it exactly", async () => {
+    const { svc, sendPayout } = serviceWith(ROW, {
+      usdBalanceCents: jest.fn().mockResolvedValue(5_000),
+    } as any);
+    await svc.send(ROW.id, "admin-1");
+    expect(sendPayout).toHaveBeenCalledTimes(1);
+  });
+
+  it("a balance it cannot read does not hold up the payment", async () => {
+    // Fail-open on purpose: a transient error must not withhold money that
+    // would have sent, and a genuinely short wallet still fails at the send.
+    const { svc, sendPayout } = serviceWith(ROW, {
+      usdBalanceCents: jest.fn().mockResolvedValue(null),
+    } as any);
+    await svc.send(ROW.id, "admin-1");
+    expect(sendPayout).toHaveBeenCalledTimes(1);
   });
 });

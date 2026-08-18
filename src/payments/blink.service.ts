@@ -288,6 +288,48 @@ export class BlinkService {
   }
 
   /**
+   * What the USD wallet actually holds, in cents.
+   *
+   * Payouts are drawn from this wallet and nothing else tops it up
+   * automatically: Lightning receipts land here, but on-chain ones go to the
+   * BTC wallet, so it can run dry while the platform as a whole is solvent.
+   * Checking first turns "your payment failed" — after the provider pressed a
+   * button that says it cannot be undone — into "not right now".
+   *
+   * `null` means we could not find out, which is deliberately different from
+   * zero: a transient error reading the balance must not hold up money that
+   * would have sent perfectly well.
+   */
+  async usdBalanceCents(): Promise<number | null> {
+    try {
+      const result = await this.request<{
+        me?: { defaultAccount?: { wallets?: Array<{ id?: string; walletCurrency?: string; balance?: number }> } };
+      }>(
+        `
+          query WalletBalances {
+            me {
+              defaultAccount {
+                wallets { id walletCurrency balance }
+              }
+            }
+          }
+        `,
+        {},
+        this.payoutApiKey,
+      );
+      const wallets = result.me?.defaultAccount?.wallets ?? [];
+      // By id first — that is the wallet payouts are actually drawn from —
+      // then by currency for an account whose id we were not given.
+      const wallet = wallets.find((w) => w.id === this.walletId)
+        ?? wallets.find((w) => (w.walletCurrency ?? "").toUpperCase() === "USD");
+      const balance = Number(wallet?.balance);
+      return Number.isFinite(balance) ? Math.round(balance) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Whether the platform is set up to send, as opposed to only receive.
    *
    * Paying out needs an API key with write scope, which the receive-only key

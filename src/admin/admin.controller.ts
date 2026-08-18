@@ -811,10 +811,15 @@ export class AdminController {
   @ApiOperation({ summary: "Whether the platform can send payouts itself" })
   @Get("payouts/config")
   @RequireAdminPermission(AdminPermission.PaymentsRead)
-  payoutConfig() {
+  async payoutConfig() {
     // So the panel can show "Send now" or fall back to "Mark as paid" instead
-    // of offering a button that would answer with a configuration error.
-    return { blinkSendEnabled: this.blink.payoutsEnabled };
+    // of offering a button that would answer with a configuration error — and
+    // so an admin can see the wallet running low before a provider does.
+    const blinkSendEnabled = this.blink.payoutsEnabled;
+    return {
+      blinkSendEnabled,
+      walletBalanceCents: blinkSendEnabled ? await this.blink.usdBalanceCents() : null,
+    };
   }
 
   @ApiOperation({ summary: "Send an approved payout over Lightning or on-chain (Blink)" })

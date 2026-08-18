@@ -120,6 +120,7 @@ export class ProviderPayoutsService {
       if (amount < min) {
         throw new BadRequestException(`The smallest withdrawal is $${(min / 100).toFixed(2)}.`);
       }
+      await this.assertWalletCanCover(amount);
     }
 
     const now = new Date().toISOString();
@@ -164,6 +165,29 @@ export class ProviderPayoutsService {
 
     this.logger.log(`[payout] instant ${amount} for provider ${input.providerId} by ${userId}`);
     return this.dispatch(row);
+  }
+
+  /**
+   * Refuse before claiming when the wallet plainly cannot cover it.
+   *
+   * Payouts leave the USD wallet, and that wallet is not the whole platform's
+   * money: Lightning receipts land in it, on-chain ones land in the BTC wallet
+   * beside it. So it can be empty on a day the business is doing fine, and
+   * without this the provider learns that by pressing a button that says the
+   * payment cannot be pulled back.
+   *
+   * A balance we cannot read is not a refusal. Blocking on a transient error
+   * would hold up money that would have sent — the send itself fails cleanly
+   * if the funds really are short, and that path is already handled.
+   */
+  private async assertWalletCanCover(amountCents: number): Promise<void> {
+    const balance = await this.blink.usdBalanceCents();
+    if (balance == null) return;
+    if (balance >= amountCents) return;
+    this.logger.warn(`[payout] wallet short: ${balance}c available, ${amountCents}c asked`);
+    throw new BadRequestException(
+      "Payouts are temporarily unavailable — the platform wallet is being topped up. Try again shortly.",
+    );
   }
 
   /** The smallest payout worth a routing fee. */
@@ -254,6 +278,8 @@ export class ProviderPayoutsService {
     const dest = classifyPayoutDestination(payout.destination);
     const problem = payoutDestinationProblem(dest);
     if (problem) throw new BadRequestException(problem);
+
+    await this.assertWalletCanCover(payout.amount_cents);
 
     // Claim it. `status=eq.approved` in the filter is the lock: whoever writes
     // second gets no rows back and stops here rather than paying again.
