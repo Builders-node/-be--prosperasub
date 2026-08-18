@@ -3,6 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import { createHash } from "crypto";
 import { SessionService } from "../auth/session.service";
 import { MembershipService } from "../membership/membership.service";
+import { BookingService } from "../booking/booking.service";
 import type { SubscriptionView } from "../membership/subscription-view";
 
 // Re-exported for back-compat with existing importers.
@@ -16,12 +17,30 @@ export interface VerifiedUser {
   avatar_url: string | null;
 }
 
+/**
+ * A court time the scanned person still has ahead of them.
+ *
+ * The point of putting it on the verify screen: a member scans in at the gate,
+ * and the door person (and the member) can see "Tennis Court 2, 4–5pm" without
+ * anyone opening an app. It answers "where do I go", which the access
+ * yes/no never did.
+ */
+export interface UpcomingBookingView {
+  id: string;
+  resource_name: string | null;
+  start_at: string;
+  end_at: string;
+  status: string;
+}
+
 export interface VerifyAccessResult {
   ok: boolean;
   allowed: boolean;
   reason: string;
   user: VerifiedUser | null;
   subscriptions: SubscriptionView[];
+  /** Court hours this person has coming up — empty for anyone who booked none. */
+  bookings: UpcomingBookingView[];
 }
 
 interface VerifyMeta {
@@ -41,7 +60,8 @@ export class VerifyService {
   constructor(
     private readonly sessions: SessionService,
     private readonly config: ConfigService,
-    private readonly membership: MembershipService
+    private readonly membership: MembershipService,
+    private readonly booking: BookingService
   ) {}
 
   /** Mint a short-lived signed token for the current user's profile QR code. */
@@ -65,7 +85,7 @@ export class VerifyService {
     } catch {
       const reason = "Invalid or expired QR code";
       await this.log({ tokenHash, userId: null, result: "invalid_token", reason, allowed: false, count: 0, meta });
-      return { ok: false, allowed: false, reason, user: null, subscriptions: [] };
+      return { ok: false, allowed: false, reason, user: null, subscriptions: [], bookings: [] };
     }
 
     // 2. Find the user.
@@ -73,14 +93,23 @@ export class VerifyService {
     if (!user) {
       const reason = "User not found";
       await this.log({ tokenHash, userId, result: "denied", reason, allowed: false, count: 0, meta });
-      return { ok: false, allowed: false, reason, user: null, subscriptions: [] };
+      return { ok: false, allowed: false, reason, user: null, subscriptions: [], bookings: [] };
     }
 
     // 3. Access decision — Membership PDP is the single authority.
     const decision = await this.membership.evaluateAccess(userId);
     const { permit: allowed, reason, subscriptions } = decision;
 
-    // 4. Audit log.
+    // 4. Court hours this person still has ahead of them — so the door sees
+    //    where they are going, not just that they may come in. Best-effort:
+    //    a failure to read the calendar must never turn an allowed scan into a
+    //    denied one, so it degrades to an empty list.
+    const bookings = await this.upcomingBookings(userId).catch((err) => {
+      this.logger.warn(`verify: could not load bookings for ${userId} — ${String(err)}`);
+      return [] as UpcomingBookingView[];
+    });
+
+    // 5. Audit log.
     await this.log({
       tokenHash,
       userId,
@@ -91,7 +120,33 @@ export class VerifyService {
       meta
     });
 
-    return { ok: true, allowed, reason, user, subscriptions };
+    return { ok: true, allowed, reason, user, subscriptions, bookings };
+  }
+
+  /**
+   * The next few court bookings, from today on.
+   *
+   * Only beach-court booking runs on the engine, so every row here is a court
+   * hour; a member's own bookings are keyed `user:<uuid>`. Kept to what is
+   * still ahead (end not yet past) and to states that mean "you have this" —
+   * a cancelled or no-show slot is not somewhere to send anyone.
+   */
+  private async upcomingBookings(userId: string): Promise<UpcomingBookingView[]> {
+    const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/Tegucigalpa" });
+    const rows = await this.booking.listForSubject(`user:${userId}`, { from: today });
+    const now = Date.now();
+    return rows
+      .filter((b) => ["held", "confirmed"].includes(String(b.status)))
+      .filter((b) => new Date(b.end_at).getTime() >= now)
+      .sort((a, b) => new Date(a.start_at).getTime() - new Date(b.start_at).getTime())
+      .slice(0, 5)
+      .map((b) => ({
+        id: String(b.id),
+        resource_name: b.resource_name ?? null,
+        start_at: String(b.start_at),
+        end_at: String(b.end_at),
+        status: String(b.status),
+      }));
   }
 
   // ─── Subject lookup + audit (verify-specific) ────────────────────────────────
