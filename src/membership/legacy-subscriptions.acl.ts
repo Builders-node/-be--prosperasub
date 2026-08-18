@@ -18,12 +18,13 @@ export class LegacySubscriptionSource implements SubscriptionSource {
   constructor(private readonly config: ConfigService) {}
 
   async getSubscriptions(subjectId: string): Promise<SubscriptionView[]> {
-    const [cleaning, food, beach] = await Promise.all([
+    const [cleaning, food, beach, universal] = await Promise.all([
       this.fetchCleaning(subjectId),
       this.fetchFood(subjectId),
       this.fetchBeachClub(subjectId),
+      this.fetchUniversal(subjectId),
     ]);
-    return [...cleaning, ...food, ...beach];
+    return [...cleaning, ...food, ...beach, ...universal];
   }
 
   private async fetchCleaning(userId: string): Promise<SubscriptionView[]> {
@@ -90,6 +91,35 @@ export class LegacySubscriptionSource implements SubscriptionSource {
         id: String(r.id),
         service: "beach_club",
         name: (r.plan_name as string) || "Beach Club membership",
+        status: this.normalizeStatus(status, isActive, expiresAt),
+        expires_at: expiresAt,
+      };
+    });
+  }
+
+  /**
+   * Universal subscriptions — a provider with no legacy table of its own, sold
+   * straight into `provider_subscriptions` with a null `source_service_key`.
+   * Beach uses this table too (source_service_key='beach') and is read above;
+   * the cleaning/food rows here are a frozen backfill with no readers, so this
+   * is scoped to `source_service_key IS NULL` to catch exactly the universal
+   * ones. Without this a paid universal customer was denied at the QR gate.
+   */
+  private async fetchUniversal(userId: string): Promise<SubscriptionView[]> {
+    const rows = await this.rest<Array<Record<string, unknown>>>(
+      `provider_subscriptions?source_service_key=is.null` +
+      `&select=id,plan_name:metadata->>plan_name,status,payment_status,end_date` +
+      `&user_id=eq.${encodeURIComponent(userId)}`
+    );
+    if (!rows?.length) return [];
+    return rows.map((r) => {
+      const expiresAt = (r.end_date as string | null) ?? null;
+      const status = String(r.status ?? "").toLowerCase();
+      const isActive = status === "active" && r.payment_status === "paid";
+      return {
+        id: String(r.id),
+        service: "plan",
+        name: (r.plan_name as string) || "Subscription",
         status: this.normalizeStatus(status, isActive, expiresAt),
         expires_at: expiresAt,
       };
