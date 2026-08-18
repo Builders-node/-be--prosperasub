@@ -59,9 +59,21 @@ export class LegacySubscriptionSource implements SubscriptionSource {
 
   private async fetchFood(userId: string): Promise<SubscriptionView[]> {
     const rows = await this.rest<Array<Record<string, unknown>>>(
-      `food_subscriptions?select=id,status,started_at,commitment_weeks&user_id=eq.${encodeURIComponent(userId)}`
+      `food_subscriptions?select=id,status,started_at,commitment_weeks,meal_plan_id&user_id=eq.${encodeURIComponent(userId)}`
     );
     if (!rows?.length) return [];
+
+    // Resolve the actual meal-plan name so the verify page shows the tariff the
+    // customer holds ("Weekly Lunch") rather than a generic "Food plan".
+    const planIds = [...new Set(rows.map((r) => r.meal_plan_id).filter(Boolean))] as string[];
+    const planMap = new Map<string, string>();
+    if (planIds.length) {
+      const plans = await this.rest<Array<{ id: string; name: string }>>(
+        `food_meal_plans?select=id,name&id=in.(${planIds.map((id) => `"${id}"`).join(",")})`
+      );
+      (plans ?? []).forEach((p) => planMap.set(p.id, p.name));
+    }
+
     return rows.map((r) => {
       const expiresAt = this.addWeeks(r.started_at as string | null, Number(r.commitment_weeks ?? 0));
       const status = String(r.status ?? "").toLowerCase();
@@ -69,7 +81,7 @@ export class LegacySubscriptionSource implements SubscriptionSource {
       return {
         id: String(r.id),
         service: "food",
-        name: "Food plan",
+        name: planMap.get(r.meal_plan_id as string) || "Food plan",
         status: this.normalizeStatus(status, isActive, expiresAt),
         expires_at: expiresAt,
       };
