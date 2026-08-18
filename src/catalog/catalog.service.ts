@@ -108,7 +108,25 @@ export class CatalogService {
     };
   }
 
+  /**
+   * Fill the slot grid for the next 110 days, if it is empty.
+   *
+   * Public and self-healing: the customer's day-picker calls it whenever it
+   * reads slots. That is also why it must not throw — a 500 here is a 500 on a
+   * page that was only asking what days are free, and the caller can do
+   * nothing with it. Every failure comes back as a reason instead, and the
+   * daily cron is what actually keeps the grid full.
+   */
   async seedCleaningSlots() {
+    try {
+      return await this.seedCleaningSlotsUnsafe();
+    } catch (error) {
+      this.logger.warn(`Could not seed cleaning slots: ${this.errorMessage(error)}`);
+      return { ok: false, reason: "seed_failed" };
+    }
+  }
+
+  private async seedCleaningSlotsUnsafe() {
     if (!this.prisma || !this.prisma.isAvailable()) {
       return { ok: false, reason: "database_unavailable" };
     }
