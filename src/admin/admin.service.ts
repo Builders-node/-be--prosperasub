@@ -5,7 +5,6 @@ import { CleaningReminderService } from "../account/cleaning-reminder.service";
 import { CleaningCalendarSyncService } from "../google-calendar/cleaning-calendar-sync.service";
 import { BeachCourtCalendarSyncService } from "../google-calendar/beach-court-calendar-sync.service";
 import { BlinkService } from "../payments/blink.service";
-import { SimpleFiService } from "../payments/simplefi.service";
 import { PayPalService } from "../payments/paypal.service";
 import { MailService } from "../mail/mail.service";
 import { BillingService } from "../billing/billing.service";
@@ -96,7 +95,6 @@ export class AdminService {
     @Optional() private readonly cleaningReminders?: CleaningReminderService,
     @Optional() private readonly mail?: MailService,
     @Optional() private readonly beachCourtCalendarSync?: BeachCourtCalendarSyncService,
-    @Optional() private readonly simplefi?: SimpleFiService,
     @Optional() private readonly billing?: BillingService,
     @Optional() private readonly paypal?: PayPalService,
   ) {}
@@ -106,7 +104,6 @@ export class AdminService {
     const m = String(method || "").toLowerCase();
     if (m === "onchain") return "onchain";
     if (m === "lightning" || m === "blink") return "lightning";
-    if (m === "infinita" || m === "crypto" || m === "lives") return "lives";
     if (m === "paypal") return "paypal";
     return null;
   }
@@ -1448,9 +1445,9 @@ export class AdminService {
    */
   async reconcilePendingPayments(): Promise<{ checked: number; activated: number; expired: number }> {
     // Reconcile pending payments across cleaning / food / beach subscriptions,
-    // dispatching to the right provider (Blink Lightning/on-chain OR SimpleFi
-    // for LIVES). PayPal is captured client-side at checkout and does not need
-    // background reconciliation. Runs from cron so activation is automatic.
+    // dispatching to the right provider (Blink Lightning/on-chain). PayPal is
+    // captured client-side at checkout and does not need background
+    // reconciliation. Runs from cron so activation is automatic.
     const scopes = [
       { table: "cleaning_subscriptions", statusCol: "subscription_status", extraFilters: "&deleted_at=is.null" },
       { table: "food_subscriptions",     statusCol: "status",              extraFilters: "" },
@@ -1465,10 +1462,6 @@ export class AdminService {
       if (!ref) return false;
       if (method === "onchain" && this.blink) return (await this.blink.getOnchainStatus(ref)).paid;
       if ((method === "lightning" || method === "blink") && this.blink) return (await this.blink.getPaymentStatus(ref)).paid;
-      if ((method === "infinita" || method === "crypto") && this.simplefi) {
-        const s = await this.simplefi.getPaymentStatus(ref);
-        return s.status === "paid";
-      }
       if (method === "paypal" && this.paypal) {
         // captureOrder is idempotent — an already-captured order resolves paid,
         // so a stray browser death after checkout still lands here.
@@ -1520,7 +1513,7 @@ export class AdminService {
           if (billingMethod && this.billing) {
             await this.billing.recordCaptured({
               method: billingMethod,
-              provider: billingMethod === "lives" ? "simplefi" : billingMethod === "paypal" ? "paypal" : "blink",
+              provider: billingMethod === "paypal" ? "paypal" : "blink",
               providerRef: String(sub.payment_reference),
               amountCents: this.subAmountCents(scope.table, sub),
               subjectRef: `subscription:${sub.id}`,

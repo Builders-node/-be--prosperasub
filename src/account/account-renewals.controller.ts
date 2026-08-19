@@ -6,8 +6,8 @@ import { AccountRenewalsService } from "./account-renewals.service";
 import type { RenewalPaymentMethod } from "../payments/subscription-renewal.service";
 
 class RenewPayloadDto {
-  @ApiProperty({ enum: ["lightning", "onchain", "crypto", "infinita", "paypal"] })
-  @IsIn(["lightning", "onchain", "crypto", "infinita", "paypal"])
+  @ApiProperty({ enum: ["lightning", "onchain", "paypal"] })
+  @IsIn(["lightning", "onchain", "paypal"])
   payment_method!: RenewalPaymentMethod;
 
   @ApiProperty({ example: "abc123deadbeef" })

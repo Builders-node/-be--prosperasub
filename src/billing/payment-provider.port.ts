@@ -6,7 +6,7 @@
  * it in Phase 1b.
  */
 
-export type PaymentMethod = "lightning" | "onchain" | "lives" | "paypal";
+export type PaymentMethod = "lightning" | "onchain" | "paypal";
 
 export interface PaymentVerifyResult {
   paid: boolean;

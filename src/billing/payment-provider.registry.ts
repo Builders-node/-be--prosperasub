@@ -2,7 +2,6 @@ import { Injectable } from "@nestjs/common";
 import type { PaymentMethod, PaymentProvider } from "./payment-provider.port";
 import { LightningAdapter } from "./adapters/lightning.adapter";
 import { OnchainAdapter } from "./adapters/onchain.adapter";
-import { LivesAdapter } from "./adapters/lives.adapter";
 import { PayPalAdapter } from "./adapters/paypal.adapter";
 
 /** Resolves the payment-port adapter for a given method. */
@@ -13,13 +12,11 @@ export class PaymentProviderRegistry {
   constructor(
     lightning: LightningAdapter,
     onchain: OnchainAdapter,
-    lives: LivesAdapter,
     paypal: PayPalAdapter,
   ) {
     this.byMethod = new Map<PaymentMethod, PaymentProvider>([
       [lightning.method, lightning],
       [onchain.method, onchain],
-      [lives.method, lives],
       [paypal.method, paypal],
     ]);
   }

@@ -21,7 +21,7 @@ import { BillingService } from "../billing/billing.service";
  * and harmless if someone POSTs noise at it.
  *
  * Root path (no /v1 prefix) so it matches whatever URL is registered with
- * Blink, matching the SimpleFi webhook's convention.
+ * Blink.
  */
 
 const SUB_TABLES = [

@@ -1,13 +1,12 @@
 import { BadRequestException, ForbiddenException, Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { BlinkService } from "./blink.service";
-import { SimpleFiService } from "./simplefi.service";
 import { PayPalService } from "./paypal.service";
 
 /** `plan` is a universal `provider_subscriptions` row — a provider with no
  *  legacy table of its own. It renews by the same three rules as the rest. */
 export type RenewalService = "food" | "cleaning" | "beach" | "plan";
-export type RenewalPaymentMethod = "lightning" | "onchain" | "crypto" | "infinita" | "paypal";
+export type RenewalPaymentMethod = "lightning" | "onchain" | "paypal";
 
 interface VerifyInput {
   method: RenewalPaymentMethod;
@@ -64,7 +63,6 @@ export class SubscriptionRenewalService {
 
   constructor(
     private readonly blink: BlinkService,
-    private readonly simplefi: SimpleFiService,
     private readonly paypal: PayPalService,
     private readonly config: ConfigService,
   ) {}
@@ -92,12 +90,6 @@ export class SubscriptionRenewalService {
       // Punt: mark onchain unsupported for renewal via API — customers use the
       // fresh checkout flow which persists the confirmation on the sub itself.
       throw new ForbiddenException("On-chain BTC renewals must go through checkout, not the renewal endpoint.");
-    }
-
-    if (m === "crypto" || m === "infinita") {
-      const r = await this.simplefi.getPaymentStatus(reference);
-      if (!r.paid) throw new ForbiddenException(`LIVES payment not confirmed (status ${r.status})`);
-      return { providerStatus: r.status };
     }
 
     if (m === "paypal") {

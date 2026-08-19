@@ -4,7 +4,6 @@ import { BillingService } from "./billing.service";
 import { PaymentProviderRegistry } from "./payment-provider.registry";
 import { LightningAdapter } from "./adapters/lightning.adapter";
 import { OnchainAdapter } from "./adapters/onchain.adapter";
-import { LivesAdapter } from "./adapters/lives.adapter";
 import { PayPalAdapter } from "./adapters/paypal.adapter";
 
 /**
@@ -22,7 +21,6 @@ import { PayPalAdapter } from "./adapters/paypal.adapter";
     PaymentProviderRegistry,
     LightningAdapter,
     OnchainAdapter,
-    LivesAdapter,
     PayPalAdapter,
   ],
   exports: [BillingService, PaymentProviderRegistry],
