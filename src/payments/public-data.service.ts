@@ -1,16 +1,22 @@
 import { BadRequestException, ForbiddenException, Injectable, ServiceUnavailableException } from "@nestjs/common";
 
-// Tables exposed through the public data API. Prefix-based allow covers every
-// service module; a small set of common tables is allowed explicitly. Sensitive
-// audit/security tables are always denied.
+// Tables exposed through the public data API. This proxy runs with the SERVICE
+// ROLE (it bypasses RLS), so anything on the allow-list is fully CRUD-able by
+// whoever holds the static key. Credential / authz / PII tables must NEVER be
+// here — a generic proxy over `users`/`user_roles` behind one static key hands
+// out password hashes and admin grants regardless of the RLS lockdown. Only
+// service catalog + non-sensitive config tables are exposed.
 const ALLOWED_PREFIXES = ["cleaning_", "food_", "beach_club_"];
 const ALLOWED_COMMON = new Set([
-  "users", "user_profiles", "user_locations", "user_roles",
-  "rbac_roles", "rbac_user_roles",
   "global_settings", "ads", "payment_method_settings",
   "subscription_periods",
 ]);
+// Credential/authz/PII/audit tables — always denied, even if a prefix would
+// otherwise match. Belt-and-suspenders next to the allow-list.
 const DENIED = new Set([
+  "users", "user_profiles", "user_locations", "user_roles",
+  "rbac_roles", "rbac_user_roles",
+  "payments", "payment_checkout_sessions", "provider_payouts",
   "access_verification_logs",
   "subscription_expiration_notifications",
 ]);
