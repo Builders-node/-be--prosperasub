@@ -10,6 +10,7 @@ import { AccountPasswordService } from "./account-password.service";
 import { AccountPreferencesService } from "./account-preferences.service";
 import { AccountPaymentService } from "./account-payment.service";
 import { AccountCleaningService } from "./account-cleaning.service";
+import { AccountLocationsService } from "./account-locations.service";
 import { AccountRenewalsService } from "./account-renewals.service";
 import { AccountCancellationService } from "./account-cancellation.service";
 import { ProviderPayoutsService } from "./provider-payouts.service";
@@ -33,6 +34,7 @@ import { RemindersController } from "./reminders.controller";
     AccountPreferencesService,
     AccountPaymentService,
     AccountCleaningService,
+    AccountLocationsService,
     AccountRenewalsService,
     AccountCancellationService,
     ProviderPayoutsService,

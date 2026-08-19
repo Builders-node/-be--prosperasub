@@ -12,6 +12,7 @@ import { ProviderMembersService } from "./provider-members.service";
 import { ReviewPromptsService } from "./review-prompts.service";
 import { AccountPaymentService } from "./account-payment.service";
 import { AccountCleaningService } from "./account-cleaning.service";
+import { AccountLocationsService } from "./account-locations.service";
 import { CleaningReminderService } from "./cleaning-reminder.service";
 
 class ChangePasswordDto {
@@ -162,7 +163,40 @@ export class AccountController {
     private readonly occurrences: OccurrencesService,
     private readonly members: ProviderMembersService,
     private readonly reviewPrompts: ReviewPromptsService,
+    private readonly locations: AccountLocationsService,
   ) {}
+
+  // ── Saved locations (home addresses — server-only, owner-scoped) ─────────────
+
+  @ApiOperation({ summary: "List the current user's saved locations" })
+  @Get("locations")
+  listLocations(@Req() req: AccountRequest) {
+    return this.locations.list(req.authUser!.id);
+  }
+
+  @ApiOperation({ summary: "Add a saved location for the current user" })
+  @Post("locations")
+  createLocation(@Req() req: AccountRequest, @Body() body: Record<string, unknown>) {
+    return this.locations.create(req.authUser!.id, body);
+  }
+
+  @ApiOperation({ summary: "Update one of the current user's saved locations" })
+  @Patch("locations/:id")
+  updateLocation(@Req() req: AccountRequest, @Param("id") id: string, @Body() body: Record<string, unknown>) {
+    return this.locations.update(req.authUser!.id, id, body);
+  }
+
+  @ApiOperation({ summary: "Delete one of the current user's saved locations" })
+  @Delete("locations/:id")
+  deleteLocation(@Req() req: AccountRequest, @Param("id") id: string) {
+    return this.locations.remove(req.authUser!.id, id);
+  }
+
+  @ApiOperation({ summary: "Mark one of the current user's saved locations as default" })
+  @Post("locations/:id/default")
+  setDefaultLocation(@Req() req: AccountRequest, @Param("id") id: string) {
+    return this.locations.setDefault(req.authUser!.id, id);
+  }
 
   // ── Cleaning self-service ────────────────────────────────────────────────────
 
