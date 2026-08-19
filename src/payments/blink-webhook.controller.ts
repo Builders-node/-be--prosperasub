@@ -105,15 +105,39 @@ export class BlinkWebhookController {
     const isHash = isPaymentHash(ref);
     let paid = false;
     try {
-      paid = isHash
-        ? (await this.blink.getPaymentStatus(ref)).paid
-        : (await this.blink.getOnchainStatus(ref)).paid;
+      if (isHash) {
+        paid = (await this.blink.getPaymentStatus(ref)).paid;
+      } else {
+        // Pass the expected sats so an underpaid on-chain tx can't settle here.
+        const expectedSats = await this.expectedOnchainSats(ref);
+        paid = (await this.blink.getOnchainStatus(ref, expectedSats)).paid;
+      }
     } catch (e) {
       this.logger.debug(`blink lookup failed for ${ref.slice(0, 12)}…: ${(e as Error).message}`);
       return false;
     }
     if (!paid) return false;
     return this.markPaidByReference(ref, isHash ? "lightning" : "onchain");
+  }
+
+  /**
+   * Expected sats for an on-chain address, from the checkout session written
+   * server-side at invoice time (keyed by the address). Passing it into
+   * getOnchainStatus stops a webhook confirming an underpayment — "send 100
+   * sats, get a $500 plan". Undefined when no amount is on file, in which case
+   * getOnchainStatus keeps its prior behaviour rather than stranding a payment.
+   */
+  private async expectedOnchainSats(address: string): Promise<number | undefined> {
+    try {
+      const rows = await this.rest<Array<{ amount_sats: number | null }>>(
+        `/payment_checkout_sessions?provider_payment_id=eq.${encodeURIComponent(address)}` +
+        `&select=amount_sats&order=created_at.desc&limit=1`,
+      );
+      const sats = Array.isArray(rows) ? rows[0]?.amount_sats : null;
+      return typeof sats === "number" && sats > 0 ? sats : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /**

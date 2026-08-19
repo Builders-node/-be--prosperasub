@@ -1460,7 +1460,12 @@ export class AdminService {
       const method = String(sub.payment_method || "");
       const ref = String(sub.payment_reference || "");
       if (!ref) return false;
-      if (method === "onchain" && this.blink) return (await this.blink.getOnchainStatus(ref)).paid;
+      if (method === "onchain" && this.blink) {
+        // Expected sats from the invoice-time session — the cron must not
+        // auto-activate an underpaid on-chain tx.
+        const expectedSats = await this.expectedOnchainSats(ref);
+        return (await this.blink.getOnchainStatus(ref, expectedSats)).paid;
+      }
       if ((method === "lightning" || method === "blink") && this.blink) return (await this.blink.getPaymentStatus(ref)).paid;
       if (method === "paypal" && this.paypal) {
         // captureOrder is idempotent — an already-captured order resolves paid,
@@ -1616,7 +1621,8 @@ export class AdminService {
       // Reuse + reconcile an existing on-chain address if one is set.
       if (sub.payment_reference && sub.payment_method === "onchain") {
         try {
-          const status = await this.blink.getOnchainStatus(sub.payment_reference);
+          const expectedSats = await this.expectedOnchainSats(sub.payment_reference);
+          const status = await this.blink.getOnchainStatus(sub.payment_reference, expectedSats);
           if (status.paid) {
             await this.supabaseRest(
               `/cleaning_subscriptions?id=eq.${encodeURIComponent(subscriptionId)}`,
@@ -2914,6 +2920,27 @@ export class AdminService {
     }
     if (response.status === 204) return undefined as T;
     return response.json() as Promise<T>;
+  }
+
+  /**
+   * Expected sats for an on-chain address, from the checkout session written
+   * server-side at invoice time (keyed by the address). Passed into
+   * getOnchainStatus so reconcile can't auto-activate an underpayment — "send
+   * 100 sats, get a $500 plan". Undefined when no amount is on file, in which
+   * case getOnchainStatus keeps its prior behaviour rather than stranding a
+   * legitimate payment.
+   */
+  private async expectedOnchainSats(address: string): Promise<number | undefined> {
+    try {
+      const rows = await this.supabaseRest<Array<{ amount_sats: number | null }>>(
+        `/payment_checkout_sessions?provider_payment_id=eq.${encodeURIComponent(address)}` +
+        `&select=amount_sats&order=created_at.desc&limit=1`,
+      );
+      const sats = Array.isArray(rows) ? rows[0]?.amount_sats : null;
+      return typeof sats === "number" && sats > 0 ? sats : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   private shouldUseFallback() {
