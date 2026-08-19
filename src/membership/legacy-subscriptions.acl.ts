@@ -34,32 +34,37 @@ export class LegacySubscriptionSource implements SubscriptionSource {
     if (!rows?.length) return [];
 
     const pkgIds = [...new Set(rows.map((r) => r.package_id).filter(Boolean))] as string[];
-    const pkgMap = new Map<string, string>();
+    const pkgMap = new Map<string, { name: string; providerId: string | null }>();
     if (pkgIds.length) {
-      const pkgs = await this.rest<Array<{ id: string; name: string }>>(
-        `cleaning_packages?select=id,name&id=in.(${pkgIds.map((id) => `"${id}"`).join(",")})`
+      const pkgs = await this.rest<Array<{ id: string; name: string; owner_provider_id: string | null }>>(
+        `cleaning_packages?select=id,name,owner_provider_id&id=in.(${pkgIds.map((id) => `"${id}"`).join(",")})`
       );
-      (pkgs ?? []).forEach((p) => pkgMap.set(p.id, p.name));
+      (pkgs ?? []).forEach((p) => pkgMap.set(p.id, { name: p.name, providerId: p.owner_provider_id }));
     }
+    const provMeta = await this.fetchProviderMeta([...pkgMap.values()].map((p) => p.providerId));
 
     return rows.map((r) => {
       const expiresAt = (r.service_end_date || r.paid_until || r.end_date) as string | null;
       const paid = r.payment_status === "paid";
       const subStatus = String(r.subscription_status ?? "").toLowerCase();
       const isActive = paid && r.is_active === true && (subStatus === "active" || subStatus === "pending_schedule");
+      const pkg = pkgMap.get(r.package_id as string);
+      const prov = pkg?.providerId ? provMeta.get(pkg.providerId) : undefined;
       return {
         id: String(r.id),
         service: "cleaning",
-        name: pkgMap.get(r.package_id as string) || "Cleaning plan",
+        name: pkg?.name || "Cleaning plan",
         status: this.normalizeStatus(subStatus, isActive, expiresAt),
         expires_at: expiresAt,
+        provider_name: prov?.name ?? null,
+        image_url: prov?.image ?? null,
       };
     });
   }
 
   private async fetchFood(userId: string): Promise<SubscriptionView[]> {
     const rows = await this.rest<Array<Record<string, unknown>>>(
-      `food_subscriptions?select=id,status,started_at,commitment_weeks,meal_plan_id&user_id=eq.${encodeURIComponent(userId)}`
+      `food_subscriptions?select=id,status,started_at,commitment_weeks,meal_plan_id,provider_id&user_id=eq.${encodeURIComponent(userId)}`
     );
     if (!rows?.length) return [];
 
@@ -74,16 +79,30 @@ export class LegacySubscriptionSource implements SubscriptionSource {
       (plans ?? []).forEach((p) => planMap.set(p.id, p.name));
     }
 
+    // Restaurant name + photo for the verify thumbnail — food keeps its own
+    // legacy table, so read it directly rather than through the universal bridge.
+    const provIds = [...new Set(rows.map((r) => r.provider_id).filter(Boolean))] as string[];
+    const provMap = new Map<string, { name: string; image: string | null }>();
+    if (provIds.length) {
+      const provs = await this.rest<Array<{ id: string; name: string; image_url: string | null; banner_url: string | null }>>(
+        `food_providers?select=id,name,image_url,banner_url&id=in.(${provIds.map((id) => `"${id}"`).join(",")})`
+      );
+      (provs ?? []).forEach((p) => provMap.set(p.id, { name: p.name, image: p.image_url || p.banner_url || null }));
+    }
+
     return rows.map((r) => {
       const expiresAt = this.addWeeks(r.started_at as string | null, Number(r.commitment_weeks ?? 0));
       const status = String(r.status ?? "").toLowerCase();
       const isActive = status === "active";
+      const prov = provMap.get(r.provider_id as string);
       return {
         id: String(r.id),
         service: "food",
         name: planMap.get(r.meal_plan_id as string) || "Food plan",
         status: this.normalizeStatus(status, isActive, expiresAt),
         expires_at: expiresAt,
+        provider_name: prov?.name ?? null,
+        image_url: prov?.image ?? null,
       };
     });
   }
@@ -91,20 +110,24 @@ export class LegacySubscriptionSource implements SubscriptionSource {
   private async fetchBeachClub(userId: string): Promise<SubscriptionView[]> {
     const rows = await this.rest<Array<Record<string, unknown>>>(
       `provider_subscriptions?source_service_key=eq.beach` +
-      `&select=id,plan_name:metadata->>plan_name,status,payment_status,end_date` +
+      `&select=id,plan_name:metadata->>plan_name,status,payment_status,end_date,provider_id` +
       `&user_id=eq.${encodeURIComponent(userId)}`
     );
     if (!rows?.length) return [];
+    const provMeta = await this.fetchProviderMeta(rows.map((r) => r.provider_id as string | null));
     return rows.map((r) => {
       const expiresAt = (r.end_date as string | null) ?? null;
       const status = String(r.status ?? "").toLowerCase();
       const isActive = status === "active" && r.payment_status === "paid";
+      const prov = r.provider_id ? provMeta.get(String(r.provider_id)) : undefined;
       return {
         id: String(r.id),
         service: "beach_club",
         name: (r.plan_name as string) || "Beach Club membership",
         status: this.normalizeStatus(status, isActive, expiresAt),
         expires_at: expiresAt,
+        provider_name: prov?.name ?? null,
+        image_url: prov?.image ?? null,
       };
     });
   }
@@ -120,22 +143,45 @@ export class LegacySubscriptionSource implements SubscriptionSource {
   private async fetchUniversal(userId: string): Promise<SubscriptionView[]> {
     const rows = await this.rest<Array<Record<string, unknown>>>(
       `provider_subscriptions?source_service_key=is.null` +
-      `&select=id,plan_name:metadata->>plan_name,status,payment_status,end_date` +
+      `&select=id,plan_name:metadata->>plan_name,status,payment_status,end_date,provider_id` +
       `&user_id=eq.${encodeURIComponent(userId)}`
     );
     if (!rows?.length) return [];
+    const provMeta = await this.fetchProviderMeta(rows.map((r) => r.provider_id as string | null));
     return rows.map((r) => {
       const expiresAt = (r.end_date as string | null) ?? null;
       const status = String(r.status ?? "").toLowerCase();
       const isActive = status === "active" && r.payment_status === "paid";
+      const prov = r.provider_id ? provMeta.get(String(r.provider_id)) : undefined;
       return {
         id: String(r.id),
         service: "plan",
         name: (r.plan_name as string) || "Subscription",
         status: this.normalizeStatus(status, isActive, expiresAt),
         expires_at: expiresAt,
+        provider_name: prov?.name ?? null,
+        image_url: prov?.image ?? null,
       };
     });
+  }
+
+  /**
+   * Universal `providers` → name + best available image, for the verify-page
+   * thumbnail and subtitle. Cleaning/beach/universal all bridge to this table;
+   * food keeps its own (read inline in fetchFood). Dedupes ids and returns an
+   * empty map on no input so callers can `.get()` unconditionally.
+   */
+  private async fetchProviderMeta(
+    ids: Array<string | null>,
+  ): Promise<Map<string, { name: string; image: string | null }>> {
+    const map = new Map<string, { name: string; image: string | null }>();
+    const clean = [...new Set(ids.filter(Boolean))] as string[];
+    if (!clean.length) return map;
+    const rows = await this.rest<Array<{ id: string; name: string; avatar_url: string | null; banner_url: string | null }>>(
+      `providers?select=id,name,avatar_url,banner_url&id=in.(${clean.map((id) => `"${id}"`).join(",")})`
+    );
+    (rows ?? []).forEach((p) => map.set(p.id, { name: p.name, image: p.avatar_url || p.banner_url || null }));
+    return map;
   }
 
   private normalizeStatus(raw: string, isActive: boolean, expiresAt: string | null): AccessStatus {

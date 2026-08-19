@@ -8,9 +8,11 @@ export type AccessStatus = "active" | "trial" | "pending" | "expired" | "cancele
 export interface SubscriptionView {
   id: string;
   service: string;                 // "cleaning" | "food" | … — data, not a domain enum
-  name: string;
+  name: string;                    // the tariff/plan name — the headline
   status: AccessStatus;
   expires_at: string | null;
+  provider_name?: string | null;   // the business behind the plan (verify page subtitle)
+  image_url?: string | null;       // provider avatar/photo for the verify-page thumbnail
 }
 
 /** The Policy Decision Point result. */
