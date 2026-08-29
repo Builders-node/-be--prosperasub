@@ -5,7 +5,7 @@ import { MailService } from "../mail/mail.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { PasswordService } from "./password.service";
 import { RoleName, SessionService } from "./session.service";
-import { buildAllowedOrigins } from "../config/app-origins";
+import { buildAllowedOrigins, isAllowedOrigin } from "../config/app-origins";
 
 export type ApiRole = "super_admin" | "user";
 
@@ -694,7 +694,7 @@ export class AuthService {
 
     try {
       const requested = new URL(redirectUrl);
-      if (allowedOrigins.has(requested.origin)) {
+      if (isAllowedOrigin(requested.origin, allowedOrigins)) {
         return requested;
       }
     } catch {

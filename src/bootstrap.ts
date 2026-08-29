@@ -4,7 +4,7 @@ import { ValidationPipe } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
 import { AppModule } from "./app.module";
-import { buildAllowedOrigins } from "./config/app-origins";
+import { buildAllowedOrigins, isAllowedOrigin } from "./config/app-origins";
 
 export async function createNestApp() {
   const app = await NestFactory.create(AppModule);
@@ -66,7 +66,7 @@ function buildCorsOrigin(config: ConfigService, isProduction: boolean) {
   );
 
   return (origin: string | undefined, callback: (error: Error | null, allow?: boolean) => void) => {
-    if (!origin || allowedOrigins.has(origin)) {
+    if (!origin || isAllowedOrigin(origin, allowedOrigins)) {
       callback(null, true);
       return;
     }

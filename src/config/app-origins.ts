@@ -45,6 +45,20 @@ const LOCAL_ORIGINS = [
   "http://127.0.0.1:8081",
 ] as const;
 
+/**
+ * Every Vercel URL of the car-booking project shares this shape — the stable
+ * alias (carbooking-wheat / carbooking-frorexstudios-projects) AND each
+ * deployment's per-hash URL (carbooking-<hash>-frorexstudios-projects). A Set of
+ * exact origins can't cover the per-deploy hashes, so match them by the project
+ * prefix. Scoped to `carbooking…` so it can't wave through arbitrary *.vercel.app.
+ */
+const CARBOOKING_VERCEL = /^https:\/\/carbooking[a-z0-9-]*\.vercel\.app$/;
+
+/** True if `origin` is explicitly allowed or is one of the car app's Vercel URLs. */
+export function isAllowedOrigin(origin: string, allowed: Set<string>): boolean {
+  return allowed.has(origin) || CARBOOKING_VERCEL.test(origin);
+}
+
 function fromEnv(raw: string | undefined): string[] {
   return (raw || "")
     .split(",")
