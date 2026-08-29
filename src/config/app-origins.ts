@@ -33,9 +33,9 @@ const ALWAYS_ALLOWED = [
   // Car-booking app (separate subdomain, shares this backend for auth + payments).
   // Listed here so both CORS and the OAuth-redirect allow-list accept it without
   // needing the API_ALLOWED_ORIGINS / APP_ALLOWED_REDIRECT_ORIGINS env vars set.
-  "https://cars.everysub.net",
-  "https://carbooking-wheat.vercel.app",
-  "https://carbooking-frorexstudios-projects.vercel.app",
+  // (Its Vercel deploy URLs are matched separately by CARBOOKING_VERCEL.)
+  "https://vehicles.everysub.net",
+  "https://www.vehicles.everysub.net",
 ] as const;
 
 const LOCAL_ORIGINS = [
