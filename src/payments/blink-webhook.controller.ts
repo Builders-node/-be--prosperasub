@@ -3,6 +3,7 @@ import { ApiExcludeController } from "@nestjs/swagger";
 import type { Request } from "express";
 import { BlinkService } from "./blink.service";
 import { BillingService } from "../billing/billing.service";
+import { NotificationsService } from "../notifications/notifications.service";
 
 /**
  * Receives payment callbacks from Blink (Lightning + on-chain Bitcoin).
@@ -77,6 +78,7 @@ export class BlinkWebhookController {
   constructor(
     private readonly blink: BlinkService,
     private readonly billing: BillingService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   @Post()
@@ -191,6 +193,17 @@ export class BlinkWebhookController {
             subjectRef: `subscription:${row.id}`,
             metadata: { table, viaWebhook: true },
           }).catch((e) => this.logger.warn(`ledger write failed: ${(e as Error).message}`));
+
+          // Tell the team money arrived. The checkout session (keyed by the
+          // Lightning hash / on-chain address) carries the client details;
+          // notifyPaymentSucceeded is idempotent per (provider, reference), so a
+          // webhook that races the cron or arrives twice still notifies once.
+          await this.notifications.notifyPaymentSucceededForProviderRef(
+            method === "onchain" ? "blink-onchain" : "blink",
+            ref,
+            { paymentStatus: "paid", paidAt: new Date() },
+            { serviceName: `EverySub — ${table.replace(/_subscriptions$/, "")}` },
+          ).catch((e) => this.logger.warn(`admin notify failed: ${(e as Error).message}`));
         }
       } catch (e) {
         this.logger.debug(`scan ${table} failed: ${(e as Error).message}`);

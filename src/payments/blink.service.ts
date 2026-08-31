@@ -209,8 +209,15 @@ export class BlinkService {
         const amount = Number(node.settlementAmount ?? 0);
         const status = (node.status ?? "").toUpperCase();
         const okStatus = status === "SUCCESS" || status === "PENDING";
-        // allow 1 sat rounding; underpayment does not count
-        const okAmount = !expectedSats || amount >= expectedSats - 1;
+        // A quoted on-chain amount is almost never paid to the satoshi: the
+        // sender's wallet deducts the mining fee, and BTC/USD drifts during the
+        // confirmation window — so a legit payment routinely lands a little
+        // short (Jason paid 277,936 of a 280,436-sat quote, 0.9% under, and sat
+        // pending forever). Accept a small shortfall — 3% or 2,500 sats,
+        // whichever is larger — which still blocks the "send 100 sats for a
+        // $500 plan" underpayment the guard exists to stop.
+        const tolerance = expectedSats ? Math.max(Math.round(expectedSats * 0.03), 2500) : 0;
+        const okAmount = !expectedSats || amount >= expectedSats - tolerance;
         if (okStatus && amount > 0 && okAmount) {
           paid = true;
           break;

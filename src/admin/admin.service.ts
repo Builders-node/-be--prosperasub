@@ -9,6 +9,7 @@ import { PayPalService } from "../payments/paypal.service";
 import { MailService } from "../mail/mail.service";
 import { BillingService } from "../billing/billing.service";
 import type { PaymentMethod } from "../billing/payment-provider.port";
+import { NotificationsService } from "../notifications/notifications.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { AuthService } from "../auth/auth.service";
 import { APP_BRAND_NAME } from "../config/branding";
@@ -97,7 +98,54 @@ export class AdminService {
     @Optional() private readonly beachCourtCalendarSync?: BeachCourtCalendarSyncService,
     @Optional() private readonly billing?: BillingService,
     @Optional() private readonly paypal?: PayPalService,
+    @Optional() private readonly notifications?: NotificationsService,
   ) {}
+
+  /**
+   * The provider key the checkout wrote its session under, so a reconciled
+   * payment can be matched back to the client details captured at invoice time.
+   * Mirrors the constants used by the browser-poll controllers.
+   */
+  private notificationProviderOf(method?: string | null): string | null {
+    const m = String(method || "").toLowerCase();
+    if (m === "onchain") return "blink-onchain";
+    if (m === "lightning" || m === "blink") return "blink";
+    if (m === "paypal") return "paypal";
+    return null;
+  }
+
+  /**
+   * Fire the admin email + Telegram notification for a payment confirmed
+   * server-side (reconcile cron). The browser-poll path already notifies when
+   * the customer stays on the page; this closes the gap when they don't — an
+   * on-chain payment that confirmed after the tab was closed used to reach the
+   * wallet with nobody told. Idempotent per (provider, reference).
+   */
+  private async notifyAdminPaymentReceived(table: string, sub: Record<string, any>): Promise<void> {
+    if (!this.notifications) return;
+    const provider = this.notificationProviderOf(sub.payment_method);
+    const ref = String(sub.payment_reference || "");
+    if (!provider || !ref) return;
+    try {
+      await this.notifications.notifyPaymentSucceededForProviderRef(
+        provider,
+        ref,
+        // Overrides — what we know for certain from the reconcile.
+        { paymentStatus: "paid", paidAt: new Date() },
+        // Fallbacks — used only where the invoice-time checkout session has no
+        // answer. The session is the source of truth for amount and client, so
+        // it wins; the row fills the gaps.
+        {
+          serviceName: `EverySub — ${table.replace(/_subscriptions$/, "")}`,
+          amountCents: this.subAmountCents(table, sub) ?? undefined,
+          clientName: sub.customer_name ?? sub.client_name ?? undefined,
+          clientPhone: sub.customer_whatsapp ?? sub.customer_phone ?? undefined,
+        },
+      );
+    } catch (err) {
+      this.logger.warn(`notifyAdminPaymentReceived failed for ${sub.id}: ${(err as Error).message}`);
+    }
+  }
 
   /** Map a stored legacy payment_method to a Billing PaymentMethod (null = unsupported). */
   private billingMethodOf(method?: string | null): PaymentMethod | null {
@@ -1511,6 +1559,9 @@ export class AdminService {
             { method: "PATCH", body: JSON.stringify(patch) },
           );
           void this.notifySubscriptionUpdated(sub, { payment_status: "paid" }, sub.id);
+          // Admin email + Telegram — the browser poll didn't get here, so this
+          // is the only place that tells the team money arrived.
+          void this.notifyAdminPaymentReceived(scope.table, sub);
 
           // Billing domain: record + emit billing.PaymentCaptured from the same
           // single place as interactive checkouts (idempotent per provider+ref).
