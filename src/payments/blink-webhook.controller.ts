@@ -32,6 +32,9 @@ const SUB_TABLES = [
   // trigger, so verifying the old table would confirm a payment against a
   // copy and leave the row this platform now considers the real one pending.
   { table: "provider_subscriptions", extra: "&source_service_key=eq.beach" },
+  // Car rentals settle on the same rails; leaving them out meant a Bitcoin
+  // payment only ever landed if the customer's browser was still watching.
+  { table: "rental_bookings",        extra: "&deleted_at=is.null" },
 ] as const;
 
 /** How many pending rows the blind fallback will verify in one call. */
@@ -202,7 +205,7 @@ export class BlinkWebhookController {
             method === "onchain" ? "blink-onchain" : "blink",
             ref,
             { paymentStatus: "paid", paidAt: new Date() },
-            { serviceName: `EverySub — ${table.replace(/_subscriptions$/, "")}` },
+            { serviceName: table === "rental_bookings" ? "EverySub Cars — rental" : `EverySub — ${table.replace(/_subscriptions$/, "")}` },
           ).catch((e) => this.logger.warn(`admin notify failed: ${(e as Error).message}`));
         }
       } catch (e) {
@@ -223,6 +226,9 @@ export class BlinkWebhookController {
     if (table === "cleaning_subscriptions") {
       patch.subscription_status = "active";
       patch.is_active = true;
+    } else if (table === "rental_bookings") {
+      // Confirmed, not active — a rental becomes active when the car is handed over.
+      patch.status = "confirmed";
     } else {
       patch.status = "active";
     }

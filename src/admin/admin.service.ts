@@ -83,6 +83,14 @@ const SUBSCRIPTION_WRITE_COLUMNS = new Set([
  */
 const SLOT_GRID_DAYS_AHEAD = 180;
 
+/** What a server-reconciled payment is called in the email and Telegram message. */
+const SERVICE_LABELS: Record<string, string> = {
+  cleaning_subscriptions: "EverySub — Cleaning",
+  food_subscriptions: "EverySub — Food",
+  provider_subscriptions: "EverySub — Beach Club",
+  rental_bookings: "EverySub Cars — rental",
+};
+
 @Injectable()
 export class AdminService {
   private readonly logger = new Logger(AdminService.name);
@@ -136,7 +144,7 @@ export class AdminService {
         // answer. The session is the source of truth for amount and client, so
         // it wins; the row fills the gaps.
         {
-          serviceName: `EverySub — ${table.replace(/_subscriptions$/, "")}`,
+          serviceName: SERVICE_LABELS[table] ?? "EverySub payment",
           amountCents: this.subAmountCents(table, sub) ?? undefined,
           clientName: sub.customer_name ?? sub.client_name ?? undefined,
           clientPhone: sub.customer_whatsapp ?? sub.customer_phone ?? undefined,
@@ -161,6 +169,7 @@ export class AdminService {
     if (table === "cleaning_subscriptions") return Number(sub.total_price_cents) || Number(sub.monthly_price_cents) || null;
     if (table === "beach_club_subscriptions") return Number(sub.total_cents) || null;
     if (table === "provider_subscriptions") return Number(sub.price_cents) || null;
+    if (table === "rental_bookings") return Number(sub.total_cents) || null;
     if (table === "food_subscriptions") {
       const weekly = Number(sub.weekly_price_cents) || 0;
       const weeks = (Number(sub.commitment_weeks) || 1) * (Number(sub.periods_paid) || 1);
@@ -1502,6 +1511,10 @@ export class AdminService {
       // Beach memberships are universal rows; the legacy twin follows by
       // trigger. Reconciling the old table would mark a copy paid.
       { table: "provider_subscriptions", statusCol: "status",              extraFilters: "&source_service_key=eq.beach" },
+      // Car rentals are booked, not subscribed, but the money behaves the same:
+      // without this a Bitcoin payment that confirmed after the tab closed left
+      // the booking pending for ever, with nobody told and the car still held.
+      { table: "rental_bookings",        statusCol: "status",              extraFilters: "&deleted_at=is.null" },
     ] as const;
 
     const checkPaid = async (sub: Record<string, any>): Promise<boolean> => {
@@ -1550,6 +1563,9 @@ export class AdminService {
           if (scope.table === "cleaning_subscriptions") {
             patch.subscription_status = "active";
             patch.is_active = true;
+          } else if (scope.table === "rental_bookings") {
+            // A rental is confirmed when paid; it only becomes active at pickup.
+            patch.status = "confirmed";
           } else {
             patch.status = "active";
           }
