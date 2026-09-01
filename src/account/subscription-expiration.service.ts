@@ -132,17 +132,86 @@ export class SubscriptionExpirationService {
   /** Mark cleaning subscriptions whose service_end_date has passed as expired. */
   private async expireOverdueCleaningSubscriptions(todayStr: string): Promise<void> {
     try {
-      await this.supabaseRest(
-        `/cleaning_subscriptions?subscription_status=eq.active&service_end_date=lt.${todayStr}`,
-        { method: "PATCH", body: JSON.stringify({ subscription_status: "expired", is_active: false, updated_at: new Date().toISOString() }) },
+      const nowIso = new Date().toISOString();
+      const expiredIds = new Set<string>();
+
+      const byServiceEnd = await this.supabaseRest<any[]>(
+        `/cleaning_subscriptions?subscription_status=eq.active&service_end_date=lt.${todayStr}&select=id`,
+        { method: "PATCH", body: JSON.stringify({ subscription_status: "expired", is_active: false, updated_at: nowIso }) },
       );
       // Fall back to end_date for rows that never populated service_end_date.
-      await this.supabaseRest(
-        `/cleaning_subscriptions?subscription_status=eq.active&service_end_date=is.null&end_date=lt.${todayStr}`,
-        { method: "PATCH", body: JSON.stringify({ subscription_status: "expired", is_active: false, updated_at: new Date().toISOString() }) },
+      const byEnd = await this.supabaseRest<any[]>(
+        `/cleaning_subscriptions?subscription_status=eq.active&service_end_date=is.null&end_date=lt.${todayStr}&select=id`,
+        { method: "PATCH", body: JSON.stringify({ subscription_status: "expired", is_active: false, updated_at: nowIso }) },
       );
+      for (const r of [...(byServiceEnd ?? []), ...(byEnd ?? [])]) if (r?.id) expiredIds.add(String(r.id));
+
+      // A subscription's visits end with the period it paid for. Left alone, the
+      // future ones stay `booked`, keep their Google Calendar events, and the
+      // calendar sync re-creates any the admin deletes — so an expired plan
+      // shows a phantom cleaning every week for ever. Cancel them here.
+      await this.cancelFutureCleaningBookings([...expiredIds], todayStr);
     } catch (err) {
       this.logger.warn(`Cleaning expiry sweep failed: ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * Cancel the future `booked` visits of subscriptions that just expired and
+   * flag them for calendar sync, so their events are removed rather than left
+   * as recurring phantoms. Past visits are history and are left untouched.
+   * Best-effort throughout: one bad slot must not abort the sweep.
+   */
+  private async cancelFutureCleaningBookings(subIds: string[], todayStr: string): Promise<void> {
+    if (subIds.length === 0) return;
+    try {
+      const inList = subIds.map((id) => `"${id}"`).join(",");
+      const bookings = await this.supabaseRest<any[]>(
+        `/cleaning_bookings?subscription_id=in.(${inList})&status=eq.booked&select=id,slot_id`,
+      );
+      if (!Array.isArray(bookings) || bookings.length === 0) return;
+
+      // Resolve slot dates so only FUTURE visits are cancelled.
+      const slotIds = [...new Set(bookings.map((b) => b.slot_id).filter(Boolean))].map((s) => `"${s}"`);
+      const slots = slotIds.length
+        ? await this.supabaseRest<any[]>(
+            `/cleaning_available_slots?id=in.(${slotIds.join(",")})&select=id,date,current_bookings`,
+          )
+        : [];
+      const slotById = new Map<string, any>((slots ?? []).map((s) => [String(s.id), s]));
+
+      const future = bookings.filter((b) => {
+        const d = slotById.get(String(b.slot_id))?.date;
+        return d && String(d) >= todayStr;
+      });
+      if (future.length === 0) return;
+
+      const ids = future.map((b) => `"${b.id}"`).join(",");
+      await this.supabaseRest(
+        `/cleaning_bookings?id=in.(${ids})`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            status: "cancelled",
+            google_calendar_sync_status: "pending",
+            updated_at: new Date().toISOString(),
+          }),
+        },
+      );
+
+      // Free the slots the cancelled visits held.
+      const perSlot = new Map<string, number>();
+      for (const b of future) if (b.slot_id) perSlot.set(b.slot_id, (perSlot.get(b.slot_id) ?? 0) + 1);
+      for (const [slotId, n] of perSlot) {
+        const cur = Number(slotById.get(String(slotId))?.current_bookings) || 0;
+        await this.supabaseRest(
+          `/cleaning_available_slots?id=eq.${encodeURIComponent(slotId)}`,
+          { method: "PATCH", body: JSON.stringify({ current_bookings: Math.max(0, cur - n), updated_at: new Date().toISOString() }) },
+        ).catch(() => {/* best effort */});
+      }
+      this.logger.log(`Cancelled ${future.length} future cleaning visit(s) across ${subIds.length} expired subscription(s)`);
+    } catch (err) {
+      this.logger.warn(`Cancel future cleaning bookings failed: ${(err as Error).message}`);
     }
   }
 
