@@ -1,4 +1,4 @@
-import { Injectable } from "@nestjs/common";
+import { Injectable, UnauthorizedException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import * as crypto from "crypto";
 import * as jwt from "jsonwebtoken";
@@ -87,12 +87,33 @@ export class SessionService {
     };
   }
 
+  /**
+   * A token that does not verify is a 401, never a 500.
+   *
+   * jwt.verify throws TokenExpiredError / JsonWebTokenError. Those are not
+   * HttpExceptions, so Nest rendered them as "Internal server error" — and the
+   * difference is not cosmetic. A browser refreshes its session on 401 and
+   * gives up on 500, so one expired access token made every admin and account
+   * endpoint fail *permanently*: the client never learned it should refresh,
+   * the panel stayed signed in with no data, and only a manual re-login fixed
+   * it. Both guards called these without a try, so nothing caught it for them.
+   *
+   * Fixed here rather than at the call sites so the next guard cannot forget.
+   */
   verifyAccessToken(token: string): AccessPayload {
-    return jwt.verify(token, this.accessSecret()) as AccessPayload;
+    try {
+      return jwt.verify(token, this.accessSecret()) as AccessPayload;
+    } catch {
+      throw new UnauthorizedException("Access token is invalid or expired");
+    }
   }
 
   verifyRefreshToken(token: string): RefreshPayload {
-    return jwt.verify(token, this.refreshSecret()) as RefreshPayload;
+    try {
+      return jwt.verify(token, this.refreshSecret()) as RefreshPayload;
+    } catch {
+      throw new UnauthorizedException("Refresh token is invalid or expired");
+    }
   }
 
   /**
@@ -109,7 +130,12 @@ export class SessionService {
   }
 
   verifyVerifyToken(token: string): { sub: string; typ: string } {
-    const payload = jwt.verify(token, this.verifySecret()) as jwt.JwtPayload;
+    let payload: jwt.JwtPayload;
+    try {
+      payload = jwt.verify(token, this.verifySecret()) as jwt.JwtPayload;
+    } catch {
+      throw new UnauthorizedException("Verification token is invalid or expired");
+    }
     if (payload.typ !== "verify" || !payload.sub) {
       throw new Error("Invalid verification token");
     }
