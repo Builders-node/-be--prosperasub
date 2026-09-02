@@ -74,6 +74,20 @@ const LEGACY_STATUS: Record<string, Partial<Record<Status, string>>> = {
 export class OccurrencesService {
   private readonly logger = new Logger(OccurrencesService.name);
 
+  /**
+   * What marking one half of a rental means for the booking itself.
+   *
+   * Deliberately not in LEGACY_STATUS: that map answers "what does this
+   * service call a finished job", and a rental has no single answer — the same
+   * status means different things on the handover and on the return.
+   */
+  private rentalStatusFor(itemKey: string | null, status: Status): string | null {
+    if (status === "cancelled" || status === "failed") return "cancelled";
+    if (itemKey === "handover") return status === "done" ? "active" : "confirmed";
+    if (itemKey === "return") return status === "done" ? "completed" : "active";
+    return null;
+  }
+
   /** A provider's occurrences in a window, newest day first. */
   async list(userId: string, providerId: string, isAdmin: boolean, query: {
     from?: string; to?: string; status?: string;
@@ -136,6 +150,25 @@ export class OccurrencesService {
       if (bookingStatus) {
         await this.patch(`bookings?id=eq.${this.enc(occ.source_record_id)}`, {
           status: bookingStatus,
+          updated_at: new Date().toISOString(),
+        });
+        return this.load(occurrenceId);
+      }
+    }
+
+    // A rental has TWO occurrences and one booking, so which of the two was
+    // marked is what decides the booking's state: handing the car over starts
+    // the rental, taking it back ends it. Writing here rather than only on the
+    // occurrence matters because the booking is what holds the car — a
+    // cancelled handover that never reached `rental_bookings` would leave the
+    // car unavailable for a rental nobody is having. The mirror trigger then
+    // carries the change back into both occurrences, so neither is written
+    // twice from here.
+    if (svc === "vehicles" && occ.source_record_id) {
+      const rentalStatus = this.rentalStatusFor(occ.item_key, status);
+      if (rentalStatus) {
+        await this.patch(`rental_bookings?id=eq.${this.enc(occ.source_record_id)}`, {
+          status: rentalStatus,
           updated_at: new Date().toISOString(),
         });
         return this.load(occurrenceId);
