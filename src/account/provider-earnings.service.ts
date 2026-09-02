@@ -16,7 +16,7 @@ import { Injectable, Logger, ServiceUnavailableException } from "@nestjs/common"
  * this shares its defaults to avoid.
  */
 
-type FinanceKey = "cleaning" | "beach" | "food";
+type FinanceKey = "cleaning" | "beach" | "food" | "vehicles";
 
 /** The platform's rate when a provider carries none of its own. */
 const DEFAULT_COMMISSION_PCT = 10;
@@ -207,6 +207,27 @@ export class ProviderEarningsService {
       }));
     }
 
+    if (source === "vehicles") {
+      // Scoped by the universal id — `rental_bookings.provider_id` references
+      // `providers` directly, cars having no legacy id space to bridge from.
+      // This figure is the ceiling a payout request is checked against, so a
+      // cancelled or unpaid rental must not raise it.
+      if (!providerId) return { revenue: 0 };
+      const rows = await this.rest<Array<Record<string, any>>>(
+        `rental_bookings?provider_id=eq.${encodeURIComponent(providerId)}&payment_status=eq.paid` +
+        `&status=neq.cancelled&deleted_at=is.null` +
+        `&select=total_cents,created_at,start_date,end_date,rental_days`);
+      // `total_cents` is the BASE. The payment surcharge is recorded in its own
+      // column because it covers the processor's cut and is never the
+      // business's revenue — it must not reach a withdrawable balance.
+      return acc(rows, (r) => ({
+        totalCents: Number(r.total_cents || 0),
+        serviceStart: r.start_date || r.created_at,
+        serviceEnd: r.end_date,
+        fallbackDays: Math.max(1, Number(r.rental_days) || 1),
+      }));
+    }
+
     return { revenue: 0 };
   }
 
@@ -215,6 +236,10 @@ export class ProviderEarningsService {
     if (k === "cleaning") return "cleaning";
     if (k === "food") return "food";
     if (k === "beach" || k === "beach_club" || k === "entertainment") return "beach";
+    // Cars never were a legacy service, so a rental business has no
+    // `source_service_key` to match on — the caller already falls back to
+    // `archetype_key`, and this is where that lands.
+    if (k === "vehicles") return "vehicles";
     return null;
   }
 
