@@ -16,7 +16,110 @@ import { Injectable, Logger, ServiceUnavailableException } from "@nestjs/common"
  * this shares its defaults to avoid.
  */
 
-type FinanceKey = "cleaning" | "beach" | "food" | "vehicles";
+type FinanceKey = keyof typeof REVENUE_SOURCES;
+
+/**
+ * Where each vertical's money is, said as data.
+ *
+ * The mirror of the browser's `services/revenue.ts` — the two must move
+ * together, because this one is the ceiling a payout request is checked
+ * against and that one is the figure a business is shown. They cannot be one
+ * file without a shared package, so they are one shape in two places.
+ *
+ * No entry means the universal path. A service created in /admin/services has
+ * none, and that is the configuration, not an omission.
+ */
+interface RevenueSource {
+  table: string;
+  select: string;
+  scope: "universal" | "legacy";
+  scopeColumn?: string;
+  /** Extra PostgREST predicates, written as they appear in the query. */
+  where?: string;
+  /** Ids to match instead of the provider — cleaning's packages. */
+  resolveScope?: (
+    legacyId: string,
+    /** The service's own PostgREST reader, handed in so a descriptor stays data. */
+    rest: (path: string) => Promise<any>,
+  ) => Promise<string[]>;
+  toInput: (row: any) => Recognition;
+}
+
+const UNIVERSAL_REVENUE: RevenueSource = {
+  table: "provider_subscriptions",
+  select: "total_cents:price_cents,created_at,start_date,end_date",
+  scope: "universal",
+  where: "&payment_status=eq.paid",
+  toInput: (r) => ({
+    totalCents: r.total_cents || 0,
+    serviceStart: r.start_date || r.created_at,
+    serviceEnd: r.end_date,
+    fallbackDays: 30,
+  }),
+};
+
+const REVENUE_ALIASES: Record<string, string> = { beach_club: "beach", entertainment: "beach" };
+
+const REVENUE_SOURCES: Record<string, RevenueSource> = {
+  cleaning: {
+    table: "cleaning_subscriptions",
+    select: "total_price_cents,monthly_price_cents,created_at,service_start_date,service_end_date,start_date,end_date",
+    scope: "legacy",
+    scopeColumn: "package_id",
+    where: "&payment_status=eq.paid&deleted_at=is.null",
+    // A cleaning subscription names a package, not the business selling it.
+    resolveScope: async (legacyId, rest) => {
+      const pkgs = await rest(`cleaning_packages?provider_id=eq.${encodeURIComponent(legacyId)}&select=id`);
+      return (pkgs ?? []).map((p: { id: string }) => String(p.id));
+    },
+    toInput: (r) => {
+      const total = Number(r.total_price_cents || 0);
+      const monthly = Number(r.monthly_price_cents || 0);
+      const months = monthly > 0 && total >= monthly ? Math.max(1, Math.round(total / monthly)) : 1;
+      return {
+        totalCents: total || monthly,
+        serviceStart: r.service_start_date || r.start_date || r.created_at,
+        serviceEnd: r.service_end_date || r.end_date,
+        fallbackDays: months * 30,
+      };
+    },
+  },
+
+  food: {
+    table: "food_subscriptions",
+    select: "weekly_price_cents,commitment_weeks,periods_paid,created_at,started_at",
+    scope: "legacy",
+    where: "&payment_status=eq.paid&status=in.(active,paused,expired)",
+    toInput: (r) => {
+      const weeks = (r.commitment_weeks || 1) * (r.periods_paid || 1);
+      return {
+        totalCents: (r.weekly_price_cents || 0) * weeks,
+        serviceStart: r.started_at || r.created_at,
+        serviceEnd: null,
+        fallbackDays: weeks * 7,
+      };
+    },
+  },
+
+  // The beach IS the universal path — memberships moved to
+  // provider_subscriptions and the legacy table is their shadow, which would
+  // be the same money counted twice.
+  beach: UNIVERSAL_REVENUE,
+
+  vehicles: {
+    table: "rental_bookings",
+    select: "total_cents,created_at,start_date,end_date,rental_days",
+    scope: "universal",
+    where: "&payment_status=eq.paid&status=neq.cancelled&deleted_at=is.null",
+    toInput: (r) => ({
+      totalCents: Number(r.total_cents || 0),
+      serviceStart: r.start_date || r.created_at,
+      serviceEnd: r.end_date,
+      fallbackDays: Math.max(1, Number(r.rental_days) || 1),
+    }),
+  },
+};
+
 
 /** The platform's rate when a provider carries none of its own. */
 const DEFAULT_COMMISSION_PCT = 10;
@@ -147,100 +250,31 @@ export class ProviderEarningsService {
       revenue: (rows ?? []).reduce((sum, r) => sum + recognizedCents(toInput(r), start, end), 0),
     });
 
-    if (source === "cleaning") {
-      if (!legacyId) return { revenue: 0 };
-      const pkgs = await this.rest<Array<{ id: string }>>(
-        `cleaning_packages?provider_id=eq.${encodeURIComponent(legacyId)}&select=id`);
-      const ids = (pkgs ?? []).map((p) => p.id);
+    const src = REVENUE_SOURCES[source ?? ""] ?? UNIVERSAL_REVENUE;
+    const scopeId = src.scope === "universal" ? (providerId || legacyId) : legacyId;
+    if (!scopeId) return { revenue: 0 };
+
+    // Rows a provider owns indirectly — cleaning's, which name a package
+    // rather than the business that sells it.
+    let filter: string;
+    if (src.resolveScope) {
+      const ids = await src.resolveScope(scopeId, (path) => this.rest<Array<Record<string, any>>>(path));
       if (!ids.length) return { revenue: 0 };
-      const rows = await this.rest<Array<Record<string, any>>>(
-        `cleaning_subscriptions?package_id=in.(${ids.join(",")})&payment_status=eq.paid&deleted_at=is.null` +
-        `&select=total_price_cents,monthly_price_cents,created_at,service_start_date,service_end_date,start_date,end_date`);
-      return acc(rows, (r) => {
-        const total = Number(r.total_price_cents || 0);
-        const monthly = Number(r.monthly_price_cents || 0);
-        const months = monthly > 0 && total >= monthly ? Math.max(1, Math.round(total / monthly)) : 1;
-        return {
-          totalCents: total || monthly,
-          serviceStart: r.service_start_date || r.start_date || r.created_at,
-          serviceEnd: r.service_end_date || r.end_date,
-          fallbackDays: months * 30,
-        };
-      });
+      filter = `${src.scopeColumn ?? "provider_id"}=in.(${ids.join(",")})`;
+    } else {
+      filter = `${src.scopeColumn ?? "provider_id"}=eq.${encodeURIComponent(scopeId)}`;
     }
 
-    if (source === "food") {
-      if (!legacyId) return { revenue: 0 };
-      const rows = await this.rest<Array<Record<string, any>>>(
-        `food_subscriptions?provider_id=eq.${encodeURIComponent(legacyId)}&payment_status=eq.paid` +
-        `&status=in.(active,paused,expired)` +
-        `&select=weekly_price_cents,commitment_weeks,periods_paid,created_at,started_at`);
-      return acc(rows, (r) => {
-        const weeks = (r.commitment_weeks || 1) * (r.periods_paid || 1);
-        const startDay = r.started_at || r.created_at;
-        return {
-          totalCents: (r.weekly_price_cents || 0) * weeks,
-          serviceStart: startDay,
-          serviceEnd: null,
-          fallbackDays: weeks * 7,
-        };
-      });
-    }
-
-    if (source === "beach") {
-      // Scoped to THIS business, not to the service.
-      //
-      // `financeSourceFor` answers "beach" for the whole Lifestyle archetype,
-      // so an unscoped total handed every provider on it the beach club's
-      // revenue — and this figure is the cap the payout request is checked
-      // against. Memberships are universal rows; the legacy table is their
-      // shadow, and totalling the shadow is how one payment becomes two.
-      if (!providerId) return { revenue: 0 };
-      const rows = await this.rest<Array<Record<string, any>>>(
-        `provider_subscriptions?provider_id=eq.${encodeURIComponent(providerId)}&payment_status=eq.paid` +
-        `&select=total_cents:price_cents,created_at,start_date,end_date`);
-      return acc(rows, (r) => ({
-        totalCents: r.total_cents || 0,
-        serviceStart: r.start_date || r.created_at,
-        serviceEnd: r.end_date,
-        fallbackDays: 30,
-      }));
-    }
-
-    if (source === "vehicles") {
-      // Scoped by the universal id — `rental_bookings.provider_id` references
-      // `providers` directly, cars having no legacy id space to bridge from.
-      // This figure is the ceiling a payout request is checked against, so a
-      // cancelled or unpaid rental must not raise it.
-      if (!providerId) return { revenue: 0 };
-      const rows = await this.rest<Array<Record<string, any>>>(
-        `rental_bookings?provider_id=eq.${encodeURIComponent(providerId)}&payment_status=eq.paid` +
-        `&status=neq.cancelled&deleted_at=is.null` +
-        `&select=total_cents,created_at,start_date,end_date,rental_days`);
-      // `total_cents` is the BASE. The payment surcharge is recorded in its own
-      // column because it covers the processor's cut and is never the
-      // business's revenue — it must not reach a withdrawable balance.
-      return acc(rows, (r) => ({
-        totalCents: Number(r.total_cents || 0),
-        serviceStart: r.start_date || r.created_at,
-        serviceEnd: r.end_date,
-        fallbackDays: Math.max(1, Number(r.rental_days) || 1),
-      }));
-    }
-
-    return { revenue: 0 };
+    const rows = await this.rest<Array<Record<string, any>>>(
+      `${src.table}?${filter}${src.where ?? ""}&select=${src.select}`,
+    );
+    return acc(rows, src.toInput);
   }
 
+  /** Which descriptor a provider's key resolves to; null is the universal one. */
   private financeSourceFor(key: string | null): FinanceKey | null {
     const k = String(key ?? "").toLowerCase();
-    if (k === "cleaning") return "cleaning";
-    if (k === "food") return "food";
-    if (k === "beach" || k === "beach_club" || k === "entertainment") return "beach";
-    // Cars never were a legacy service, so a rental business has no
-    // `source_service_key` to match on — the caller already falls back to
-    // `archetype_key`, and this is where that lands.
-    if (k === "vehicles") return "vehicles";
-    return null;
+    return (REVENUE_ALIASES[k] ?? (k in REVENUE_SOURCES ? k : null)) as FinanceKey | null;
   }
 
   /** Anything not rejected is money already spoken for. */
