@@ -20,6 +20,7 @@ import { SupportModule } from "./support/support.module";
 import { AnalyticsModule } from "./analytics/analytics.module";
 import { NotificationEventsModule } from "./notification/notification-events.module";
 import { IntegrationsModule } from "./integrations/integrations.module";
+import { RentalsModule } from "./rentals/rentals.module";
 
 @Module({
   imports: [
@@ -41,6 +42,7 @@ import { IntegrationsModule } from "./integrations/integrations.module";
     MailModule,
     CatalogModule,
     PaymentsModule,
+    RentalsModule,
     AdminModule,
     AccountModule,
     VerifyModule,
