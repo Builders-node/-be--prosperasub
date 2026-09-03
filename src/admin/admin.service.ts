@@ -1509,8 +1509,12 @@ export class AdminService {
       { table: "cleaning_subscriptions", statusCol: "subscription_status", extraFilters: "&deleted_at=is.null" },
       { table: "food_subscriptions",     statusCol: "status",              extraFilters: "" },
       // Beach memberships are universal rows; the legacy twin follows by
-      // trigger. Reconciling the old table would mark a copy paid.
-      { table: "provider_subscriptions", statusCol: "status",              extraFilters: "&source_service_key=eq.beach" },
+      // trigger. Reconciling the old table would mark a copy paid. A NULL
+      // source key is a purchase on a universal-only service — those settle on
+      // the same rails and used to be invisible here, so a Bitcoin payment
+      // whose tab closed stayed pending for ever. The cleaning/food-keyed rows
+      // stay excluded: they are the frozen 2026-07 backfill, not live sales.
+      { table: "provider_subscriptions", statusCol: "status",              extraFilters: "&or=(source_service_key.eq.beach,source_service_key.is.null)" },
       // Car rentals are booked, not subscribed, but the money behaves the same:
       // without this a Bitcoin payment that confirmed after the tab closed left
       // the booking pending for ever, with nobody told and the car still held.

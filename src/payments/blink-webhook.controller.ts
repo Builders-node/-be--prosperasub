@@ -31,7 +31,10 @@ const SUB_TABLES = [
   // The beach's memberships are universal rows; the legacy twin follows by
   // trigger, so verifying the old table would confirm a payment against a
   // copy and leave the row this platform now considers the real one pending.
-  { table: "provider_subscriptions", extra: "&source_service_key=eq.beach" },
+  // A NULL source key is a purchase on a universal-only service — same rails,
+  // and previously invisible to this fallback. Rows keyed cleaning/food stay
+  // excluded: they are the frozen backfill, not live sales.
+  { table: "provider_subscriptions", extra: "&or=(source_service_key.eq.beach,source_service_key.is.null)" },
   // Car rentals settle on the same rails; leaving them out meant a Bitcoin
   // payment only ever landed if the customer's browser was still watching.
   { table: "rental_bookings",        extra: "&deleted_at=is.null" },
