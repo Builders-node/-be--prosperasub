@@ -215,15 +215,24 @@ export class SubscriptionExpirationService {
     }
   }
 
-  /** Mark beach-club subscriptions whose end_date has passed as expired. */
+  /**
+   * Mark universal subscriptions whose end_date has passed as expired — beach
+   * memberships AND rows on universal-only services (NULL source key). The
+   * sweep used to be beach-only, so a universal purchase stayed `active` for
+   * ever: it kept opening the booking engine (`plansHeldBy` checks status, not
+   * end_date) and kept reading as live in every list. One-time offers made
+   * this urgent — each one is a universal row with a real end. The
+   * cleaning/food-keyed rows are the frozen backfill and stay untouched.
+   */
   private async expireOverdueBeachSubscriptions(todayStr: string): Promise<void> {
     try {
       await this.supabaseRest(
-        `/provider_subscriptions?source_service_key=eq.beach&status=eq.active&end_date=lt.${todayStr}`,
+        `/provider_subscriptions?or=(source_service_key.eq.beach,source_service_key.is.null)` +
+          `&status=eq.active&end_date=lt.${todayStr}`,
         { method: "PATCH", body: JSON.stringify({ status: "expired", updated_at: new Date().toISOString() }) },
       );
     } catch (err) {
-      this.logger.warn(`Beach expiry sweep failed: ${(err as Error).message}`);
+      this.logger.warn(`Universal expiry sweep failed: ${(err as Error).message}`);
     }
   }
 

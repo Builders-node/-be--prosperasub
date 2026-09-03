@@ -46,6 +46,14 @@ function slotHours(dateISO: string, from: string, to: string, timeZone: string):
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/**
+ * `resource|date|from` — the slot as the customer sees it. A capacity_seat
+ * booking appends `|s<n>` so `bookings_active_slot_uidx` (unique per slot_key)
+ * guards each SEAT instead of the whole boat; stripping the suffix recovers
+ * the slot every seat belongs to, which is what the waitlist queues on.
+ */
+export const baseSlotKey = (slotKey: string): string => slotKey.split("|").slice(0, 3).join("|");
+
 /** Honduras does not observe DST, so one offset is the whole story. */
 const PLATFORM_UTC_OFFSET_MINUTES = -360;
 
@@ -173,7 +181,7 @@ export class BookingService {
       hours: slotHours(input.date, input.from, slot.to, schedule.timezone),
     });
 
-    const slotKey = `${input.resourceId}|${input.date}|${input.from}`;
+    const base = `${input.resourceId}|${input.date}|${input.from}`;
     // `new Date("...T18:00:00")` with no offset is parsed in the PROCESS's
     // timezone — UTC on Vercel. An 18:00 Honduras slot was therefore stored as
     // 18:00Z = 12:00 Honduras: the customer tapped one time and got another,
@@ -182,36 +190,51 @@ export class BookingService {
     const endAt = zonedWallClockToInstant(input.date, slot.to, schedule.timezone);
     const now = new Date();
 
-    // Free any expired holds on this slot so a stale hold can't block it.
+    // Free any expired holds on this slot so a stale hold can't block it. The
+    // prefix match covers seat-suffixed keys too — an exact match would leave
+    // a boat's expired seats blocking new passengers.
     await this.prisma.booking.updateMany({
-      where: { resourceId: input.resourceId, slotKey, status: "held", expiresAt: { lt: now } },
+      where: { resourceId: input.resourceId, slotKey: { startsWith: base }, status: "held", expiresAt: { lt: now } },
       data: { status: "released" },
     });
 
+    /**
+     * How many may share this time. A court is one booking per slot — the
+     * unique index says so directly. A capacity_seat calendar (a boat, a
+     * co-working row) sells the SAME time to `capacity` people, so each
+     * attempt claims a numbered seat and the index guards the seat. First
+     * free seat wins; every seat refusing means the slot is genuinely full.
+     */
+    const seats = avail.bookingModel === "capacity_seat"
+      ? Math.max(1, Number(slot.capacity ?? resource?.capacity ?? 1))
+      : 1;
+
     const expiresAt = new Date(now.getTime() + (input.ttlMinutes ?? HOLD_TTL_MINUTES) * 60_000);
-    try {
-      const booking = await this.prisma.booking.create({
-        data: {
-          resourceId: input.resourceId,
-          providerId: resource?.provider_id ?? null,
-          subjectRef: input.subjectRef ?? null,
-          startAt, endAt, slotKey, status: "held", expiresAt,
-          label: input.label ?? null,
-          notes: input.notes ?? null,
-        },
-      });
-      await this.eventBus.publish({
-        type: "booking.SlotHeld",
-        subjectRef: input.subjectRef ?? `booking:${booking.id}`,
-        payload: { bookingId: booking.id, resourceId: input.resourceId, slotKey, from: input.from, to: slot.to, expiresAt },
-      });
-      return { held: true, bookingId: booking.id, expiresAt };
-    } catch (err) {
-      if ((err as { code?: string })?.code === "P2002") {
-        return { held: false, reason: "slot_taken" as const };
+    for (let seat = 1; seat <= seats; seat++) {
+      const slotKey = seats > 1 ? `${base}|s${seat}` : base;
+      try {
+        const booking = await this.prisma.booking.create({
+          data: {
+            resourceId: input.resourceId,
+            providerId: resource?.provider_id ?? null,
+            subjectRef: input.subjectRef ?? null,
+            startAt, endAt, slotKey, status: "held", expiresAt,
+            label: input.label ?? null,
+            notes: input.notes ?? null,
+          },
+        });
+        await this.eventBus.publish({
+          type: "booking.SlotHeld",
+          subjectRef: input.subjectRef ?? `booking:${booking.id}`,
+          payload: { bookingId: booking.id, resourceId: input.resourceId, slotKey, from: input.from, to: slot.to, expiresAt },
+        });
+        return { held: true, bookingId: booking.id, expiresAt };
+      } catch (err) {
+        if ((err as { code?: string })?.code === "P2002") continue;
+        throw err;
       }
-      throw err;
     }
+    return { held: false, reason: "slot_taken" as const };
   }
 
   /**
@@ -740,7 +763,8 @@ export class BookingService {
       subjectRef: b.subjectRef ?? `booking:${bookingId}`,
       payload: { bookingId, resourceId: b.resourceId, slotKey: b.slotKey },
     });
-    await this.promoteWaitlist(b.resourceId, b.slotKey);
+    // The waitlist queues on the slot, not on a seat of it.
+    await this.promoteWaitlist(b.resourceId, baseSlotKey(b.slotKey));
     return { cancelled: true, bookingId };
   }
 
@@ -770,7 +794,7 @@ export class BookingService {
         subjectRef: b.subjectRef ?? `booking:${b.id}`,
         payload: { bookingId: b.id, resourceId: b.resourceId, slotKey: b.slotKey },
       });
-      await this.promoteWaitlist(b.resourceId, b.slotKey);
+      await this.promoteWaitlist(b.resourceId, baseSlotKey(b.slotKey));
     }
     return { expired: expired.length };
   }
