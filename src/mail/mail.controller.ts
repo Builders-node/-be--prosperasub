@@ -3,6 +3,7 @@ import { ApiBearerAuth, ApiBody, ApiOperation, ApiProperty, ApiResponse, ApiTags
 import { IsEmail, IsIn, IsInt, IsOptional, IsString, Min } from "class-validator";
 import { SessionService } from "../auth/session.service";
 import { MailService } from "./mail.service";
+import { ProviderOrderMailService } from "./provider-order-mail.service";
 
 class PaymentConfirmationEmailDto {
   @ApiProperty({ required: false, example: "user@example.com" })
@@ -57,13 +58,47 @@ class PaymentConfirmationEmailDto {
   apartmentNote?: string;
 }
 
+class NewOrderEmailDto {
+  @ApiProperty({ example: "provider_subscriptions" })
+  @IsString()
+  table!: string;
+
+  @ApiProperty({ example: "7c1a…" })
+  @IsString()
+  orderId!: string;
+}
+
 @ApiTags("Mail")
 @Controller("mail")
 export class MailController {
   constructor(
     private readonly mail: MailService,
+    private readonly providerOrderMail: ProviderOrderMailService,
     private readonly sessions: SessionService
   ) {}
+
+  /**
+   * Tell the business that sold it. Called by a checkout the moment the order
+   * row exists; the reconcile cron calls the same service when a payment
+   * lands, and the ledger makes the second call a no-op.
+   *
+   * The body names an order, nothing more: the amounts, the dates and the
+   * recipients are read server-side, so a caller cannot dictate what the
+   * email says or who receives it. Auth is any signed-in account — the person
+   * who just bought — and an unknown id is simply not notified.
+   */
+  @ApiBearerAuth()
+  @ApiOperation({ summary: "Email a provider's owner and team that they have a new order" })
+  @ApiBody({ type: NewOrderEmailDto })
+  @ApiResponse({ status: 201, description: "Notification attempted; body says whether it was sent." })
+  @Post("new-order")
+  async sendNewOrder(
+    @Headers("authorization") authorization: string | undefined,
+    @Body() body: NewOrderEmailDto
+  ) {
+    this.verifyBearer(authorization);
+    return this.providerOrderMail.notifyNewOrder(body.table, body.orderId);
+  }
 
   @ApiBearerAuth()
   @ApiOperation({ summary: "Send a cleaning payment confirmation email to the authenticated user" })

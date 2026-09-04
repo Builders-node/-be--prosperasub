@@ -8,7 +8,10 @@ describe("MailController", () => {
   const mail = {
     sendPaymentConfirmationEmail: jest.fn().mockResolvedValue({ sent: true })
   };
-  const controller = new MailController(mail as any, sessions);
+  const providerOrderMail = {
+    notifyNewOrder: jest.fn().mockResolvedValue({ sent: true, recipients: ["owner@example.com"] })
+  };
+  const controller = new MailController(mail as any, providerOrderMail as any, sessions);
 
   const body = {
     planName: "1 Bedroom & Studio",

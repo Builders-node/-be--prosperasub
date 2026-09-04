@@ -7,6 +7,7 @@ import { BeachCourtCalendarSyncService } from "../google-calendar/beach-court-ca
 import { BlinkService } from "../payments/blink.service";
 import { PayPalService } from "../payments/paypal.service";
 import { MailService } from "../mail/mail.service";
+import { ProviderOrderMailService } from "../mail/provider-order-mail.service";
 import { BillingService } from "../billing/billing.service";
 import type { PaymentMethod } from "../billing/payment-provider.port";
 import { NotificationsService } from "../notifications/notifications.service";
@@ -107,6 +108,7 @@ export class AdminService {
     @Optional() private readonly billing?: BillingService,
     @Optional() private readonly paypal?: PayPalService,
     @Optional() private readonly notifications?: NotificationsService,
+    @Optional() private readonly providerOrderMail?: ProviderOrderMailService,
   ) {}
 
   /**
@@ -1582,6 +1584,13 @@ export class AdminService {
           // Admin email + Telegram — the browser poll didn't get here, so this
           // is the only place that tells the team money arrived.
           void this.notifyAdminPaymentReceived(scope.table, sub);
+
+          // And the BUSINESS that has to fulfil it. Idempotent: the checkout
+          // usually notifies the moment the order is written, and the ledger
+          // in provider_order_notifications makes this a no-op when it did.
+          // When the tab died before paying, this is the only call there is.
+          void this.providerOrderMail?.notifyNewOrder(scope.table, String(sub.id))
+            .catch((err) => this.logger.warn(`provider order mail failed: ${(err as Error).message}`));
 
           // Billing domain: record + emit billing.PaymentCaptured from the same
           // single place as interactive checkouts (idempotent per provider+ref).
