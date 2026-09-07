@@ -13,6 +13,7 @@ import { ReviewPromptsService } from "./review-prompts.service";
 import { AccountPaymentService } from "./account-payment.service";
 import { AccountCleaningService } from "./account-cleaning.service";
 import { AccountLocationsService } from "./account-locations.service";
+import { ReferralsService } from "./referrals.service";
 import { CleaningReminderService } from "./cleaning-reminder.service";
 
 class ChangePasswordDto {
@@ -24,6 +25,12 @@ class ChangePasswordDto {
   @IsString()
   @MinLength(8)
   new_password!: string;
+}
+
+class ClaimReferralDto {
+  @ApiProperty({ description: "The code the friend shared, e.g. 9C37UX" })
+  @IsString()
+  code!: string;
 }
 
 class RescheduleBookingDto {
@@ -161,6 +168,7 @@ export class AccountController {
     private readonly cancellation: AccountCancellationService,
     private readonly payouts: ProviderPayoutsService,
     private readonly occurrences: OccurrencesService,
+    private readonly referrals: ReferralsService,
     private readonly members: ProviderMembersService,
     private readonly reviewPrompts: ReviewPromptsService,
     private readonly locations: AccountLocationsService,
@@ -432,6 +440,32 @@ export class AccountController {
   @Get("reviews/pending")
   pendingReviews(@Req() req: AccountRequest) {
     return this.reviewPrompts.pending(req.authUser!.id);
+  }
+
+  /**
+   * Your code, who has used it, and what you have earned.
+   *
+   * The reward itself is granted by a database trigger when the friend's first
+   * order is paid — three different writers mark an order paid and only the
+   * database sees all three. This endpoint only reports.
+   */
+  @ApiOperation({ summary: "Your referral code, invitees and credit balance" })
+  @Get("referrals")
+  referralSummary(@Req() req: AccountRequest) {
+    return this.referrals.summary(req.authUser!.id);
+  }
+
+  /**
+   * Record that you arrived on a friend's code.
+   *
+   * Guarded rather than trusted: the caller is the person being referred and
+   * the server takes their id from the token, so nobody can name themselves as
+   * somebody else's referrer.
+   */
+  @ApiOperation({ summary: "Attach a referral code to your new account" })
+  @Post("referrals/claim")
+  claimReferral(@Req() req: AccountRequest, @Body() body: ClaimReferralDto) {
+    return this.referrals.claim(req.authUser!.id, body.code);
   }
 
   @ApiOperation({ summary: "Who runs a business you own" })

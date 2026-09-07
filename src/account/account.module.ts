@@ -18,6 +18,7 @@ import { ProviderEarningsService } from "./provider-earnings.service";
 import { OccurrencesService } from "./occurrences.service";
 import { ProviderMembersService } from "./provider-members.service";
 import { ReviewPromptsService } from "./review-prompts.service";
+import { ReferralsService } from "./referrals.service";
 import { AccountController } from "./account.controller";
 import { AccountRenewalsController } from "./account-renewals.controller";
 import { CleaningReminderService } from "./cleaning-reminder.service";
@@ -42,6 +43,7 @@ import { RemindersController } from "./reminders.controller";
     OccurrencesService,
     ProviderMembersService,
     ReviewPromptsService,
+    ReferralsService,
     CleaningReminderService,
     SubscriptionExpirationService,
   ],
