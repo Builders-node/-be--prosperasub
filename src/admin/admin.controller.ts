@@ -23,6 +23,7 @@ import { CreateProviderPayoutDto, DecideProviderPayoutDto } from "./dto/provider
 import { AdminContentService } from "./admin-content.service";
 import { RefundsService } from "./refunds.service";
 import { CustomerCreditsService } from "./customer-credits.service";
+import { PromoCodesService } from "./promo-codes.service";
 import { AdminPermission, RequireAdminPermission } from "./admin-permissions";
 import { AdminRbacService } from "./admin-rbac.service";
 import { AssignUserRolesDto, CreateRoleDto, UpdateRoleDto } from "./admin-roles.dto";
@@ -59,6 +60,7 @@ export class AdminController {
     private readonly blink: BlinkService,
     private readonly refunds: RefundsService,
     private readonly credits: CustomerCreditsService,
+    private readonly promos: PromoCodesService,
   ) {}
 
   @ApiOperation({ summary: "Get platform overview metrics" })
@@ -774,6 +776,43 @@ export class AdminController {
    * to — so for the others this records the obligation and says `manual: true`
    * rather than pretending.
    */
+  /**
+   * Promo codes.
+   *
+   * Server-side because the table is service-role only, and the table is
+   * service-role only because the admin panel writes from the browser with the
+   * public anon key — a promo table the browser could write is a hundred
+   * percent off for anybody who reads the bundle.
+   */
+  @ApiOperation({ summary: "Every promo code, with how often it has been used" })
+  @Get("promo-codes")
+  @RequireAdminPermission(AdminPermission.PaymentsRead)
+  listPromoCodes() {
+    return this.promos.list();
+  }
+
+  @ApiOperation({ summary: "Create a promo code" })
+  @Post("promo-codes")
+  @RequireAdminPermission(AdminPermission.PaymentsWrite)
+  createPromoCode(@Body() body: Record<string, any>, @Req() request: AdminRequest) {
+    return this.promos.create(body, request.adminUser?.id);
+  }
+
+  /** Value and scope are fixed once created — only whether it still runs. */
+  @ApiOperation({ summary: "Switch a promo code off, or change its window" })
+  @Patch("promo-codes/:id")
+  @RequireAdminPermission(AdminPermission.PaymentsWrite)
+  updatePromoCode(@Param("id") id: string, @Body() body: Record<string, any>) {
+    return this.promos.update(id, body);
+  }
+
+  @ApiOperation({ summary: "Delete a promo code that nobody has used" })
+  @Delete("promo-codes/:id")
+  @RequireAdminPermission(AdminPermission.PaymentsWrite)
+  deletePromoCode(@Param("id") id: string) {
+    return this.promos.remove(id);
+  }
+
   @ApiOperation({ summary: "Refund an order, in whole or in part" })
   @Post("orders/:table/:id/refund")
   @RequireAdminPermission(AdminPermission.PaymentsWrite)

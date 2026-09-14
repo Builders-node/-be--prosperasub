@@ -18,6 +18,7 @@ describe("AdminController", () => {
       {} as any,
       {} as any, // refunds
       {} as any, // customer credits
+      {} as any, // promo codes
     );
 
     expect(controller.getOverview()).toEqual(
