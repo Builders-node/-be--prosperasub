@@ -91,6 +91,34 @@ export class PayPalService {
     }
   }
 
+  /**
+   * Send a capture back, in whole or in part.
+   *
+   * PayPal refunds a CAPTURE, not an order, which is why the capture id is
+   * what gets stored on a paid row. Omitting the amount refunds everything,
+   * which is what PayPal's own API means by an empty body — a partial refund
+   * has to name the figure.
+   *
+   * An already-refunded capture answers 422; that is reported as such rather
+   * than retried, because a second refund of the same capture would be a
+   * second payment out if it ever did succeed.
+   */
+  async refundCapture(captureId: string, amountCents?: number) {
+    this.assertConfigured();
+    const body = amountCents && amountCents > 0
+      ? JSON.stringify({ amount: { value: (amountCents / 100).toFixed(2), currency_code: "USD" } })
+      : "{}";
+    const res = await this.fetchPayPal(`/v2/payments/captures/${captureId}/refund`, {
+      method: "POST",
+      body,
+    });
+    return {
+      refunded: res?.status === "COMPLETED" || res?.status === "PENDING",
+      refund_id: res?.id ?? null,
+      status: res?.status ?? "unknown",
+    };
+  }
+
   /** Read a PayPal order (used to verify/recover capture status). */
   async getOrder(orderId: string) {
     this.assertConfigured();

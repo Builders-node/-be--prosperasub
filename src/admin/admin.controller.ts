@@ -21,6 +21,8 @@ import { ProviderPayoutsService } from "../account/provider-payouts.service";
 import { BlinkService } from "../payments/blink.service";
 import { CreateProviderPayoutDto, DecideProviderPayoutDto } from "./dto/provider-payout.dto";
 import { AdminContentService } from "./admin-content.service";
+import { RefundsService } from "./refunds.service";
+import { CustomerCreditsService } from "./customer-credits.service";
 import { AdminPermission, RequireAdminPermission } from "./admin-permissions";
 import { AdminRbacService } from "./admin-rbac.service";
 import { AssignUserRolesDto, CreateRoleDto, UpdateRoleDto } from "./admin-roles.dto";
@@ -55,6 +57,8 @@ export class AdminController {
     private readonly content: AdminContentService,
     private readonly payouts: ProviderPayoutsService,
     private readonly blink: BlinkService,
+    private readonly refunds: RefundsService,
+    private readonly credits: CustomerCreditsService,
   ) {}
 
   @ApiOperation({ summary: "Get platform overview metrics" })
@@ -758,6 +762,56 @@ export class AdminController {
   @RequireAdminPermission(AdminPermission.PaymentsRead)
   listProviderPayouts(@Param("providerId") providerId: string) {
     return this.payouts.list(providerId);
+  }
+
+  /**
+   * Send money back for an order.
+   *
+   * "Refunded" used to be a word in a dropdown: the row left revenue and left
+   * the provider's balance, and then a person moved the money by hand with
+   * nothing recording that they had. Only PayPal can be refunded by software
+   * — Bitcoin has no reverse and the platform never stored an address to send
+   * to — so for the others this records the obligation and says `manual: true`
+   * rather than pretending.
+   */
+  @ApiOperation({ summary: "Refund an order, in whole or in part" })
+  @Post("orders/:table/:id/refund")
+  @RequireAdminPermission(AdminPermission.PaymentsWrite)
+  refundOrder(
+    @Param("table") table: string,
+    @Param("id") id: string,
+    @Body() body: { amount_cents?: number; reason?: string },
+    @Req() request: AdminRequest,
+  ) {
+    return this.refunds.refund(table, id, {
+      amountCents: body?.amount_cents,
+      reason: body?.reason,
+      adminUserId: request.adminUser?.id,
+    });
+  }
+
+  @ApiOperation({ summary: "What a customer is holding in platform credit" })
+  @Get("customers/:userId/credits")
+  @RequireAdminPermission(AdminPermission.PaymentsRead)
+  customerCredits(@Param("userId") userId: string) {
+    return this.credits.ledger(userId);
+  }
+
+  /** Positive grants, negative takes back. Both want a note — it is the record. */
+  @ApiOperation({ summary: "Grant or take back platform credit" })
+  @Post("customers/:userId/credits")
+  @RequireAdminPermission(AdminPermission.PaymentsWrite)
+  adjustCustomerCredit(
+    @Param("userId") userId: string,
+    @Body() body: { amount_cents: number; note: string },
+    @Req() request: AdminRequest,
+  ) {
+    return this.credits.adjust({
+      userId,
+      amountCents: body?.amount_cents,
+      note: body?.note,
+      adminUserId: request.adminUser?.id,
+    });
   }
 
   @ApiOperation({ summary: "Record a payout to a provider" })

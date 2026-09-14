@@ -11,13 +11,15 @@ import { AdminAuthGuard } from "./admin-auth.guard";
 import { AdminController } from "./admin.controller";
 import { CronController } from "./cron.controller";
 import { AdminContentService } from "./admin-content.service";
+import { RefundsService } from "./refunds.service";
+import { CustomerCreditsService } from "./customer-credits.service";
 import { AdminRbacService } from "./admin-rbac.service";
 import { AdminService } from "./admin.service";
 
 @Module({
   imports: [AuthModule, CatalogModule, PrismaModule, GoogleCalendarModule, MailModule, NotificationsModule, PaymentsModule, AccountModule],
   controllers: [AdminController, CronController],
-  providers: [AdminAuthGuard, AdminRbacService, AdminService, AdminContentService],
+  providers: [AdminAuthGuard, AdminRbacService, AdminService, AdminContentService, RefundsService, CustomerCreditsService],
   // AdminAuthGuard is used by controllers in OTHER modules (support, …). It
   // injects AdminRbacService, so both have to leave this module or Nest
   // fails to resolve the guard and the whole app refuses to boot — which
