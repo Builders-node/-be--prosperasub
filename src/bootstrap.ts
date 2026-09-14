@@ -17,6 +17,28 @@ export async function createNestApp() {
   }
 
   app.getHttpAdapter().getInstance().disable("x-powered-by");
+
+  /**
+   * No ETags, and nothing cacheable, on an authenticated API.
+   *
+   * Express adds an ETag to every JSON response and Vercel serves it with
+   * `cache-control: public, max-age=0, must-revalidate`. The browser then
+   * revalidates each call and gets a **304 Not Modified** — which `fetch`
+   * reports as `ok === false` with an empty body, so the client rendered the
+   * bare message "API request failed". That is what emptied Ads, Locations,
+   * Support and the permissions panel in the admin while the list next to them
+   * loaded fine, and it took a week to trace because nothing is wrong with the
+   * request, the auth, or the data.
+   *
+   * `public` is the second problem, independent of the first: these responses
+   * are per-user and carry an Authorization header, so a shared cache storing
+   * one is one admin away from being handed somebody else's data.
+   */
+  app.getHttpAdapter().getInstance().set("etag", false);
+  app.use((_req: unknown, res: { setHeader: (k: string, v: string) => void }, next: () => void) => {
+    res.setHeader("Cache-Control", "private, no-store");
+    next();
+  });
   app.use(cookieParser(cookieSecret || "dev-only-cookie-secret-change-before-production"));
   app.use((_request: unknown, response: { setHeader: (name: string, value: string) => void }, next: () => void) => {
     response.setHeader("X-Content-Type-Options", "nosniff");
