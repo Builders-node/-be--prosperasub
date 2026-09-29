@@ -5,6 +5,7 @@ import { PaymentProviderRegistry } from "./payment-provider.registry";
 import { LightningAdapter } from "./adapters/lightning.adapter";
 import { OnchainAdapter } from "./adapters/onchain.adapter";
 import { PayPalAdapter } from "./adapters/paypal.adapter";
+import { CryptoGatewayAdapter } from "./adapters/crypto-gateway.adapter";
 
 /**
  * Billing domain (Phase 1). Global so any confirmation path can inject
@@ -22,6 +23,7 @@ import { PayPalAdapter } from "./adapters/paypal.adapter";
     LightningAdapter,
     OnchainAdapter,
     PayPalAdapter,
+    CryptoGatewayAdapter,
   ],
   exports: [BillingService, PaymentProviderRegistry],
 })

@@ -165,6 +165,42 @@ export class PromoCodesService {
     return { ok: true };
   }
 
+  /**
+   * The bonus rates, which live beside promo codes because they are the same
+   * kind of money: something the platform gives away out of its commission.
+   *
+   * `global_settings` is readable by the browser and writable only with the
+   * service key, which is why this is here rather than a direct write.
+   */
+  async bonusSettings() {
+    const rows = await this.rest<Array<{ key: string; value: unknown }>>(
+      `/global_settings?key=in.(bonus_cashback_pct,bonus_max_share_pct)&select=key,value`,
+    ) ?? [];
+    const at = (k: string, fallback: number) => {
+      const n = Number(rows.find((r) => r.key === k)?.value);
+      return Number.isFinite(n) ? n : fallback;
+    };
+    return { cashbackPct: at("bonus_cashback_pct", 0), maxSharePct: at("bonus_max_share_pct", 100) };
+  }
+
+  async saveBonusSettings(input: { cashback_pct?: number; max_share_pct?: number }) {
+    const clamp = (n: number) => Math.max(0, Math.min(100, Math.round(n)));
+    const writes: Array<[string, number]> = [];
+    if (input.cashback_pct !== undefined) writes.push(["bonus_cashback_pct", clamp(Number(input.cashback_pct))]);
+    if (input.max_share_pct !== undefined) writes.push(["bonus_max_share_pct", clamp(Number(input.max_share_pct))]);
+    if (!writes.length) throw new BadRequestException("Nothing to change.");
+
+    for (const [key, value] of writes) {
+      await this.rest(`/global_settings?on_conflict=key`, {
+        method: "POST",
+        headers: { Prefer: "resolution=merge-duplicates" },
+        body: JSON.stringify({ key, value }),
+      });
+    }
+    this.logger.log(`bonus settings: ${writes.map(([k, v]) => `${k}=${v}`).join(", ")}`);
+    return this.bonusSettings();
+  }
+
   private async rest<T>(path: string, init: RequestInit = {}): Promise<T | null> {
     const url = this.config.get<string>("SUPABASE_URL");
     const key = this.config.get<string>("SUPABASE_SERVICE_ROLE_KEY");

@@ -29,7 +29,7 @@ const SUBSCRIPTION_STATUSES = [
   "active", "paused", "cancelled", "expired", "pending", "inactive",
 ] as const;
 const PAYMENT_METHODS = [
-  "lightning", "onchain", "infinita", "crypto", "paypal", "free", "manual",
+  "lightning", "onchain", "infinita", "crypto", "crypto_gateway", "paypal", "free", "manual",
 ] as const;
 
 export class AdminSubscriptionFieldsDto {

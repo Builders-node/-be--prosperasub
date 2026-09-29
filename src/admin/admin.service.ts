@@ -6,6 +6,7 @@ import { CleaningCalendarSyncService } from "../google-calendar/cleaning-calenda
 import { BeachCourtCalendarSyncService } from "../google-calendar/beach-court-calendar-sync.service";
 import { BlinkService } from "../payments/blink.service";
 import { PayPalService } from "../payments/paypal.service";
+import { CryptoGatewayService } from "../payments/crypto-gateway/crypto-gateway.service";
 import { MailService } from "../mail/mail.service";
 import { ProviderOrderMailService } from "../mail/provider-order-mail.service";
 import { BillingService } from "../billing/billing.service";
@@ -109,6 +110,7 @@ export class AdminService {
     @Optional() private readonly paypal?: PayPalService,
     @Optional() private readonly notifications?: NotificationsService,
     @Optional() private readonly providerOrderMail?: ProviderOrderMailService,
+    @Optional() private readonly cryptoGateway?: CryptoGatewayService,
   ) {}
 
   /**
@@ -121,6 +123,8 @@ export class AdminService {
     if (m === "onchain") return "blink-onchain";
     if (m === "lightning" || m === "blink") return "blink";
     if (m === "paypal") return "paypal";
+    // Written under the concrete gateway (`nowpayments`), not the method.
+    if (m === "crypto_gateway") return this.cryptoGateway?.providerKey ?? null;
     return null;
   }
 
@@ -163,6 +167,7 @@ export class AdminService {
     if (m === "onchain") return "onchain";
     if (m === "lightning" || m === "blink") return "lightning";
     if (m === "paypal") return "paypal";
+    if (m === "crypto_gateway") return "crypto_gateway";
     return null;
   }
 
@@ -1540,6 +1545,11 @@ export class AdminService {
         const s = await this.paypal.captureOrder(ref).catch(() => null);
         return !!s?.paid;
       }
+      if (method === "crypto_gateway" && this.cryptoGateway?.enabled) {
+        // verify() holds the gateway's answer against the invoice-time session
+        // amount, and never counts `partially_paid` as paid.
+        return (await this.cryptoGateway.verify(ref).catch(() => null))?.paid ?? false;
+      }
       return false;
     };
 
@@ -1598,7 +1608,9 @@ export class AdminService {
           if (billingMethod && this.billing) {
             await this.billing.recordCaptured({
               method: billingMethod,
-              provider: billingMethod === "paypal" ? "paypal" : "blink",
+              provider: billingMethod === "paypal" ? "paypal"
+                : billingMethod === "crypto_gateway" ? (this.cryptoGateway?.providerKey ?? "crypto_gateway")
+                : "blink",
               providerRef: String(sub.payment_reference),
               amountCents: this.subAmountCents(scope.table, sub),
               subjectRef: `subscription:${sub.id}`,

@@ -2,8 +2,7 @@ import { Body, Controller, HttpCode, Logger, Post, Req } from "@nestjs/common";
 import { ApiExcludeController } from "@nestjs/swagger";
 import type { Request } from "express";
 import { BlinkService } from "./blink.service";
-import { BillingService } from "../billing/billing.service";
-import { NotificationsService } from "../notifications/notifications.service";
+import { PaymentSettlementService } from "./payment-settlement.service";
 
 /**
  * Receives payment callbacks from Blink (Lightning + on-chain Bitcoin).
@@ -24,21 +23,6 @@ import { NotificationsService } from "../notifications/notifications.service";
  * Root path (no /v1 prefix) so it matches whatever URL is registered with
  * Blink.
  */
-
-const SUB_TABLES = [
-  { table: "cleaning_subscriptions", extra: "&deleted_at=is.null" },
-  { table: "food_subscriptions",     extra: "" },
-  // The beach's memberships are universal rows; the legacy twin follows by
-  // trigger, so verifying the old table would confirm a payment against a
-  // copy and leave the row this platform now considers the real one pending.
-  // A NULL source key is a purchase on a universal-only service — same rails,
-  // and previously invisible to this fallback. Rows keyed cleaning/food stay
-  // excluded: they are the frozen backfill, not live sales.
-  { table: "provider_subscriptions", extra: "&or=(source_service_key.eq.beach,source_service_key.is.null)" },
-  // Car rentals settle on the same rails; leaving them out meant a Bitcoin
-  // payment only ever landed if the customer's browser was still watching.
-  { table: "rental_bookings",        extra: "&deleted_at=is.null" },
-] as const;
 
 /** How many pending rows the blind fallback will verify in one call. */
 const FALLBACK_SCAN_LIMIT = 25;
@@ -83,8 +67,7 @@ export class BlinkWebhookController {
 
   constructor(
     private readonly blink: BlinkService,
-    private readonly billing: BillingService,
-    private readonly notifications: NotificationsService,
+    private readonly settlement: PaymentSettlementService,
   ) {}
 
   @Post()
@@ -157,106 +140,23 @@ export class BlinkWebhookController {
    */
   private async sweepPending(): Promise<number> {
     let confirmed = 0;
-    for (const { table, extra } of SUB_TABLES) {
-      let rows: Array<{ id: string; payment_reference: string; payment_method: string }> = [];
-      try {
-        rows = await this.rest(
-          `/${table}?select=id,payment_reference,payment_method&payment_status=neq.paid` +
-          `&payment_reference=not.is.null&payment_method=in.(lightning,onchain,blink)${extra}` +
-          `&order=created_at.desc&limit=${FALLBACK_SCAN_LIMIT}`,
-        );
-      } catch {
-        continue;
-      }
-      for (const row of rows ?? []) {
-        if (await this.settleReference(String(row.payment_reference))) confirmed++;
-      }
+    const rows = await this.settlement.pendingReferences(["lightning", "onchain", "blink"], FALLBACK_SCAN_LIMIT);
+    for (const row of rows) {
+      if (await this.settleReference(row.ref)) confirmed++;
     }
     return confirmed;
   }
 
-  /** Flip every row holding this reference, and record it in the ledger once. */
-  private async markPaidByReference(ref: string, method: "lightning" | "onchain"): Promise<boolean> {
-    let touched = false;
-    for (const { table, extra } of SUB_TABLES) {
-      try {
-        const rows = await this.rest<Array<{ id: string }>>(
-          `/${table}?select=id&payment_reference=eq.${encodeURIComponent(ref)}&payment_status=neq.paid${extra}&limit=5`,
-        );
-        if (!Array.isArray(rows) || rows.length === 0) continue;
-        for (const row of rows) {
-          await this.rest(
-            `/${table}?id=eq.${encodeURIComponent(row.id)}`,
-            { method: "PATCH", body: JSON.stringify(this.paidPatch(table, ref)) },
-          );
-          touched = true;
-          // Idempotent per (provider, ref) — a webhook that arrives twice, or
-          // after the cron already saw it, records and emits once.
-          await this.billing.recordCaptured({
-            method,
-            provider: "blink",
-            providerRef: ref,
-            subjectRef: `subscription:${row.id}`,
-            metadata: { table, viaWebhook: true },
-          }).catch((e) => this.logger.warn(`ledger write failed: ${(e as Error).message}`));
-
-          // Tell the team money arrived. The checkout session (keyed by the
-          // Lightning hash / on-chain address) carries the client details;
-          // notifyPaymentSucceeded is idempotent per (provider, reference), so a
-          // webhook that races the cron or arrives twice still notifies once.
-          await this.notifications.notifyPaymentSucceededForProviderRef(
-            method === "onchain" ? "blink-onchain" : "blink",
-            ref,
-            { paymentStatus: "paid", paidAt: new Date() },
-            { serviceName: table === "rental_bookings" ? "EverySub Cars — rental" : `EverySub — ${table.replace(/_subscriptions$/, "")}` },
-          ).catch((e) => this.logger.warn(`admin notify failed: ${(e as Error).message}`));
-        }
-      } catch (e) {
-        this.logger.debug(`scan ${table} failed: ${(e as Error).message}`);
-      }
-    }
-    if (touched) this.logger.log(`confirmed ${method} payment ${ref.slice(0, 12)}… via webhook`);
-    return touched;
-  }
-
-  /** Same row state the cron reconcile produces, so both paths agree. */
-  private paidPatch(table: string, ref: string): Record<string, unknown> {
-    const patch: Record<string, unknown> = {
-      payment_status: "paid",
-      payment_reference: ref,
-      updated_at: new Date().toISOString(),
-    };
-    if (table === "cleaning_subscriptions") {
-      patch.subscription_status = "active";
-      patch.is_active = true;
-    } else if (table === "rental_bookings") {
-      // Confirmed, not active — a rental becomes active when the car is handed over.
-      patch.status = "confirmed";
-    } else {
-      patch.status = "active";
-    }
-    return patch;
-  }
-
-  private async rest<T = any>(path: string, init: RequestInit = {}): Promise<T> {
-    const baseUrl = process.env.SUPABASE_URL?.replace(/\/$/, "");
-    const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
-    if (!baseUrl || !key) throw new Error("Supabase REST is not configured.");
-    const res = await fetch(`${baseUrl}/rest/v1${path}`, {
-      ...init,
-      headers: {
-        apikey: key,
-        Authorization: `Bearer ${key}`,
-        "Content-Type": "application/json",
-        ...(init.method && init.method !== "GET" ? { Prefer: "return=representation" } : {}),
-        ...(init.headers || {}),
-      },
+  private markPaidByReference(ref: string, method: "lightning" | "onchain"): Promise<boolean> {
+    return this.settlement.markPaidByReference(ref, {
+      method,
+      billingProvider: "blink",
+      sessionProvider: method === "onchain" ? "blink-onchain" : "blink",
+      via: "viaWebhook",
     });
-    if (!res.ok) {
-      const body = await res.text().catch(() => res.statusText);
-      throw new Error(`Supabase REST ${res.status}: ${body}`);
-    }
-    if (res.status === 204) return undefined as T;
-    return res.json() as Promise<T>;
+  }
+
+  private rest<T = any>(path: string, init: RequestInit = {}): Promise<T> {
+    return this.settlement.rest<T>(path, init);
   }
 }

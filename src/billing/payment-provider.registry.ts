@@ -3,6 +3,7 @@ import type { PaymentMethod, PaymentProvider } from "./payment-provider.port";
 import { LightningAdapter } from "./adapters/lightning.adapter";
 import { OnchainAdapter } from "./adapters/onchain.adapter";
 import { PayPalAdapter } from "./adapters/paypal.adapter";
+import { CryptoGatewayAdapter } from "./adapters/crypto-gateway.adapter";
 
 /** Resolves the payment-port adapter for a given method. */
 @Injectable()
@@ -13,11 +14,13 @@ export class PaymentProviderRegistry {
     lightning: LightningAdapter,
     onchain: OnchainAdapter,
     paypal: PayPalAdapter,
+    cryptoGateway: CryptoGatewayAdapter,
   ) {
     this.byMethod = new Map<PaymentMethod, PaymentProvider>([
       [lightning.method, lightning],
       [onchain.method, onchain],
       [paypal.method, paypal],
+      [cryptoGateway.method, cryptoGateway],
     ]);
   }
 

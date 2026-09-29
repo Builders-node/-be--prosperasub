@@ -813,6 +813,21 @@ export class AdminController {
     return this.promos.remove(id);
   }
 
+  /** Cashback lives with promo codes: both are the platform's own giveaway. */
+  @ApiOperation({ summary: "Bonus cashback rate and how much of an order it may cover" })
+  @Get("bonus-settings")
+  @RequireAdminPermission(AdminPermission.PaymentsRead)
+  getBonusSettings() {
+    return this.promos.bonusSettings();
+  }
+
+  @ApiOperation({ summary: "Change the bonus rates" })
+  @Patch("bonus-settings")
+  @RequireAdminPermission(AdminPermission.PaymentsWrite)
+  saveBonusSettings(@Body() body: { cashback_pct?: number; max_share_pct?: number }) {
+    return this.promos.saveBonusSettings(body);
+  }
+
   @ApiOperation({ summary: "Refund an order, in whole or in part" })
   @Post("orders/:table/:id/refund")
   @RequireAdminPermission(AdminPermission.PaymentsWrite)

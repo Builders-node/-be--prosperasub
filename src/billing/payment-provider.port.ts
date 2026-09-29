@@ -6,7 +6,8 @@
  * it in Phase 1b.
  */
 
-export type PaymentMethod = "lightning" | "onchain" | "paypal";
+/** `crypto_gateway` = any non-Bitcoin coin taken through a gateway (see payments/crypto-gateway). */
+export type PaymentMethod = "lightning" | "onchain" | "paypal" | "crypto_gateway";
 
 export interface PaymentVerifyResult {
   paid: boolean;
