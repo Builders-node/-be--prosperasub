@@ -392,7 +392,7 @@ describe("CleaningCalendarSyncService — reconcile sweeps every calendar", () =
   const PROVIDER = "apartments@group.calendar.google.com";
 
   function reconcileHarness(
-    eventsByCalendar: Record<string, Array<{ id: string; bookingId?: string }>>,
+    eventsByCalendar: Record<string, Array<{ id: string; bookingId?: string; status?: string }>>,
     bookings: Record<string, { status: string; google_calendar_id: string | null } | null>,
   ) {
     const deleted: Array<{ id: string; calendarId: string | undefined }> = [];
@@ -400,11 +400,16 @@ describe("CleaningCalendarSyncService — reconcile sweeps every calendar", () =
       getSharedAdminCleaningCalendarId: jest.fn().mockReturnValue(SHARED),
       hasAuth: jest.fn().mockReturnValue(true),
       isConfigured: jest.fn().mockReturnValue(true),
-      listEvents: jest.fn().mockImplementation((_min, _max, calendarId?: string) =>
-        Promise.resolve((eventsByCalendar[calendarId ?? SHARED] ?? []).map((e) => ({
-          id: e.id,
-          extendedProperties: e.bookingId ? { private: { bookingId: e.bookingId } } : undefined,
-        })))),
+      listEvents: jest.fn().mockImplementation((_min, _max, calendarId?: string, opts?: { showDeleted?: boolean }) =>
+        Promise.resolve((eventsByCalendar[calendarId ?? SHARED] ?? [])
+          // Google honours showDeleted, so the fake must too, or the test
+          // cannot tell the two behaviours apart.
+          .filter((e) => (opts?.showDeleted ?? true) || e.status !== "cancelled")
+          .map((e) => ({
+            id: e.id,
+            status: e.status,
+            extendedProperties: e.bookingId ? { private: { bookingId: e.bookingId } } : undefined,
+          })))),
       deleteEvent: jest.fn().mockImplementation((id: string, calendarId?: string) => {
         deleted.push({ id, calendarId });
         return Promise.resolve();
@@ -494,6 +499,44 @@ describe("CleaningCalendarSyncService — reconcile sweeps every calendar", () =
     const res = await service.reconcileCalendar();
 
     expect(res).toMatchObject({ skipped: 1, orphansDeleted: 0 });
+    expect(googleCalendar.deleteEvent).not.toHaveBeenCalled();
+  });
+});
+
+describe("CleaningCalendarSyncService — reconcile counts only real deletions", () => {
+  const SHARED = "shared@example.test";
+
+  /**
+   * The sweep reported six orphans deleted on every run, for ever. It listed
+   * with showDeleted, so events Google had already cancelled came back each
+   * pass; their DELETE returned 404, `deleteEvent` swallows 404 as success,
+   * and the count went up again. The one number an admin uses to tell whether
+   * the button did anything was meaningless.
+   */
+  it("asks for live events only and ignores an already-cancelled one", async () => {
+    const seen: Array<boolean | undefined> = [];
+    const googleCalendar = {
+      getSharedAdminCleaningCalendarId: jest.fn().mockReturnValue(SHARED),
+      isConfigured: jest.fn().mockReturnValue(true),
+      listEvents: jest.fn().mockImplementation((_a, _b, _c, opts?: { showDeleted?: boolean }) => {
+        seen.push(opts?.showDeleted);
+        // A calendar that answers with a cancelled event anyway.
+        return Promise.resolve([
+          { id: "ev_dead", status: "cancelled", extendedProperties: { private: { bookingId: "gone" } } },
+        ]);
+      }),
+      deleteEvent: jest.fn(),
+    };
+    const service = new CleaningCalendarSyncService(
+      { isAvailable: () => true } as never, googleCalendar as never,
+    );
+    (service as unknown as { supabaseRest: (p: string) => Promise<unknown> }).supabaseRest =
+      () => Promise.resolve([]);
+
+    const res = await service.reconcileCalendar();
+
+    expect(seen).toEqual([false]);
+    expect(res).toMatchObject({ orphansDeleted: 0, alreadyGone: 1 });
     expect(googleCalendar.deleteEvent).not.toHaveBeenCalled();
   });
 });

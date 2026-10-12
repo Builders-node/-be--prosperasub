@@ -353,7 +353,7 @@ export class CleaningCalendarSyncService {
     // valid. Both are now swept.
     const calendars = await this.cleaningCalendarsInUse();
 
-    const stats = { calendars: calendars.length, scanned: 0, orphansDeleted: 0, duplicatesDeleted: 0, movedDeleted: 0, untagged: 0, skipped: 0, errors: 0 };
+    const stats = { calendars: calendars.length, scanned: 0, orphansDeleted: 0, duplicatesDeleted: 0, movedDeleted: 0, alreadyGone: 0, untagged: 0, skipped: 0, errors: 0 };
     // Per calendar: two events for one booking on the SAME calendar are
     // duplicates. The same booking appearing on two different calendars is a
     // move, handled by the rule below, so this cannot be shared across them.
@@ -364,11 +364,19 @@ export class CleaningCalendarSyncService {
       // Comparing the two without resolving this would read every legitimate
       // shared-calendar event as "moved somewhere else" and delete it.
       const effectiveId = calendarId ?? sharedId ?? null;
-      const events = await this.googleCalendar.listEvents(timeMin, timeMax, calendarId);
+      // Live events only. With cancellations included, every already-deleted
+      // event came back on each pass, its DELETE 404'd, the 404 was swallowed
+      // as success, and the sweep claimed the same deletions for ever — the
+      // one number an admin uses to tell whether it did anything.
+      const events = await this.googleCalendar.listEvents(timeMin, timeMax, calendarId, { showDeleted: false });
       stats.scanned += events.length;
       const seenBookingIds = new Set<string>();
 
       for (const e of events) {
+        // Belt and braces: a cancelled event is already gone whatever the
+        // listing was asked for, and counting it would overstate the sweep.
+        if (e.status === "cancelled") { stats.alreadyGone++; continue; }
+
         const bookingId = e.extendedProperties?.private?.bookingId;
         if (!bookingId) { stats.untagged++; continue; }
 
@@ -379,8 +387,11 @@ export class CleaningCalendarSyncService {
         if (lookup === "error") { stats.skipped++; continue; }
 
         if (lookup === "absent") {
-          try { await this.googleCalendar.deleteEvent(e.id, calendarId); stats.orphansDeleted++; }
-          catch { stats.errors++; }
+          try {
+            await this.googleCalendar.deleteEvent(e.id, calendarId);
+            stats.orphansDeleted++;
+            this.logger.log(`[reconcile] removed orphan event ${e.id} (booking ${bookingId} no longer exists)`);
+          } catch { stats.errors++; }
           continue;
         }
 

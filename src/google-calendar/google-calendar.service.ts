@@ -240,7 +240,20 @@ export class GoogleCalendarService {
    * List all events in a time window (paginated, expands recurring instances).
    * Used by the reconcile job to find orphaned/stale events.
    */
-  async listEvents(timeMinISO: string, timeMaxISO: string, calendarId?: string): Promise<GoogleCalendarEventItem[]> {
+  /**
+   * `showDeleted` defaults to true because the first caller wanted exactly
+   * that: the beach-court pull notices an event a provider deleted by hand in
+   * Google and takes the booking down with it. A caller that only ever DELETES
+   * wants the opposite — an event Google already reports as cancelled cannot be
+   * deleted again, and trying made the cleaning reconcile report six phantom
+   * deletions on every single run, for ever.
+   */
+  async listEvents(
+    timeMinISO: string,
+    timeMaxISO: string,
+    calendarId?: string,
+    opts?: { showDeleted?: boolean },
+  ): Promise<GoogleCalendarEventItem[]> {
     const all: GoogleCalendarEventItem[] = [];
     let pageToken: string | undefined;
     do {
@@ -248,7 +261,7 @@ export class GoogleCalendarService {
         timeMin: timeMinISO,
         timeMax: timeMaxISO,
         singleEvents: "true",
-        showDeleted: "true", // include cancellations so we can propagate deletes
+        showDeleted: (opts?.showDeleted ?? true) ? "true" : "false",
         maxResults: "250",
         orderBy: "startTime",
       });
