@@ -386,3 +386,114 @@ describe("CleaningCalendarSyncService — storing the result when Prisma cannot"
     });
   });
 });
+
+describe("CleaningCalendarSyncService — reconcile sweeps every calendar", () => {
+  const SHARED = "shared@example.test";
+  const PROVIDER = "apartments@group.calendar.google.com";
+
+  function reconcileHarness(
+    eventsByCalendar: Record<string, Array<{ id: string; bookingId?: string }>>,
+    bookings: Record<string, { status: string; google_calendar_id: string | null } | null>,
+  ) {
+    const deleted: Array<{ id: string; calendarId: string | undefined }> = [];
+    const googleCalendar = {
+      getSharedAdminCleaningCalendarId: jest.fn().mockReturnValue(SHARED),
+      hasAuth: jest.fn().mockReturnValue(true),
+      isConfigured: jest.fn().mockReturnValue(true),
+      listEvents: jest.fn().mockImplementation((_min, _max, calendarId?: string) =>
+        Promise.resolve((eventsByCalendar[calendarId ?? SHARED] ?? []).map((e) => ({
+          id: e.id,
+          extendedProperties: e.bookingId ? { private: { bookingId: e.bookingId } } : undefined,
+        })))),
+      deleteEvent: jest.fn().mockImplementation((id: string, calendarId?: string) => {
+        deleted.push({ id, calendarId });
+        return Promise.resolve();
+      }),
+    };
+    const service = new CleaningCalendarSyncService(
+      { isAvailable: () => true } as never, googleCalendar as never,
+    );
+    (service as unknown as { supabaseRest: (p: string) => Promise<unknown> }).supabaseRest =
+      (path: string) => {
+        if (path.includes("/providers?")) return Promise.resolve([{ google_calendar_id: PROVIDER }]);
+        const id = /id=eq\.([^&]+)/.exec(path)?.[1] ?? "";
+        const row = bookings[id];
+        return Promise.resolve(row ? [{ id, ...row }] : []);
+      };
+    return { service, deleted };
+  }
+
+  it("removes an orphan from a provider's own calendar, not only the shared one", async () => {
+    const { service, deleted } = reconcileHarness(
+      { [SHARED]: [], [PROVIDER]: [{ id: "ev_gone", bookingId: "deleted_booking" }] },
+      { deleted_booking: null },
+    );
+
+    const res = await service.reconcileCalendar();
+
+    expect(res).toMatchObject({ ok: true, calendars: 2, orphansDeleted: 1 });
+    expect(deleted).toEqual([{ id: "ev_gone", calendarId: PROVIDER }]);
+  });
+
+  it("removes the copy left behind when a booking moved to another calendar", async () => {
+    const { service, deleted } = reconcileHarness(
+      {
+        [SHARED]:   [{ id: "ev_old", bookingId: "b1" }],
+        [PROVIDER]: [{ id: "ev_new", bookingId: "b1" }],
+      },
+      { b1: { status: "booked", google_calendar_id: PROVIDER } },
+    );
+
+    const res = await service.reconcileCalendar();
+
+    expect(res).toMatchObject({ movedDeleted: 1, orphansDeleted: 0, duplicatesDeleted: 0 });
+    expect(deleted).toEqual([{ id: "ev_old", calendarId: undefined }]);
+  });
+
+  // The trap in the rule above: the shared calendar is addressed as `undefined`
+  // but a booking records its real id, so an unresolved comparison would read
+  // every legitimate shared-calendar event as living somewhere else.
+  it("keeps a shared-calendar event for a booking recorded on the shared calendar", async () => {
+    const { service, deleted } = reconcileHarness(
+      { [SHARED]: [{ id: "ev_ok", bookingId: "b2" }], [PROVIDER]: [] },
+      { b2: { status: "booked", google_calendar_id: SHARED } },
+    );
+
+    const res = await service.reconcileCalendar();
+
+    expect(res).toMatchObject({ movedDeleted: 0, orphansDeleted: 0 });
+    expect(deleted).toEqual([]);
+  });
+
+  it("leaves a booking alone when no calendar is recorded for it", async () => {
+    const { service, deleted } = reconcileHarness(
+      { [SHARED]: [{ id: "ev_unknown", bookingId: "b3" }], [PROVIDER]: [] },
+      { b3: { status: "booked", google_calendar_id: null } },
+    );
+
+    await service.reconcileCalendar();
+
+    expect(deleted).toEqual([]);
+  });
+
+  it("never deletes when the database cannot answer", async () => {
+    const googleCalendar = {
+      getSharedAdminCleaningCalendarId: jest.fn().mockReturnValue(SHARED),
+      isConfigured: jest.fn().mockReturnValue(true),
+      listEvents: jest.fn().mockResolvedValue([
+        { id: "ev_x", extendedProperties: { private: { bookingId: "b4" } } },
+      ]),
+      deleteEvent: jest.fn(),
+    };
+    const service = new CleaningCalendarSyncService(
+      { isAvailable: () => true } as never, googleCalendar as never,
+    );
+    (service as unknown as { supabaseRest: (p: string) => Promise<unknown> }).supabaseRest =
+      (path: string) => (path.includes("/providers?") ? Promise.resolve([]) : Promise.reject(new Error("db down")));
+
+    const res = await service.reconcileCalendar();
+
+    expect(res).toMatchObject({ skipped: 1, orphansDeleted: 0 });
+    expect(googleCalendar.deleteEvent).not.toHaveBeenCalled();
+  });
+});

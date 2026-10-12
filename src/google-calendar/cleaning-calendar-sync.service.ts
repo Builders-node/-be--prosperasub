@@ -345,36 +345,66 @@ export class CleaningCalendarSyncService {
     const timeMin = new Date(now - daysBehind * 86_400_000).toISOString();
     const timeMax = new Date(now + daysAhead * 86_400_000).toISOString();
 
-    const events = await this.googleCalendar.listEvents(timeMin, timeMax);
-    const stats = { scanned: events.length, orphansDeleted: 0, duplicatesDeleted: 0, untagged: 0, skipped: 0, errors: 0 };
-    const seenBookingIds = new Set<string>();
+    // Every calendar a cleaning booking can be on, not just the shared one.
+    // Scanning one calendar made the Reconcile button a half-measure the day
+    // providers got calendars of their own: an event left behind on a
+    // provider's calendar was unreachable, and an event on the shared calendar
+    // for a booking that has since moved to a provider's looked perfectly
+    // valid. Both are now swept.
+    const calendars = await this.cleaningCalendarsInUse();
 
-    for (const e of events) {
-      const bookingId = e.extendedProperties?.private?.bookingId;
-      if (!bookingId) { stats.untagged++; continue; }
+    const stats = { calendars: calendars.length, scanned: 0, orphansDeleted: 0, duplicatesDeleted: 0, movedDeleted: 0, untagged: 0, skipped: 0, errors: 0 };
+    // Per calendar: two events for one booking on the SAME calendar are
+    // duplicates. The same booking appearing on two different calendars is a
+    // move, handled by the rule below, so this cannot be shared across them.
+    const sharedId = this.getSharedAdminCalendarId();
+    for (const calendarId of calendars) {
+      // `undefined` means the shared calendar to the API but names nothing, and
+      // a booking recorded as living on the shared calendar stores its real id.
+      // Comparing the two without resolving this would read every legitimate
+      // shared-calendar event as "moved somewhere else" and delete it.
+      const effectiveId = calendarId ?? sharedId ?? null;
+      const events = await this.googleCalendar.listEvents(timeMin, timeMax, calendarId);
+      stats.scanned += events.length;
+      const seenBookingIds = new Set<string>();
 
-      const lookup = await this.lookupBookingForReconcile(bookingId);
+      for (const e of events) {
+        const bookingId = e.extendedProperties?.private?.bookingId;
+        if (!bookingId) { stats.untagged++; continue; }
 
-      // SAFETY: only ever delete when the DB *definitively* confirms the booking
-      // is gone ("absent"). On any lookup error/uncertainty we skip — never delete.
-      if (lookup === "error") { stats.skipped++; continue; }
+        const lookup = await this.lookupBookingForReconcile(bookingId);
 
-      if (lookup === "absent") {
-        try { await this.googleCalendar.deleteEvent(e.id); stats.orphansDeleted++; }
-        catch { stats.errors++; }
-        continue;
+        // SAFETY: only ever delete when the DB *definitively* confirms the booking
+        // is gone ("absent"). On any lookup error/uncertainty we skip — never delete.
+        if (lookup === "error") { stats.skipped++; continue; }
+
+        if (lookup === "absent") {
+          try { await this.googleCalendar.deleteEvent(e.id, calendarId); stats.orphansDeleted++; }
+          catch { stats.errors++; }
+          continue;
+        }
+
+        // The booking says it lives on another calendar, so this copy is the
+        // one left behind by a move. Only acted on when the DB names a
+        // calendar and it is not this one — a booking with no calendar
+        // recorded tells us nothing and is left alone.
+        if (lookup.calendarId && lookup.calendarId !== effectiveId) {
+          try { await this.googleCalendar.deleteEvent(e.id, calendarId); stats.movedDeleted++; }
+          catch { stats.errors++; }
+          continue;
+        }
+
+        // Booking exists. Cancelled bookings keep their "[Cancelled]" event.
+        if (lookup.status === "cancelled") continue;
+
+        // Duplicate event for the same booking → keep the first, drop the rest.
+        if (seenBookingIds.has(bookingId)) {
+          try { await this.googleCalendar.deleteEvent(e.id, calendarId); stats.duplicatesDeleted++; }
+          catch { stats.errors++; }
+          continue;
+        }
+        seenBookingIds.add(bookingId);
       }
-
-      // Booking exists. Cancelled bookings keep their "[Cancelled]" event.
-      if (lookup.status === "cancelled") continue;
-
-      // Duplicate event for the same booking → keep the first, drop the rest.
-      if (seenBookingIds.has(bookingId)) {
-        try { await this.googleCalendar.deleteEvent(e.id); stats.duplicatesDeleted++; }
-        catch { stats.errors++; }
-        continue;
-      }
-      seenBookingIds.add(bookingId);
     }
 
     return { ok: true as const, ...stats };
@@ -479,14 +509,46 @@ export class CleaningCalendarSyncService {
    *  - { status } → booking exists
    * Uses only columns that exist on cleaning_bookings (no embeds, no deleted_at).
    */
-  private async lookupBookingForReconcile(bookingId: string): Promise<"error" | "absent" | { status: string }> {
+  /**
+   * Every calendar a cleaning booking might be sitting on: the shared one, if
+   * it is configured, plus each cleaning provider's own. A calendar nobody
+   * uses any more still holds its old events, so the list comes from the
+   * providers table rather than from whatever the bookings currently say.
+   */
+  private async cleaningCalendarsInUse(): Promise<Array<string | undefined>> {
+    const out: Array<string | undefined> = [];
+    const shared = this.getSharedAdminCalendarId();
+    // undefined, not the id: GoogleCalendarService reads that as "the shared
+    // one", which keeps the single-calendar deployments on their old path.
+    if (shared) out.push(undefined);
+
+    try {
+      const rows = await this.supabaseRest<Array<{ google_calendar_id: string | null }>>(
+        `/providers?source_service_key=eq.cleaning&google_calendar_id=not.is.null&select=google_calendar_id`,
+      );
+      for (const r of rows ?? []) {
+        const id = r.google_calendar_id?.trim();
+        if (id && id !== shared && !out.includes(id)) out.push(id);
+      }
+    } catch (e) {
+      this.logger.warn(`[reconcile] could not list provider calendars: ${(e as Error).message}`);
+    }
+    return out;
+  }
+
+  private async lookupBookingForReconcile(
+    bookingId: string,
+  ): Promise<"error" | "absent" | { status: string; calendarId: string | null }> {
     try {
       const rows = await this.supabaseRest<any[]>(
-        `/cleaning_bookings?id=eq.${encodeURIComponent(bookingId)}&select=id,status&limit=1`,
+        `/cleaning_bookings?id=eq.${encodeURIComponent(bookingId)}&select=id,status,google_calendar_id&limit=1`,
       );
       if (!Array.isArray(rows)) return "error";
       if (rows.length === 0) return "absent";
-      return { status: String(rows[0].status ?? "").toLowerCase() };
+      return {
+        status: String(rows[0].status ?? "").toLowerCase(),
+        calendarId: rows[0].google_calendar_id ?? null,
+      };
     } catch {
       return "error";
     }
