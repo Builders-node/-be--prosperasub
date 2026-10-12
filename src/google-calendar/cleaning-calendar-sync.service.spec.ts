@@ -227,3 +227,162 @@ describe("CleaningCalendarSyncService — which calendar a booking lands on", ()
     expect(result.calendarId).toBe("shared-cleaning-calendar@example.test");
   });
 });
+
+describe("CleaningCalendarSyncService — finding the provider of a booking", () => {
+  /**
+   * These drive the PostgREST walk itself, so they stub the HTTP layer rather
+   * than `resolveCalendarId`. `rest` maps a path fragment to its reply.
+   */
+  function restHarness(rest: Record<string, unknown[]>, sharedId: string | null = "shared@example.test") {
+    const prisma = { isAvailable: jest.fn().mockReturnValue(true) };
+    const googleCalendar = {
+      getSharedAdminCleaningCalendarId: jest.fn().mockReturnValue(sharedId),
+      hasAuth: jest.fn().mockReturnValue(true),
+      isConfigured: jest.fn().mockReturnValue(Boolean(sharedId)),
+    };
+    const service = new CleaningCalendarSyncService(prisma as never, googleCalendar as never);
+    const calls: string[] = [];
+    (service as unknown as { supabaseRest: (p: string) => Promise<unknown> }).supabaseRest =
+      (path: string) => {
+        calls.push(path);
+        const hit = Object.keys(rest).find((k) => path.includes(k));
+        return Promise.resolve(hit ? rest[hit] : []);
+      };
+    return { service, calls };
+  }
+
+  // The reported shape: an admin books somebody who has no subscription, so
+  // the old walk had no starting point and the visit went to the shared
+  // calendar instead of the business's own.
+  it("uses the booking's own provider_id when there is no subscription", async () => {
+    const { service, calls } = restHarness({
+      "/cleaning_bookings?id=eq.b1": [{ provider_id: "legacy-prov-1", subscription_id: null }],
+      "/providers?source_service_key=eq.cleaning": [{ google_calendar_id: "apartments@group.calendar.google.com" }],
+    });
+
+    await expect(service.resolveCalendarId("b1")).resolves.toBe("apartments@group.calendar.google.com");
+    // It must not have gone looking for a subscription it does not have.
+    expect(calls.some((c) => c.includes("/cleaning_subscriptions"))).toBe(false);
+  });
+
+  it("still walks the subscription for an older row with no provider_id", async () => {
+    const { service, calls } = restHarness({
+      "/cleaning_bookings?id=eq.b2": [{ provider_id: null, subscription_id: "sub-1" }],
+      "/cleaning_subscriptions?id=eq.sub-1": [{ package_id: "pkg-1" }],
+      "/cleaning_packages?id=eq.pkg-1": [{ provider_id: "legacy-prov-2" }],
+      "/providers?source_service_key=eq.cleaning": [{ google_calendar_id: "cowork@group.calendar.google.com" }],
+    });
+
+    await expect(service.resolveCalendarId("b2")).resolves.toBe("cowork@group.calendar.google.com");
+    expect(calls.some((c) => c.includes("/cleaning_subscriptions"))).toBe(true);
+  });
+
+  it("returns undefined — the shared calendar — when the provider has none", async () => {
+    const { service } = restHarness({
+      "/cleaning_bookings?id=eq.b3": [{ provider_id: "legacy-prov-3", subscription_id: null }],
+      "/providers?source_service_key=eq.cleaning": [{ google_calendar_id: null }],
+    });
+
+    await expect(service.resolveCalendarId("b3")).resolves.toBeUndefined();
+  });
+
+  // The month-long outage: the sweep required the SHARED calendar id, so with
+  // it unset nothing synced and nothing was even marked failed.
+  it("sweeps pending bookings with credentials alone, no shared calendar", async () => {
+    const { service } = restHarness({ "/cleaning_bookings?select=id": [{ id: "b9" }] }, null);
+    jest.spyOn(service, "syncBookingById").mockResolvedValue({ ok: true, bookingId: "b9" } as never);
+
+    const res = await service.syncPendingBookings();
+
+    expect(res).toMatchObject({ ok: true, processed: 1, synced: 1 });
+    expect(service.syncBookingById).toHaveBeenCalledWith("b9");
+  });
+
+  it("does nothing without credentials", async () => {
+    const prisma = { isAvailable: jest.fn().mockReturnValue(true) };
+    const googleCalendar = {
+      getSharedAdminCleaningCalendarId: jest.fn().mockReturnValue("shared@example.test"),
+      hasAuth: jest.fn().mockReturnValue(false),
+      isConfigured: jest.fn().mockReturnValue(false),
+    };
+    const service = new CleaningCalendarSyncService(prisma as never, googleCalendar as never);
+
+    await expect(service.syncPendingBookings()).resolves.toEqual({ ok: false, reason: "not_configured" });
+  });
+});
+
+describe("CleaningCalendarSyncService — storing the result when Prisma cannot", () => {
+  /**
+   * The month-long outage. Prisma's model for cleaning_bookings declares three
+   * columns the database does not have, so every Prisma query on that table
+   * fails. The READ already fell back to PostgREST; the WRITE did not, so each
+   * sync created the Google event and then died before storing its id — the
+   * row stayed `pending`, the next run wrote the event again, and a booking
+   * later cancelled had no event id to remove by. Hence a calendar still
+   * showing visits that no longer exist.
+   */
+  function harnessWithBrokenPrismaWrite() {
+    const booking = { ...baseBooking };
+    const prisma = {
+      isAvailable: jest.fn().mockReturnValue(true),
+      cleaningBooking: {
+        findUnique: jest.fn().mockResolvedValue(booking),
+        update: jest.fn().mockRejectedValue(
+          new Error("The column `cleaning_bookings.custom_plan_id` does not exist in the current database."),
+        ),
+        delete: jest.fn(),
+      },
+    };
+    const googleCalendar = {
+      getSharedAdminCleaningCalendarId: jest.fn().mockReturnValue("shared@example.test"),
+      hasAuth: jest.fn().mockReturnValue(true),
+      isConfigured: jest.fn().mockReturnValue(true),
+      createEvent: jest.fn().mockResolvedValue({ id: "google_event_9", htmlLink: "https://cal/9" }),
+      updateEvent: jest.fn(),
+      cancelEvent: jest.fn(),
+      deleteEvent: jest.fn(),
+      findEventsByBookingId: jest.fn().mockResolvedValue([]),
+      findEventsByFallback: jest.fn().mockResolvedValue([]),
+    };
+    const service = new CleaningCalendarSyncService(prisma as never, googleCalendar as never);
+    jest.spyOn(service, "resolveCalendarId").mockResolvedValue(undefined);
+    const patches: Array<{ path: string; body: unknown }> = [];
+    (service as unknown as { supabaseRest: (p: string, i?: RequestInit) => Promise<unknown> }).supabaseRest =
+      (path: string, init?: RequestInit) => {
+        if (init?.method === "PATCH") patches.push({ path, body: JSON.parse(String(init.body)) });
+        return Promise.resolve([]);
+      };
+    return { service, prisma, patches };
+  }
+
+  it("falls back to REST and still records the event id", async () => {
+    const { service, prisma, patches } = harnessWithBrokenPrismaWrite();
+
+    const result = await service.syncBookingById("booking_1");
+
+    expect(result.ok).toBe(true);
+    expect(prisma.cleaningBooking.update).toHaveBeenCalled();
+    expect(patches).toHaveLength(1);
+    expect(patches[0].path).toContain("booking_1");
+    // Without this the booking never learns which Google event is its own.
+    expect(patches[0].body).toMatchObject({
+      google_calendar_event_id: "google_event_9",
+      google_calendar_sync_status: "synced",
+      google_calendar_sync_error: null,
+    });
+  });
+
+  it("records a failure through REST too, so it is never silent", async () => {
+    const { service, patches } = harnessWithBrokenPrismaWrite();
+    jest.spyOn(service as never as { upsertCalendarEvent: unknown }, "upsertCalendarEvent" as never)
+      .mockRejectedValue(new Error("Google said no") as never);
+
+    const result = await service.syncBookingById("booking_1");
+
+    expect(result.ok).toBe(false);
+    expect(patches[0].body).toMatchObject({
+      google_calendar_sync_status: "failed",
+      google_calendar_sync_error: "Google said no",
+    });
+  });
+});

@@ -51,6 +51,8 @@ export class CleaningCalendarSyncService {
     return this.googleCalendar.getSharedAdminCleaningCalendarId();
   }
 
+  private readonly calendarIdCache = new Map<string, string | undefined>();
+
   /**
    * The calendar a booking belongs on: its provider's own, or the shared one.
    *
@@ -64,34 +66,16 @@ export class CleaningCalendarSyncService {
    * calendar service reads as "use the shared one" — so nothing changes for a
    * provider until an admin gives it one.
    */
-  private readonly calendarIdCache = new Map<string, string | undefined>();
-
   async resolveCalendarId(bookingId: string): Promise<string | undefined> {
     if (this.calendarIdCache.has(bookingId)) return this.calendarIdCache.get(bookingId);
     let calendarId: string | undefined;
     try {
-      // booking -> subscription -> package -> legacy provider -> universal row
-      const rows = await this.supabaseRest<Array<{ subscription_id: string | null }>>(
-        `/cleaning_bookings?id=eq.${encodeURIComponent(bookingId)}&select=subscription_id&limit=1`,
-      );
-      const subId = rows?.[0]?.subscription_id;
-      if (subId) {
-        const subs = await this.supabaseRest<Array<{ package_id: string | null }>>(
-          `/cleaning_subscriptions?id=eq.${encodeURIComponent(subId)}&select=package_id&limit=1`,
+      const legacyProviderId = await this.legacyProviderIdFor(bookingId);
+      if (legacyProviderId) {
+        const provs = await this.supabaseRest<Array<{ google_calendar_id: string | null }>>(
+          `/providers?source_service_key=eq.cleaning&source_provider_id=eq.${encodeURIComponent(legacyProviderId)}&select=google_calendar_id&limit=1`,
         );
-        const pkgId = subs?.[0]?.package_id;
-        if (pkgId) {
-          const pkgs = await this.supabaseRest<Array<{ provider_id: string | null }>>(
-            `/cleaning_packages?id=eq.${encodeURIComponent(pkgId)}&select=provider_id&limit=1`,
-          );
-          const legacyId = pkgs?.[0]?.provider_id;
-          if (legacyId) {
-            const provs = await this.supabaseRest<Array<{ google_calendar_id: string | null }>>(
-              `/providers?source_service_key=eq.cleaning&source_provider_id=eq.${encodeURIComponent(legacyId)}&select=google_calendar_id&limit=1`,
-            );
-            calendarId = provs?.[0]?.google_calendar_id?.trim() || undefined;
-          }
-        }
+        calendarId = provs?.[0]?.google_calendar_id?.trim() || undefined;
       }
     } catch (e) {
       // A lookup failure must not stop the sync — fall back to the shared
@@ -102,12 +86,50 @@ export class CleaningCalendarSyncService {
     return calendarId;
   }
 
+  /**
+   * Whose booking this is, in the legacy id-space the calendar lookup needs.
+   *
+   * `cleaning_bookings.provider_id` is stamped on the row and is the answer
+   * whenever it is there. It used to be ignored in favour of walking
+   * booking → subscription → package → provider, which has no starting point
+   * for a visit booked straight for a customer: an admin booking somebody with
+   * no subscription — paid off-platform, a trial, a favour — produced
+   * `subscription_id = null`, so the walk gave up, the booking fell back to the
+   * shared calendar, and it never appeared on the business's own. The
+   * subscription walk stays as the fallback for the older rows that predate the
+   * column.
+   */
+  private async legacyProviderIdFor(bookingId: string): Promise<string | undefined> {
+    const rows = await this.supabaseRest<Array<{ provider_id: string | null; subscription_id: string | null }>>(
+      `/cleaning_bookings?id=eq.${encodeURIComponent(bookingId)}&select=provider_id,subscription_id&limit=1`,
+    );
+    const direct = rows?.[0]?.provider_id?.trim();
+    if (direct) return direct;
+
+    const subId = rows?.[0]?.subscription_id;
+    if (!subId) return undefined;
+    const subs = await this.supabaseRest<Array<{ package_id: string | null }>>(
+      `/cleaning_subscriptions?id=eq.${encodeURIComponent(subId)}&select=package_id&limit=1`,
+    );
+    const pkgId = subs?.[0]?.package_id;
+    if (!pkgId) return undefined;
+    const pkgs = await this.supabaseRest<Array<{ provider_id: string | null }>>(
+      `/cleaning_packages?id=eq.${encodeURIComponent(pkgId)}&select=provider_id&limit=1`,
+    );
+    return pkgs?.[0]?.provider_id?.trim() || undefined;
+  }
+
   getConfigurationStatus() {
     return this.googleCalendar.getConfigurationStatus();
   }
 
   isConfigured() {
     return this.googleCalendar.isConfigured();
+  }
+
+  /** Credentials only — see GoogleCalendarService.hasAuth. */
+  hasAuth() {
+    return this.googleCalendar.hasAuth();
   }
 
   async syncBookingById(bookingId: string) {
@@ -123,17 +145,14 @@ export class CleaningCalendarSyncService {
       storedEventId = await this.evictFromPreviousCalendar(booking, storedEventId, calendarId);
       const result = await this.upsertCalendarEvent(bookingId, storedEventId, payload, isCancelled, calendarId);
 
-      await this.prisma.cleaningBooking.update({
-        where: { id: bookingId },
-        data: {
-          googleCalendarEventId: result.id,
-          // Where it went, so a later move can find it again.
-          googleCalendarId: calendarId ?? this.getSharedAdminCalendarId() ?? null,
-          googleCalendarEventLink: result.htmlLink ?? booking.googleCalendarEventLink,
-          googleCalendarSyncedAt: new Date(),
-          googleCalendarSyncStatus: "synced",
-          googleCalendarSyncError: null,
-        },
+      await this.patchBooking(bookingId, {
+        google_calendar_event_id: result.id,
+        // Where it went, so a later move can find it again.
+        google_calendar_id: calendarId ?? this.getSharedAdminCalendarId() ?? null,
+        google_calendar_event_link: result.htmlLink ?? booking.googleCalendarEventLink,
+        google_calendar_synced_at: new Date().toISOString(),
+        google_calendar_sync_status: "synced",
+        google_calendar_sync_error: null,
       });
 
       this.logger.log(`[sync] Booking ${bookingId} → event ${result.id} (${result.action})`);
@@ -156,7 +175,14 @@ export class CleaningCalendarSyncService {
    * Calendar event. Runs on a frequent cron so admins never sync manually.
    */
   async syncPendingBookings(limit = 100) {
-    if (!this.isConfigured()) {
+    // Credentials, not the shared calendar. This early return is why nothing
+    // reached Google for a month: with GOOGLE_CLEANING_CALENDAR_ID unset the
+    // sweep bailed here on every run, touched no rows, and so marked nothing
+    // `failed` either — fifty bookings waited in `pending` and the calendar
+    // just went on showing whatever it had last time. A booking with no
+    // calendar at all now fails loudly, one at a time, with the reason on the
+    // row.
+    if (!this.hasAuth()) {
       return { ok: false as const, reason: "not_configured" as const };
     }
     // Bookings flagged out-of-date by a create / reschedule / cancel / complete.
@@ -361,7 +387,8 @@ export class CleaningCalendarSyncService {
    * event id back to the DB. Use this to rebuild the calendar after data loss.
    */
   async restoreAllCalendarEvents() {
-    if (!this.isConfigured()) return { ok: false as const, reason: "not_configured" as const };
+    // Per-booking, so per-provider calendars count — see syncPendingBookings.
+    if (!this.hasAuth()) return { ok: false as const, reason: "not_configured" as const };
 
     const bookings = await this.supabaseRest<any[]>(
       `/cleaning_bookings?select=id,status,location,notes,user_id,google_calendar_event_id,` +
@@ -709,19 +736,71 @@ export class CleaningCalendarSyncService {
 
   private async markSyncFailed(bookingId: string, message: string) {
     try {
-      if (!this.prisma.isAvailable()) {
-        await this.supabaseRest(`/cleaning_bookings?id=eq.${encodeURIComponent(bookingId)}`, {
-          method: "PATCH",
-          body: JSON.stringify({ google_calendar_sync_status: "failed", google_calendar_sync_error: message.slice(0, 1000) }),
-        });
-        return;
-      }
-      await this.prisma.cleaningBooking.update({
-        where: { id: bookingId },
-        data: { googleCalendarSyncStatus: "failed", googleCalendarSyncError: message.slice(0, 1000) },
+      await this.patchBooking(bookingId, {
+        google_calendar_sync_status: "failed",
+        google_calendar_sync_error: message.slice(0, 1000),
       });
     } catch (e) {
       this.logger.warn(`markSyncFailed for ${bookingId} failed: ${(e as Error).message}`);
     }
+  }
+
+  /**
+   * Write a booking's calendar columns, by whichever route works.
+   *
+   * This is the fix for a month of calendar drift, and the shape of the bug is
+   * worth keeping written down: the READ of a booking already fell back to
+   * PostgREST when Prisma failed, and the two WRITES did not.
+   *
+   * Prisma's model for `cleaning_bookings` declares `custom_plan_id`,
+   * `recurring_schedule_id` and `checklist_template_id`, and the database has
+   * none of them — nor the three tables behind them. Prisma selects every
+   * scalar it knows, so every Prisma query on that table fails. The read
+   * noticed and used REST. The write did not, so each sync CREATED THE GOOGLE
+   * EVENT and then died before storing its id: the row stayed `pending`, the
+   * next run wrote the event again, and no booking ever learned which event
+   * was its own. A booking cancelled or deleted after that had no event id to
+   * remove by, so the calendar went on showing visits that no longer existed —
+   * which is what an admin sees and reports as "the calendar still shows the
+   * old bookings".
+   *
+   * `markSyncFailed` had the same fault, which is why none of those fifty rows
+   * carried an error either: the failure could not even record itself.
+   *
+   * Columns are named the way the database names them, because REST is the
+   * path that always works; Prisma gets the same values mapped to its own
+   * field names and is tried first only to keep one writer per table.
+   */
+  private async patchBooking(bookingId: string, columns: Record<string, unknown>) {
+    const PRISMA_FIELD: Record<string, string> = {
+      google_calendar_event_id:    "googleCalendarEventId",
+      google_calendar_id:          "googleCalendarId",
+      google_calendar_event_link:  "googleCalendarEventLink",
+      google_calendar_synced_at:   "googleCalendarSyncedAt",
+      google_calendar_sync_status: "googleCalendarSyncStatus",
+      google_calendar_sync_error:  "googleCalendarSyncError",
+    };
+
+    if (this.prisma.isAvailable()) {
+      try {
+        const data: Record<string, unknown> = {};
+        for (const [column, value] of Object.entries(columns)) {
+          const field = PRISMA_FIELD[column];
+          if (!field) throw new Error(`no Prisma field for ${column}`);
+          data[field] = column === "google_calendar_synced_at" && typeof value === "string"
+            ? new Date(value)
+            : value;
+        }
+        await this.prisma.cleaningBooking.update({ where: { id: bookingId }, data });
+        return;
+      } catch (e) {
+        this.logger.warn(`[sync] Prisma write for ${bookingId} failed, using REST: ${(e as Error).message}`);
+      }
+    }
+
+    await this.supabaseRest(`/cleaning_bookings?id=eq.${encodeURIComponent(bookingId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(columns),
+    });
   }
 }

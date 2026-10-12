@@ -47,9 +47,30 @@ export class GoogleCalendarService {
   private accessToken: string | null = null;
   private accessTokenExpiresAt = 0;
 
-  /** True when at least one auth method is fully configured. */
+  /**
+   * True when Google will accept a write — credentials only.
+   *
+   * This is the gate that matters for a booking on its provider's OWN
+   * calendar, and it is deliberately separate from `isConfigured()`. Cleaning
+   * started on one shared calendar named by GOOGLE_CLEANING_CALENDAR_ID and
+   * every provider now gets a calendar of its own, so a deployment can be
+   * perfectly healthy with no shared calendar at all.
+   */
+  hasAuth() {
+    return this.authMethod !== "none";
+  }
+
+  /**
+   * True when the SHARED cleaning calendar is usable.
+   *
+   * Only the surfaces that read or sweep that one calendar may gate on this —
+   * its health check and the reconcile pass. Gating a per-provider write on it
+   * is what stopped every cleaning booking from reaching Google: no shared
+   * calendar id meant no sync for anybody, including the providers who had
+   * their own.
+   */
   isConfigured() {
-    return this.authMethod !== "none" && Boolean(this.sharedAdminCleaningCalendarId);
+    return this.hasAuth() && Boolean(this.sharedAdminCleaningCalendarId);
   }
 
   getConfigurationStatus() {
@@ -360,12 +381,18 @@ export class GoogleCalendarService {
 
   private async request<T>(method: string, path: string, body?: unknown, calendarIdOverride?: string): Promise<T> {
     const calendarId = calendarIdOverride?.trim() || this.sharedAdminCleaningCalendarId;
-    if (!this.isConfigured() || !calendarId) {
+    // Credentials and SOME calendar — not credentials and the SHARED calendar.
+    // A write aimed at a provider's own calendar needs nothing from
+    // GOOGLE_CLEANING_CALENDAR_ID, and demanding it anyway silently took the
+    // whole product's calendar sync down with one unset variable.
+    if (!this.hasAuth() || !calendarId) {
       const status = this.getConfigurationStatus();
       throw new Error(
-        `Google Calendar is not configured (method=${status.authMethod}). ` +
-        `Set ${SHARED_CLEANING_CALENDAR_ENV} and either service-account credentials ` +
-        `or GOOGLE_CALENDAR_REFRESH_TOKEN + OAuth client credentials.`
+        !this.hasAuth()
+          ? `Google Calendar has no credentials (method=${status.authMethod}). Set either `
+            + `service-account credentials or GOOGLE_CALENDAR_REFRESH_TOKEN + OAuth client credentials.`
+          : `No calendar to write to: this booking's provider has none of its own and `
+            + `${SHARED_CLEANING_CALENDAR_ENV} is not set.`,
       );
     }
 
