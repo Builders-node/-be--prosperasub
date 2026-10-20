@@ -15,8 +15,10 @@ Supabase one piece at a time, then deleted. Nothing is switched in one go.
   `edge_admin_allowed`), so a session works on both during the move.
 - **Crons** become `pg_cron` jobs: plain SQL when the work is already a
   function, `pg_net` → Edge Function when it is not.
-- **Deploy**: `mcp__supabase__deploy_edge_function` (or `supabase functions
-  deploy api`). Migrations live in `migrations/`, applied to production.
+- **Deploy**: `backend/supabase/deploy-api.sh dev|prod` — the same code goes
+  to `api-dev` (what dev.everysub.net calls) or `api` (production). Normally via
+  `scripts/ship.sh dev`, then `scripts/ship.sh prod` once dev checks out.
+  Migrations live in `migrations/`; the database is shared by dev and prod.
 
 ## Secrets the Edge Function needs (Supabase → Edge Functions → Secrets)
 

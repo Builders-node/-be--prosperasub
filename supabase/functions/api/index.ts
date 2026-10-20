@@ -48,4 +48,11 @@ app.route("/", support);
 app.route("/", verify);
 app.route("/", locations);
 
-Deno.serve(app.fetch);
+// Supabase prefixes every path with the function's name. The same code runs as
+// `api` (production) and `api-dev` (the dev branch), so the first segment is
+// normalised to /api before routing instead of being baked into basePath.
+Deno.serve((req) => {
+  const url = new URL(req.url);
+  url.pathname = url.pathname.replace(/^\/[^/]+/, "/api");
+  return app.fetch(new Request(url.toString(), req));
+});
