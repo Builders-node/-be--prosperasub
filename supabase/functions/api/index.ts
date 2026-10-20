@@ -1,8 +1,10 @@
 import { Hono } from "hono";
 import { cors } from "npm:hono@4.6.14/cors";
 import { isAllowedOrigin } from "./lib/cors.ts";
-import { HttpError } from "./lib/http.ts";
+import { HttpError, STATUS_NAME } from "./lib/http.ts";
 import { db } from "./lib/db.ts";
+import { analytics } from "./routes/analytics.ts";
+import { support } from "./routes/support.ts";
 
 /**
  * The Supabase home of what used to be the NestJS API (api.prosperasub.com).
@@ -24,7 +26,8 @@ app.use("*", cors({
 
 app.onError((err, c) => {
   if (err instanceof HttpError) {
-    return c.json({ statusCode: err.status, message: err.message }, err.status as 400);
+    const details = (err as HttpError & { details?: string[] }).details;
+    return c.json({ message: details ?? err.message, error: STATUS_NAME[err.status] ?? "Error", statusCode: err.status }, err.status as 400);
   }
   console.error("[api] unhandled", err);
   return c.json({ statusCode: 500, message: "Internal server error" }, 500);
@@ -37,5 +40,8 @@ app.get("/health", async (c) => {
   const { error } = await db().from("global_settings").select("key").limit(1);
   return c.json({ status: error ? "degraded" : "ok", service: "everysub-edge-api", database: error ? "error" : "connected" });
 });
+
+app.route("/", analytics);
+app.route("/", support);
 
 Deno.serve(app.fetch);

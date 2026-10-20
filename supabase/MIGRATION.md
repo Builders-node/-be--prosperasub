@@ -20,8 +20,21 @@ Supabase one piece at a time, then deleted. Nothing is switched in one go.
 
 ## Secrets the Edge Function needs (Supabase → Edge Functions → Secrets)
 
-Set by the owner, never committed. Until one is set, the routes that need it
-answer 503 instead of failing open.
+Never committed. Until one is set, the routes that need it answer 503 instead
+of failing open.
+
+**Vercel will not give them back.** The API's env vars are marked sensitive, so
+`vercel env pull` returns an 11-character placeholder for all 33 of them. The
+ones set so far (2026-10-20) came from `backend/.env`, after proving each one
+live: `JWT_ACCESS_SECRET` by signing a probe token that production accepted,
+Resend/Telegram by a read-only API call. `JWT_VERIFY_SECRET` was not local, so a
+NEW one was generated — fine, because access-QR tokens live 5 minutes and both
+`/verify/token` and `/verify-access` must move together. Set:
+`JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET`, `JWT_VERIFY_SECRET` (new),
+`RESEND_API_KEY` (send-only key), `MAIL_FROM`, `TELEGRAM_BOT_TOKEN`,
+`TELEGRAM_ADMIN_CHAT_ID`, `ADMIN_PAYMENT_NOTIFICATION_EMAIL`, `BUSINESS_TIMEZONE`.
+Production has no `SUPPORT_INBOX_EMAIL`/`MAIL_REPLY_TO`, so support mail has
+never been sent — same on Edge until one is set.
 
 | Secret | Needed for |
 |---|---|
@@ -45,8 +58,9 @@ answer 503 instead of failing open.
 | 1 | Cron `seed-cleaning-slots` | **moved** — pg_cron `10 5 * * *` → `seed_cleaning_slots(180)` |
 | 1 | `GET /health` | **moved** — Edge `api`, routed |
 | 1 | Edge `api` skeleton, auth, admin RBAC fn | **done** |
-| 2 | Analytics | next (needs `JWT_ACCESS_SECRET`) |
-| 3 | Support, mail, notifications | needs Resend secrets |
+| 2 | Analytics `/analytics/summary`, `/analytics/revenue` | **moved** — byte-identical to Nest |
+| 3 | Support `/support/messages`, `/admin/support/messages[/:id]` | **moved** (mail lib ported) |
+| 3 | Mail `/mail/*`, notifications | next |
 | 4 | Verify (access QR) | needs `JWT_VERIFY_SECRET` |
 | 5 | Account CRUD (locations, members, …) | |
 | 6 | Event outbox, expire-holds → pg_cron | |

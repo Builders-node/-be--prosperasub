@@ -16,3 +16,21 @@ export function db(): SupabaseClient {
   }
   return client;
 }
+
+/**
+ * Every row of a query, page by page. PostgREST truncates a plain select at
+ * db-max-rows with HTTP 200 and no flag, so anything summed into a number must
+ * come through here. `build` must apply a deterministic order.
+ */
+export async function fetchAll<T>(
+  build: () => { range: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: unknown }> },
+  pageSize = 1000,
+): Promise<T[]> {
+  const out: T[] = [];
+  for (let from = 0; ; from += pageSize) {
+    const { data, error } = await build().range(from, from + pageSize - 1);
+    if (error) throw error;
+    out.push(...(data ?? []));
+    if (!data || data.length < pageSize) return out;
+  }
+}

@@ -45,9 +45,9 @@ async function resolveDbId(sub: string, email?: string): Promise<string> {
   return (data?.id as string | undefined) ?? sub;
 }
 
-export async function requireAccount(c: Context): Promise<AuthUser> {
+export async function requireAccount(c: Context, missing = "Access token is required"): Promise<AuthUser> {
   const token = bearer(c);
-  if (!token) throw unauthorized();
+  if (!token) throw unauthorized(missing);
   let payload: AccessPayload;
   try {
     ({ payload } = (await jwtVerify(token, secret(), { algorithms: ["HS256"] })) as unknown as {
@@ -68,9 +68,22 @@ const isSuperAdmin = (roles: string[]) => roles.some((r) => r === "SUPER_ADMIN" 
 
 /** Admin guard: SUPER_ADMIN on the token, or an active RBAC role (with the permission, if one is named). */
 export async function requireAdmin(c: Context, permission?: string): Promise<AuthUser> {
-  const user = await requireAccount(c);
+  const user = await requireAccount(c, "Admin access token is required");
   if (isSuperAdmin(user.roles)) return user;
   const { data, error } = await db().rpc("edge_admin_allowed", { p_user_id: user.id, p_permission: permission ?? null });
   if (error || data !== true) throw forbidden("Super admin access is required");
   return user;
+}
+
+/** The token's raw subject when a valid one is present, else null — never throws.
+ *  For public endpoints that only want to attach the sender when they can. */
+export async function optionalSubject(c: Context): Promise<string | null> {
+  const token = bearer(c);
+  if (!token) return null;
+  try {
+    const { payload } = await jwtVerify(token, secret(), { algorithms: ["HS256"] });
+    return (payload.sub as string | undefined) ?? null;
+  } catch {
+    return null;
+  }
 }
