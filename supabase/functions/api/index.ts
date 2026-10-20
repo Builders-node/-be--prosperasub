@@ -6,6 +6,7 @@ import { db } from "./lib/db.ts";
 import { analytics } from "./routes/analytics.ts";
 import { support } from "./routes/support.ts";
 import { verify } from "./routes/verify.ts";
+import { locations } from "./routes/locations.ts";
 
 /**
  * The Supabase home of what used to be the NestJS API (api.prosperasub.com).
@@ -45,5 +46,6 @@ app.get("/health", async (c) => {
 app.route("/", analytics);
 app.route("/", support);
 app.route("/", verify);
+app.route("/", locations);
 
 Deno.serve(app.fetch);
