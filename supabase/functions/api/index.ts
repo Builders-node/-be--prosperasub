@@ -7,6 +7,8 @@ import { analytics } from "./routes/analytics.ts";
 import { support } from "./routes/support.ts";
 import { verify } from "./routes/verify.ts";
 import { locations } from "./routes/locations.ts";
+import { paypalSubscriptions } from "./routes/paypal-subscriptions.ts";
+import { cancellation } from "./routes/cancellation.ts";
 
 /**
  * The Supabase home of what used to be the NestJS API (api.prosperasub.com).
@@ -47,12 +49,15 @@ app.route("/", analytics);
 app.route("/", support);
 app.route("/", verify);
 app.route("/", locations);
+app.route("/", paypalSubscriptions);
+app.route("/", cancellation);
 
 // Supabase prefixes every path with the function's name. The same code runs as
 // `api` (production) and `api-dev` (the dev branch), so the first segment is
 // normalised to /api before routing instead of being baked into basePath.
 Deno.serve((req) => {
   const url = new URL(req.url);
+  (globalThis as { __fnName?: string }).__fnName = url.pathname.split("/")[1] || "api";
   url.pathname = url.pathname.replace(/^\/[^/]+/, "/api");
   return app.fetch(new Request(url.toString(), req));
 });
