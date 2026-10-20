@@ -5,6 +5,7 @@ import { HttpError, STATUS_NAME } from "./lib/http.ts";
 import { db } from "./lib/db.ts";
 import { analytics } from "./routes/analytics.ts";
 import { support } from "./routes/support.ts";
+import { verify } from "./routes/verify.ts";
 
 /**
  * The Supabase home of what used to be the NestJS API (api.prosperasub.com).
@@ -43,5 +44,6 @@ app.get("/health", async (c) => {
 
 app.route("/", analytics);
 app.route("/", support);
+app.route("/", verify);
 
 Deno.serve(app.fetch);

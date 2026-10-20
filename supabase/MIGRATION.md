@@ -61,7 +61,7 @@ never been sent — same on Edge until one is set.
 | 2 | Analytics `/analytics/summary`, `/analytics/revenue` | **moved** — byte-identical to Nest |
 | 3 | Support `/support/messages`, `/admin/support/messages[/:id]` | **moved** (mail lib ported) |
 | 3 | Mail `/mail/*`, notifications | next |
-| 4 | Verify (access QR) | needs `JWT_VERIFY_SECRET` |
+| 4 | Verify `/verify/token` + `/verify-access`, Membership PDP (`lib/membership.ts`) | **moved** together — decisions identical on 5 real users (1 allowed, 4 denied) |
 | 5 | Account CRUD (locations, members, …) | |
 | 6 | Event outbox, expire-holds → pg_cron | |
 | 7 | Google Calendar | |
