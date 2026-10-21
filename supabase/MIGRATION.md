@@ -75,7 +75,8 @@ never been sent — same on Edge until one is set.
 | 10 | Auth itself (login, signup, Google, refresh, reset) | |
 | 11 | Food, renewals, subscription lifecycle cron | |
 | 12 | Payments in: invoices, webhooks, settlement, reconcile, rentals | |
-| 13 | Money out: payouts, refunds, credits | last |
+| 13 | Provider payouts: list, available, request | **moved (dev)** — earnings identical on 6 providers; pays from BTC wallet when USD is short, queues for admin when neither covers |
+| 13 | Admin payouts (approve/send/settle), refunds, credits | last |
 | 14 | Builders Node partner API | with the partner |
 
 Then: remove the Vercel crons, delete `backend/src` and the

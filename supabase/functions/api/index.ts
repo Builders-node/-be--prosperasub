@@ -9,6 +9,7 @@ import { verify } from "./routes/verify.ts";
 import { locations } from "./routes/locations.ts";
 import { paypalSubscriptions } from "./routes/paypal-subscriptions.ts";
 import { cancellation } from "./routes/cancellation.ts";
+import { payouts } from "./routes/payouts.ts";
 
 /**
  * The Supabase home of what used to be the NestJS API (api.prosperasub.com).
@@ -51,6 +52,7 @@ app.route("/", verify);
 app.route("/", locations);
 app.route("/", paypalSubscriptions);
 app.route("/", cancellation);
+app.route("/", payouts);
 
 // Supabase prefixes every path with the function's name. The same code runs as
 // `api` (production) and `api-dev` (the dev branch), so the first segment is
