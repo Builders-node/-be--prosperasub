@@ -61,10 +61,17 @@ const REVENUE_SOURCES: Record<string, RevenueSource> = {
   },
   food: {
     table: "food_subscriptions",
-    select: "weekly_price_cents,commitment_weeks,periods_paid,created_at,started_at",
+    select: "weekly_price_cents,commitment_weeks,periods_paid,created_at,started_at,end_date",
     scope: "legacy", where: "&payment_status=eq.paid&status=in.(active,paused,expired)",
     toInput: (r) => {
       const weeks = (r.commitment_weeks || 1) * (r.periods_paid || 1);
+      // A renewal moves started_at to the NEW period while the total covers
+      // every period paid. Anchoring the span at end_date and counting back
+      // keeps the weeks already delivered in the past, where they happened —
+      // from started_at they were all pushed into the future.
+      if (r.end_date) {
+        return { totalCents: (r.weekly_price_cents || 0) * weeks, serviceStart: addDays(String(r.end_date), -weeks * 7), serviceEnd: String(r.end_date), fallbackDays: weeks * 7 };
+      }
       return { totalCents: (r.weekly_price_cents || 0) * weeks, serviceStart: r.started_at || r.created_at, serviceEnd: null, fallbackDays: weeks * 7 };
     },
   },
@@ -78,6 +85,17 @@ const REVENUE_SOURCES: Record<string, RevenueSource> = {
 };
 
 const DEFAULT_COMMISSION_PCT = 10;
+
+/**
+ * When a provider's money becomes withdrawable — a platform setting
+ * (global_settings.finance_payout_basis, Admin → Finance):
+ *   "delivered" (default) — straight-line as the service runs, so a customer
+ *     who cancels has not already been paid out to the provider;
+ *   "paid" — the whole amount as soon as the customer has paid.
+ */
+export type PayoutBasis = "delivered" | "paid";
+export const PAYOUT_BASIS_KEY = "finance_payout_basis";
+const addDays = (d: string, n: number) => { const x = new Date(`${d.slice(0, 10)}T00:00:00Z`); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); };
 const ALL_TIME_START = new Date(2020, 0, 1);
 
 function dayIndex(input: Date | string): number {
@@ -108,7 +126,7 @@ export interface EarningsSummary {
   financeSource: string | null; commissionPct: number;
 }
 
-export async function summarize(providerId: string): Promise<EarningsSummary> {
+export async function summarize(providerId: string): Promise<EarningsSummary & { payoutBasis: PayoutBasis }> {
   const provider = await rest<Array<{ source_service_key: string | null; source_provider_id: string | null; archetype_key: string | null; commission_pct: number | string | null }>>(
     `providers?id=eq.${encodeURIComponent(providerId)}&select=source_service_key,source_provider_id,archetype_key,commission_pct`,
   );
@@ -119,6 +137,11 @@ export async function summarize(providerId: string): Promise<EarningsSummary> {
 
   const src = REVENUE_SOURCES[source ?? ""] ?? UNIVERSAL_REVENUE;
   const scopeId = src.scope === "universal" ? (providerId || legacyId) : legacyId;
+  const settings = await rest<Array<{ key: string; value: unknown }>>("global_settings?select=key,value");
+  const map: Record<string, unknown> = {};
+  (settings ?? []).forEach((r) => { map[r.key] = r.value; });
+  const payoutBasis: PayoutBasis = String(map[PAYOUT_BASIS_KEY] ?? "").replace(/"/g, "") === "paid" ? "paid" : "delivered";
+
   let revenue = 0;
   if (scopeId) {
     let filter: string | null;
@@ -131,13 +154,14 @@ export async function summarize(providerId: string): Promise<EarningsSummary> {
     if (filter) {
       const rows = await rest<Array<Record<string, any>>>(`${src.table}?${filter}${src.where ?? ""}&select=${src.select}`);
       const end = new Date();
-      revenue = (rows ?? []).reduce((sum, r) => sum + recognizedCents(src.toInput(r), ALL_TIME_START, end), 0);
+      revenue = (rows ?? []).reduce((sum, r) => {
+        const input = src.toInput(r);
+        // "paid": everything a customer has paid counts, whatever the dates.
+        return sum + (payoutBasis === "paid" ? Math.round(input.totalCents || 0) : recognizedCents(input, ALL_TIME_START, end));
+      }, 0);
     }
   }
 
-  const settings = await rest<Array<{ key: string; value: unknown }>>("global_settings?select=key,value");
-  const map: Record<string, unknown> = {};
-  (settings ?? []).forEach((r) => { map[r.key] = r.value; });
   const fallback = map["finance_default_commission_pct"];
   const commissionPct = row?.commission_pct != null && Number.isFinite(Number(row.commission_pct))
     ? Number(row.commission_pct)
@@ -153,6 +177,6 @@ export async function summarize(providerId: string): Promise<EarningsSummary> {
   return {
     revenueCents: revenue, earnedCents, committedCents,
     availableCents: Math.max(0, earnedCents - committedCents),
-    financeSource: source, commissionPct: rate,
+    financeSource: source, commissionPct: rate, payoutBasis,
   };
 }
