@@ -66,7 +66,7 @@ never been sent — same on Edge until one is set.
 | 4 | Verify `/verify/token` + `/verify-access`, Membership PDP (`lib/membership.ts`) | **moved** together — decisions identical on 5 real users (1 allowed, 4 denied) |
 | 5 | Saved locations `/account/locations*` (5 routes) | **moved** — owner scoping tested (foreign id → 404, `user_id` in body ignored) |
 | 5 | Cancel/resume `/account/:service/subscriptions/:id/(cancel|resume)` | **moved (dev)** — + PayPal suspend/activate |
-| new | PayPal auto-renew: `/payments/paypal/subscription(s)…`, `/webhooks/paypal`, `/account/subscriptions/:id/auto-renew/cancel` | **built on Edge (dev)** — never existed on Nest |
+| new | PayPal auto-renew: `/payments/paypal/subscription(s)…`, `/webhooks/paypal`, `/account/subscriptions/:id/auto-renew/cancel` | **on Edge** — every service: provider_subscriptions, food (N weeks/cycle), cleaning (N months/cycle) |
 | 5 | Rest of account CRUD (members, owner, preferences, password, …) | next |
 | 6 | Event outbox, expire-holds → pg_cron | |
 | 7 | Google Calendar | |

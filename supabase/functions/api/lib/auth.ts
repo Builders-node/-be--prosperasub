@@ -13,6 +13,8 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 export interface AuthUser {
   id: string;
+  /** The token's own subject — a Google login's `google-…`, which legacy rows may hold. */
+  sub: string;
   email?: string;
   roles: string[];
 }
@@ -59,6 +61,7 @@ export async function requireAccount(c: Context, missing = "Access token is requ
   }
   return {
     id: await resolveDbId(payload.sub, payload.email),
+    sub: payload.sub,
     email: payload.email,
     roles: payload.roles ?? [],
   };

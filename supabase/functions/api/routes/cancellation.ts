@@ -30,7 +30,7 @@ async function setFlag(c: any, cancel: boolean) {
   if (!/^[0-9a-zA-Z-]{1,64}$/.test(id)) throw notFound("Subscription not found.");
   const shape = SERVICES[service];
   if (!shape) throw badRequest(`Unknown service "${service}".`);
-  const paypalCols = shape.table === "provider_subscriptions" ? ",paypal_subscription_id,auto_renew" : "";
+  const paypalCols = ",paypal_subscription_id,auto_renew"; // on all three tables since 20261028120000
   const { data: sub, error } = await db().from(shape.table)
     .select(`id,user_id,end_date,cancel_at_period_end,${shape.statusCol}${paypalCols}`)
     // Beach cards still hand out the legacy id; the universal row carries it.
