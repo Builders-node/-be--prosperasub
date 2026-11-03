@@ -15,4 +15,4 @@ trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/supabase/functions"
 cp -R "$here/functions/api" "$work/supabase/functions/$name"
 cd "$work"
-npx --yes supabase functions deploy "$name" --project-ref igbytraidldkhhamsfdo --no-verify-jwt --use-api
+npx --yes supabase functions deploy "$name" --project-ref igbytraidldkhhamsfdo --no-verify-jwt --use-api --yes
