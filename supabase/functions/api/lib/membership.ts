@@ -17,6 +17,8 @@ export interface SubscriptionView {
   expires_at: string | null;
   provider_name?: string | null;
   image_url?: string | null;
+  /** The universal providers.id, where the source row has one — it scopes court bookings. */
+  provider_id?: string | null;
 }
 
 export interface AccessDecision {
@@ -103,7 +105,7 @@ async function cleaning(userId: string): Promise<SubscriptionView[]> {
 }
 
 async function food(userId: string): Promise<SubscriptionView[]> {
-  const subs = await rows("food_subscriptions", "id,status,started_at,commitment_weeks,meal_plan_id,provider_id", (q) => q.eq("user_id", userId));
+  const subs = await rows("food_subscriptions", "id,status,started_at,end_date,commitment_weeks,meal_plan_id,provider_id", (q) => q.eq("user_id", userId));
   if (!subs.length) return [];
   const planIds = [...new Set(subs.map((r) => r.meal_plan_id).filter(Boolean))] as string[];
   const planMap = new Map<string, string>();
@@ -116,7 +118,8 @@ async function food(userId: string): Promise<SubscriptionView[]> {
     }
   }
   return subs.map((r) => {
-    const expiresAt = addWeeks(r.started_at as string | null, Number(r.commitment_weeks ?? 0));
+    // end_date is authoritative: a renewal moves it and leaves started_at behind.
+    const expiresAt = (r.end_date as string | null) ?? addWeeks(r.started_at as string | null, Number(r.commitment_weeks ?? 0));
     const status = String(r.status ?? "").toLowerCase();
     const p = provMap.get(r.provider_id as string);
     return {
@@ -147,6 +150,7 @@ async function providerSubs(userId: string, beach: boolean): Promise<Subscriptio
       name: (r.plan_name as string) || (beach ? "Beach Club membership" : "Subscription"),
       status: normalizeStatus(status, isActive, expiresAt), expires_at: expiresAt,
       provider_name: p?.name ?? null, image_url: p?.image ?? null,
+      provider_id: (r.provider_id as string | null) ?? null,
     };
   });
 }

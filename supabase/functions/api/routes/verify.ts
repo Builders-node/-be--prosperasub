@@ -3,7 +3,7 @@ import { SignJWT, jwtVerify } from "jose";
 import { requireAccount } from "../lib/auth.ts";
 import { db } from "../lib/db.ts";
 import { HttpError } from "../lib/http.ts";
-import { evaluateAccess } from "../lib/membership.ts";
+import { evaluateAccess, getSubscriptions, type SubscriptionView } from "../lib/membership.ts";
 import { validate } from "../lib/validate.ts";
 
 /**
@@ -12,6 +12,11 @@ import { validate } from "../lib/validate.ts";
  * Both routes MUST move together: the token is signed with JWT_VERIFY_SECRET,
  * and the Edge one is not the Nest one (Vercel would not hand it back). A
  * token lives five minutes, so a scan in flight at the switch just refreshes.
+ *
+ * The QR lives on one subscription's card, so a token normally carries `sid`
+ * and the scan answers for that subscription alone: one that has run out is
+ * refused even if the person holds another. A token without `sid` still gets
+ * the old any-active answer, so a screen opened before the change keeps working.
  */
 export const verify = new Hono();
 
@@ -23,9 +28,13 @@ function verifySecret(): Uint8Array {
 
 verify.post("/verify/token", async (c) => {
   const user = await requireAccount(c);
+  const body = await c.req.json().catch(() => ({})) as { subscription_id?: unknown };
+  const sid = typeof body.subscription_id === "string" && body.subscription_id ? body.subscription_id : null;
   const ttl = Number(Deno.env.get("VERIFY_TOKEN_TTL_SECONDS") ?? 300);
   const now = Math.floor(Date.now() / 1000);
-  const token = await new SignJWT({ typ: "verify" })
+  // `alt` is the raw login id: Google logins were historically stored on the
+  // legacy tables as "google-xxx", and the card that minted this can show those.
+  const token = await new SignJWT({ typ: "verify", ...(sid ? { sid, alt: user.sub } : {}) })
     .setProtectedHeader({ alg: "HS256", typ: "JWT" })
     .setSubject(user.id)
     .setIssuedAt(now)
@@ -51,7 +60,7 @@ async function audit(entry: {
 }
 
 /** Court hours still ahead, for the door person ("Tennis Court 2, 4–5pm"). Best-effort. */
-async function upcomingBookings(userId: string) {
+async function upcomingBookings(userId: string, providerId?: string) {
   const todayHn = new Date().toLocaleDateString("en-CA", { timeZone: "America/Tegucigalpa" });
   const { data, error } = await db()
     .from("bookings")
@@ -65,12 +74,15 @@ async function upcomingBookings(userId: string) {
   const resourceIds = [...new Set((data ?? []).map((b) => b.resource_id))];
   const names = new Map<string, string>();
   if (resourceIds.length) {
-    const { data: res } = await db().from("bookable_resources").select("id,name").in("id", resourceIds);
-    for (const r of res ?? []) names.set(String(r.id), String(r.name));
+    const { data: res } = await db().from("bookable_resources").select("id,name,provider_id").in("id", resourceIds);
+    for (const r of res ?? []) {
+      if (!providerId || String(r.provider_id) === providerId) names.set(String(r.id), String(r.name));
+    }
   }
   const now = Date.now();
   return (data ?? [])
     .filter((b) => ["held", "confirmed"].includes(String(b.status)))
+    .filter((b) => !providerId || names.has(String(b.resource_id)))
     .filter((b) => new Date(b.end_at).getTime() >= now)
     .sort((a, b) => new Date(a.start_at).getTime() - new Date(b.start_at).getTime())
     .slice(0, 5)
@@ -88,10 +100,14 @@ verify.post("/verify-access", async (c) => {
   const empty = { user: null, subscriptions: [], bookings: [] };
 
   let userId: string;
+  let sid: string | null = null;
+  let alt: string | null = null;
   try {
     const { payload } = await jwtVerify(token, verifySecret(), { algorithms: ["HS256"] });
     if (payload.typ !== "verify" || !payload.sub) throw new Error("typ");
     userId = payload.sub;
+    sid = typeof payload.sid === "string" ? payload.sid : null;
+    alt = typeof payload.alt === "string" ? payload.alt : null;
   } catch (e) {
     if (e instanceof HttpError) throw e;
     const reason = "Invalid or expired QR code";
@@ -107,8 +123,21 @@ verify.post("/verify-access", async (c) => {
   }
   const user = { id: String(u.id), name: (u.display_name || u.name || "Unknown user") as string, avatar_url: (u.avatar_url ?? null) as string | null };
 
-  const { permit: allowed, reason, subscriptions } = await evaluateAccess(userId);
-  const bookings = await upcomingBookings(userId).catch((err) => {
+  let allowed: boolean, reason: string, subscriptions: SubscriptionView[];
+  if (sid) {
+    // Only this person's rows are searched, so a forged id finds nothing.
+    const held = await getSubscriptions(userId);
+    if (alt && alt !== userId) held.push(...await getSubscriptions(alt));
+    subscriptions = held.filter((s) => s.id === sid);
+    allowed = subscriptions.some((s) => s.status === "active");
+    reason = allowed ? "Active subscription" : subscriptions.length ? "This subscription is not active" : "Subscription not found";
+  } else {
+    ({ permit: allowed, reason, subscriptions } = await evaluateAccess(userId));
+  }
+  // A scan for one subscription shows that business's court hours, and only
+  // a subscription tied to a universal provider can have any.
+  const scopedProvider = sid ? subscriptions[0]?.provider_id ?? null : null;
+  const bookings = await (sid && !scopedProvider ? Promise.resolve([]) : upcomingBookings(userId, scopedProvider ?? undefined)).catch((err) => {
     console.warn(`verify: could not load bookings for ${userId} — ${String(err)}`);
     return [];
   });
