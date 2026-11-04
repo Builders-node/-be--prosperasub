@@ -318,7 +318,7 @@ paypalSubscriptions.post("/webhooks/paypal", async (c) => {
   const resource = event.resource ?? {};
   try {
     if (type === "PAYMENT.SALE.COMPLETED" && resource.billing_agreement_id) {
-      await onSaleCompleted(String(resource.billing_agreement_id), String(resource.id), cents(resource.amount?.total));
+      await onSaleCompleted(String(resource.billing_agreement_id), String(resource.id), cents(resource.amount?.total), resource.create_time);
     } else if (type === "BILLING.SUBSCRIPTION.ACTIVATED") {
       // Re-activated after a suspend. The first activation is settled by the sale.
       const found = await findByPayPalId(String(resource.id));
@@ -337,7 +337,25 @@ paypalSubscriptions.post("/webhooks/paypal", async (c) => {
   return c.json({ ok: true });
 });
 
-async function onSaleCompleted(subscriptionId: string, saleId: string, amountCents: number) {
+/**
+ * Does this sale pay for the first term?
+ *
+ * "The row is not paid yet" cannot answer it: the browser's activate call
+ * usually marks the row paid before PayPal's webhook arrives, and the first
+ * charge then read as a renewal, moving the dates a term ahead and counting the
+ * money twice. PayPal knows when the subscription started and the shortest
+ * cycle sold is a week, so a charge within three days of the start is the first.
+ */
+const FIRST_CHARGE_WINDOW_MS = 3 * 86_400_000;
+function isFirstCharge(sub: any, saleTime: unknown): boolean {
+  const started = Date.parse(String(sub.start_time));
+  const charged = Date.parse(String(saleTime));
+  if (Number.isFinite(started) && Number.isFinite(charged)) return charged - started < FIRST_CHARGE_WINDOW_MS;
+  const regular = (sub.billing_info?.cycle_executions ?? []).find((x: any) => x.tenure_type === "REGULAR");
+  return Number(regular?.cycles_completed ?? 0) <= 1;
+}
+
+async function onSaleCompleted(subscriptionId: string, saleId: string, amountCents: number, saleTime: unknown) {
   const found = await findByPayPalId(subscriptionId);
   if (!found) { console.warn(`[paypal-webhook] no row for ${subscriptionId}`); return; }
   const { kind, row } = found;
@@ -346,7 +364,7 @@ async function onSaleCompleted(subscriptionId: string, saleId: string, amountCen
   const sub = await paypal<any>(`/v1/billing/subscriptions/${encodeURIComponent(subscriptionId)}`);
   if (!customMatches(sub.custom_id, kind, row)) { console.warn(`[paypal-webhook] custom_id mismatch for ${subscriptionId}`); return; }
 
-  if (!kind.paid(row)) {
+  if (!kind.paid(row) || isFirstCharge(sub, saleTime)) {
     await markFirstPaid(kind, row, subscriptionId);
     return;
   }
