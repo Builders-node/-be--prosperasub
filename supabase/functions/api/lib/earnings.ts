@@ -37,7 +37,7 @@ async function rest<T>(path: string): Promise<T> {
 
 const UNIVERSAL_REVENUE: RevenueSource = {
   table: "provider_subscriptions",
-  select: "total_cents:price_cents,created_at,start_date,end_date",
+  select: "total_cents:price_cents,created_at,start_date,end_date,commission_pct",
   scope: "universal",
   where: "&payment_status=eq.paid",
   toInput: (r) => ({ totalCents: r.total_cents || 0, serviceStart: r.start_date || r.created_at, serviceEnd: r.end_date, fallbackDays: 30 }),
@@ -46,7 +46,7 @@ const REVENUE_ALIASES: Record<string, string> = { beach_club: "beach", entertain
 const REVENUE_SOURCES: Record<string, RevenueSource> = {
   cleaning: {
     table: "cleaning_subscriptions",
-    select: "total_price_cents,monthly_price_cents,created_at,service_start_date,service_end_date,start_date,end_date",
+    select: "total_price_cents,monthly_price_cents,created_at,service_start_date,service_end_date,start_date,end_date,commission_pct",
     scope: "legacy", scopeColumn: "package_id", where: "&payment_status=eq.paid&deleted_at=is.null",
     resolveScope: async (legacyId) => {
       const pkgs = await rest<Array<{ id: string }>>(`cleaning_packages?provider_id=eq.${encodeURIComponent(legacyId)}&select=id`);
@@ -61,7 +61,7 @@ const REVENUE_SOURCES: Record<string, RevenueSource> = {
   },
   food: {
     table: "food_subscriptions",
-    select: "weekly_price_cents,commitment_weeks,periods_paid,created_at,started_at,end_date",
+    select: "weekly_price_cents,commitment_weeks,periods_paid,created_at,started_at,end_date,commission_pct",
     scope: "legacy", where: "&payment_status=eq.paid&status=in.(active,paused,expired)",
     toInput: (r) => {
       const weeks = (r.commitment_weeks || 1) * (r.periods_paid || 1);
@@ -78,7 +78,7 @@ const REVENUE_SOURCES: Record<string, RevenueSource> = {
   beach: UNIVERSAL_REVENUE,
   vehicles: {
     table: "rental_bookings",
-    select: "total_cents,created_at,start_date,end_date,rental_days",
+    select: "total_cents,created_at,start_date,end_date,rental_days,commission_pct",
     scope: "universal", where: "&payment_status=eq.paid&status=neq.cancelled&deleted_at=is.null",
     toInput: (r) => ({ totalCents: Number(r.total_cents || 0), serviceStart: r.start_date || r.created_at, serviceEnd: r.end_date, fallbackDays: Math.max(1, Number(r.rental_days) || 1) }),
   },
@@ -142,6 +142,10 @@ export async function summarize(providerId: string): Promise<EarningsSummary & {
   (settings ?? []).forEach((r) => { map[r.key] = r.value; });
   const payoutBasis: PayoutBasis = String(map[PAYOUT_BASIS_KEY] ?? "").replace(/"/g, "") === "paid" ? "paid" : "delivered";
 
+  // Each order keeps the rate it was sold under (0 for a client the business
+  // brought itself); NULL — rows older than that column — takes the
+  // provider's current rate. Split order by order, never total × one rate.
+  const parts: Array<{ cents: number; pct: number | null }> = [];
   let revenue = 0;
   if (scopeId) {
     let filter: string | null;
@@ -154,11 +158,13 @@ export async function summarize(providerId: string): Promise<EarningsSummary & {
     if (filter) {
       const rows = await rest<Array<Record<string, any>>>(`${src.table}?${filter}${src.where ?? ""}&select=${src.select}`);
       const end = new Date();
-      revenue = (rows ?? []).reduce((sum, r) => {
+      for (const r of rows ?? []) {
         const input = src.toInput(r);
         // "paid": everything a customer has paid counts, whatever the dates.
-        return sum + (payoutBasis === "paid" ? Math.round(input.totalCents || 0) : recognizedCents(input, ALL_TIME_START, end));
-      }, 0);
+        const cents = payoutBasis === "paid" ? Math.round(input.totalCents || 0) : recognizedCents(input, ALL_TIME_START, end);
+        revenue += cents;
+        parts.push({ cents, pct: r.commission_pct == null ? null : Number(r.commission_pct) });
+      }
     }
   }
 
@@ -167,7 +173,11 @@ export async function summarize(providerId: string): Promise<EarningsSummary & {
     ? Number(row.commission_pct)
     : fallback != null && Number.isFinite(Number(fallback)) ? Number(fallback) : DEFAULT_COMMISSION_PCT;
   const rate = Math.min(Math.max(commissionPct, 0), 100);
-  const platformCents = Math.min(Math.round((revenue * rate) / 100), Math.max(0, revenue));
+  const platformCents = parts.reduce((sum, p) => {
+    const cents = Math.max(0, p.cents);
+    const r = p.pct != null && Number.isFinite(p.pct) ? Math.min(Math.max(p.pct, 0), 100) : rate;
+    return sum + Math.min(Math.round((cents * r) / 100), cents);
+  }, 0);
   const earnedCents = Math.max(0, revenue - platformCents);
 
   const paid = await rest<Array<{ amount_cents: number }>>(

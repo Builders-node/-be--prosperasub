@@ -47,6 +47,25 @@ describe("ReferralsService.claim", () => {
   beforeEach(() => { service = new ReferralsService(config); });
   afterAll(() => { global.fetch = realFetch; });
 
+  it("a business's code makes the customer its client and never touches neighbour referrals", async () => {
+    const calls = stubSupabase([
+      [/rpc\/claim_provider_client/, () => ({ claimed: true, provider: "Elias Cuisine" })],
+    ]);
+    await expect(service.claim(REFEREE, "elias")).resolves.toEqual({
+      claimed: true, reason: undefined, provider: "Elias Cuisine",
+    });
+    const rpc = calls.find((c) => /rpc\/claim_provider_client/.test(c.url));
+    expect(JSON.parse(String(rpc!.init!.body))).toEqual({ p_user: REFEREE, p_code: "ELIAS" });
+    expect(calls.some((c) => /\/referrals/.test(c.url))).toBe(false);
+  });
+
+  it("passes on the business's refusal (already its paying customer) instead of trying it as a neighbour code", async () => {
+    stubSupabase([
+      [/rpc\/claim_provider_client/, () => ({ claimed: false, reason: "already-a-customer", provider: "Elias Cuisine" })],
+    ]);
+    await expect(service.claim(REFEREE, "ELIAS")).resolves.toMatchObject({ claimed: false, reason: "already-a-customer" });
+  });
+
   it("records the referral when the code is a stranger's and the account is new", async () => {
     const calls = stubSupabase([
       [/global_settings/, () => settingsOn],
@@ -57,7 +76,7 @@ describe("ReferralsService.claim", () => {
 
     await expect(service.claim(REFEREE, "abc123")).resolves.toEqual({ claimed: true });
 
-    const write = calls.find((c) => c.init?.method === "POST");
+    const write = calls.find((c) => c.init?.method === "POST" && /\/referrals$/.test(c.url));
     expect(write).toBeDefined();
     expect(JSON.parse(String(write!.init!.body))).toMatchObject({
       referrer_user_id: REFERRER,

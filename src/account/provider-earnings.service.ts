@@ -47,7 +47,7 @@ interface RevenueSource {
 
 const UNIVERSAL_REVENUE: RevenueSource = {
   table: "provider_subscriptions",
-  select: "total_cents:price_cents,created_at,start_date,end_date",
+  select: "total_cents:price_cents,created_at,start_date,end_date,commission_pct",
   scope: "universal",
   where: "&payment_status=eq.paid",
   toInput: (r) => ({
@@ -63,7 +63,7 @@ const REVENUE_ALIASES: Record<string, string> = { beach_club: "beach", entertain
 const REVENUE_SOURCES: Record<string, RevenueSource> = {
   cleaning: {
     table: "cleaning_subscriptions",
-    select: "total_price_cents,monthly_price_cents,created_at,service_start_date,service_end_date,start_date,end_date",
+    select: "total_price_cents,monthly_price_cents,created_at,service_start_date,service_end_date,start_date,end_date,commission_pct",
     scope: "legacy",
     scopeColumn: "package_id",
     where: "&payment_status=eq.paid&deleted_at=is.null",
@@ -87,7 +87,7 @@ const REVENUE_SOURCES: Record<string, RevenueSource> = {
 
   food: {
     table: "food_subscriptions",
-    select: "weekly_price_cents,commitment_weeks,periods_paid,created_at,started_at",
+    select: "weekly_price_cents,commitment_weeks,periods_paid,created_at,started_at,commission_pct",
     scope: "legacy",
     where: "&payment_status=eq.paid&status=in.(active,paused,expired)",
     toInput: (r) => {
@@ -108,7 +108,7 @@ const REVENUE_SOURCES: Record<string, RevenueSource> = {
 
   vehicles: {
     table: "rental_bookings",
-    select: "total_cents,created_at,start_date,end_date,rental_days",
+    select: "total_cents,created_at,start_date,end_date,rental_days,commission_pct",
     scope: "universal",
     where: "&payment_status=eq.paid&status=neq.cancelled&deleted_at=is.null",
     toInput: (r) => ({
@@ -196,7 +196,7 @@ export class ProviderEarningsService {
     const legacyId = row?.source_provider_id ?? null;
 
     const end = new Date();
-    const { revenue } = await this.fetchEarned(source, legacyId, ALL_TIME_START, end, providerId);
+    const { revenue, parts } = await this.fetchEarned(source, legacyId, ALL_TIME_START, end, providerId);
 
     const settings = await this.readSettings();
     const commissionPct = this.commissionPct(row?.commission_pct, settings);
@@ -204,7 +204,12 @@ export class ProviderEarningsService {
     // rest. Clamped to what actually came in, so a rate somebody typed as 150
     // cannot make a provider owe money for a period they earned in.
     const rate = Math.min(Math.max(commissionPct, 0), 100);
-    const platformCents = Math.min(Math.round((revenue * rate) / 100), Math.max(0, revenue));
+    // Order by order: NULL (orders older than commission_pct) is today's rate.
+    const platformCents = parts.reduce((sum, p) => {
+      const cents = Math.max(0, p.cents);
+      const r = p.pct != null && Number.isFinite(p.pct) ? Math.min(Math.max(p.pct, 0), 100) : rate;
+      return sum + Math.min(Math.round((cents * r) / 100), cents);
+    }, 0);
     const earnedCents = Math.max(0, revenue - platformCents);
 
     const committedCents = await this.committed(providerId);
@@ -235,7 +240,7 @@ export class ProviderEarningsService {
     end: Date,
     /** The universal `providers.id` — what scopes services whose money lives in the universal tables. */
     providerId?: string,
-  ): Promise<{ revenue: number }> {
+  ): Promise<{ revenue: number; parts: Array<{ cents: number; pct: number | null }> }> {
     // Straight-line recognition, same as the admin's finance pages: a
     // three-month plan contributes a third of its value to each month it
     // covers. The old per-unit and per-month models needed a headcount and a
@@ -246,20 +251,26 @@ export class ProviderEarningsService {
     // and stored in `surcharge_cents` of its own — it exists to cover what the
     // processor takes, so it is not revenue and must never reach a payout. Do
     // not "fix" these sums by adding it back.
-    const acc = (rows: Array<Record<string, any>> | null, toInput: (r: any) => Recognition) => ({
-      revenue: (rows ?? []).reduce((sum, r) => sum + recognizedCents(toInput(r), start, end), 0),
-    });
+    // Each order keeps the rate it was sold under (0 for a client the business
+    // brought itself); the caller splits order by order.
+    const acc = (rows: Array<Record<string, any>> | null, toInput: (r: any) => Recognition) => {
+      const parts = (rows ?? []).map((r) => ({
+        cents: recognizedCents(toInput(r), start, end),
+        pct: r.commission_pct == null ? null : Number(r.commission_pct),
+      }));
+      return { revenue: parts.reduce((sum, p) => sum + p.cents, 0), parts };
+    };
 
     const src = REVENUE_SOURCES[source ?? ""] ?? UNIVERSAL_REVENUE;
     const scopeId = src.scope === "universal" ? (providerId || legacyId) : legacyId;
-    if (!scopeId) return { revenue: 0 };
+    if (!scopeId) return { revenue: 0, parts: [] };
 
     // Rows a provider owns indirectly — cleaning's, which name a package
     // rather than the business that sells it.
     let filter: string;
     if (src.resolveScope) {
       const ids = await src.resolveScope(scopeId, (path) => this.rest<Array<Record<string, any>>>(path));
-      if (!ids.length) return { revenue: 0 };
+      if (!ids.length) return { revenue: 0, parts: [] };
       filter = `${src.scopeColumn ?? "provider_id"}=in.(${ids.join(",")})`;
     } else {
       filter = `${src.scopeColumn ?? "provider_id"}=eq.${encodeURIComponent(scopeId)}`;

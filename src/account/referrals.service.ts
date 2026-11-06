@@ -93,12 +93,20 @@ export class ReferralsService {
    * something — otherwise the first thing anyone would do is claim the
    * customers the platform already had.
    */
-  async claim(userId: string, rawCode: string): Promise<{ claimed: boolean; reason?: string }> {
-    const settings = await this.settings();
-    if (!settings.enabled) return { claimed: false, reason: "disabled" };
-
+  async claim(userId: string, rawCode: string): Promise<{ claimed: boolean; reason?: string; provider?: string }> {
     const code = String(rawCode || "").trim().toUpperCase();
     if (!/^[A-Z0-9]{4,12}$/.test(code)) throw new BadRequestException("That is not a referral code.");
+
+    // A business's own code (its QR carries ?ref=CODE) shares this door with
+    // the neighbour codes. It makes the customer that business's client, so
+    // their orders WITH IT carry no platform commission. The rules — a new
+    // account, or one that has never paid this business — live in the
+    // database function, next to the trigger that applies the 0%.
+    const asProvider = await this.claimProviderCode(userId, code);
+    if (asProvider && asProvider.reason !== "unknown-code") return asProvider;
+
+    const settings = await this.settings();
+    if (!settings.enabled) return { claimed: false, reason: "disabled" };
 
     const [referrer] = await this.rest<Array<{ id: string }>>(
       `/users?referral_code=eq.${encodeURIComponent(code)}&deleted_at=is.null&select=id&limit=1`,
@@ -132,6 +140,28 @@ export class ReferralsService {
     }
 
     return { claimed: true };
+  }
+
+  /** null when the API cannot reach the database; otherwise the function's answer. */
+  private async claimProviderCode(
+    userId: string,
+    code: string,
+  ): Promise<{ claimed: boolean; reason?: string; provider?: string } | null> {
+    try {
+      const out = await this.rest<{ claimed: boolean; reason?: string; provider?: string }>(
+        `/rpc/claim_provider_client`,
+        { method: "POST", body: JSON.stringify({ p_user: userId, p_code: code }) },
+      );
+      // Anything that is not the function's own answer (an empty body, a list)
+      // means "not a business code", so the neighbour path runs as before.
+      if (!out || typeof out !== "object" || Array.isArray(out)) return null;
+      if (!out.claimed && !out.reason) return null;
+      return { claimed: !!out.claimed, reason: out.reason, provider: out.provider };
+    } catch (err) {
+      // Before the function exists (or a blip) a neighbour code must still work.
+      this.logger.warn(`provider code claim failed for ${userId}: ${(err as Error).message}`);
+      return null;
+    }
   }
 
   // ─── plumbing ───────────────────────────────────────────────────────────────
