@@ -4,6 +4,8 @@ import { requireAccount } from "../lib/auth.ts";
 import { isAllowedOrigin } from "../lib/cors.ts";
 import { db } from "../lib/db.ts";
 import { forbidden, HttpError, notFound } from "../lib/http.ts";
+import { escapeHtml, sendMail } from "../lib/mail.ts";
+import { providerAudience, tellProvider } from "../lib/providerAudience.ts";
 
 /**
  * Hand a business to its owner with a link.
@@ -71,11 +73,15 @@ ownerInvites.get("/admin/providers/:id/owner-invites", async (c) => {
   return c.json({ open: open ? { createdAt: last!.created_at, expiresAt: last!.expires_at } : null, last });
 });
 
-ownerInvites.post("/admin/providers/:id/owner-invites", async (c) => {
-  const admin = await requireOwnerAdmin(c);
-  const provider = await readProvider(c.req.param("id"));
+/**
+ * Make (and optionally email) a hand-over link. Exported so an application
+ * approval can send one in the same breath. A new link retires the open one.
+ */
+export async function createOwnerInvite(opts: {
+  providerId: string; createdBy: string; origin: string; email?: string | null;
+}): Promise<{ url: string; expiresAt: string; emailed: boolean }> {
+  const provider = await readProvider(opts.providerId);
 
-  // One open link per business: a new one retires the old.
   const { error: revokeErr } = await db().from("provider_owner_invites")
     .update({ revoked_at: nowIso() })
     .eq("provider_id", provider.id)
@@ -85,15 +91,77 @@ ownerInvites.post("/admin/providers/:id/owner-invites", async (c) => {
 
   const token = newToken();
   const expiresAt = new Date(Date.now() + TTL_DAYS * 86_400_000).toISOString();
-  const { error } = await db().from("provider_owner_invites").insert({
+  const email = opts.email?.trim().toLowerCase() || null;
+  const row: Record<string, unknown> = {
     provider_id: provider.id,
     token_hash: await sha256(token),
-    created_by: admin.id,
+    created_by: opts.createdBy,
     expires_at: expiresAt,
-  });
+  };
+  if (email) row.invited_email = email;
+  let { error } = await db().from("provider_owner_invites").insert(row);
+  // Before migration 20261110120000 the column does not exist — still make the link.
+  if (error && email && /invited_email/.test(error.message)) {
+    delete row.invited_email;
+    ({ error } = await db().from("provider_owner_invites").insert(row));
+  }
   if (error) throw new HttpError(503, "Could not create the link.");
 
-  return c.json({ url: `${siteOrigin(c)}/claim-business?token=${token}`, expiresAt }, 201);
+  const url = `${opts.origin}/claim-business?token=${token}`;
+  let emailed = false;
+  if (email) {
+    // The business has no address yet (every seeded draft) — the person we are
+    // handing it to is the best one we have; calendars are shared with it.
+    await db().from("providers").update({ contact_email: email })
+      .eq("id", provider.id).or("contact_email.is.null,contact_email.eq.");
+    try {
+      const r = await sendMail({
+        to: email,
+        subject: `${provider.name} is ready for you on EverySub`,
+        text: [
+          `Hi! ${provider.name} has a page on EverySub, the subscription marketplace for Roatán.`,
+          "Open this link, sign in (or create an account with this email) and press Accept — the business becomes yours to manage: plans, schedule, team and payouts.",
+          "", url, "",
+          `The link works once and until ${expiresAt.slice(0, 10)}.`,
+        ].join("\n"),
+        html: `<h2>${escapeHtml(provider.name)} is ready for you</h2>
+          <p>${escapeHtml(provider.name)} has a page on EverySub, the subscription marketplace for Roatán.</p>
+          <p>Open the link, sign in (or create an account with this email) and press <strong>Accept</strong> — the business becomes yours to manage: plans, schedule, team and payouts.</p>
+          <p><a href="${escapeHtml(url)}" style="display:inline-block;padding:12px 20px;border-radius:999px;background:#F5A623;color:#000;text-decoration:none;font-weight:600">Take over ${escapeHtml(provider.name)}</a></p>
+          <p style="color:#666">The link works once and until ${expiresAt.slice(0, 10)}.</p>`,
+      });
+      emailed = !!r.sent;
+    } catch (e) {
+      console.warn(`[owner-invites] email to ${email} failed: ${(e as Error).message}`);
+    }
+  }
+  return { url, expiresAt, emailed };
+}
+
+ownerInvites.post("/admin/providers/:id/owner-invites", async (c) => {
+  const admin = await requireOwnerAdmin(c);
+  const body = await c.req.json().catch(() => ({})) as { email?: unknown };
+  const email = typeof body.email === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email.trim()) ? body.email : null;
+  if (typeof body.email === "string" && body.email.trim() && !email) throw new HttpError(400, "That email address doesn't look right.");
+  const r = await createOwnerInvite({ providerId: c.req.param("id"), createdBy: admin.id, origin: siteOrigin(c), email });
+  return c.json(r, 201);
+});
+
+/** Invite state for every business — the Businesses list shows it. */
+ownerInvites.get("/admin/owner-invites", async (c) => {
+  await requireOwnerAdmin(c);
+  const { data, error } = await db().from("provider_owner_invites")
+    .select("*").order("created_at", { ascending: false }).limit(500);
+  if (error) throw new HttpError(503, "Could not read invites.");
+  const latest = new Map<string, Record<string, unknown>>();
+  for (const r of data ?? []) if (!latest.has(String(r.provider_id))) latest.set(String(r.provider_id), r);
+  return c.json([...latest.values()].map((r) => ({
+    providerId: r.provider_id,
+    state: stateOf(r as { expires_at: string; claimed_at: string | null; revoked_at: string | null }),
+    invitedEmail: (r as { invited_email?: string | null }).invited_email ?? null,
+    openedAt: (r as { opened_at?: string | null }).opened_at ?? null,
+    createdAt: r.created_at,
+  })));
 });
 
 ownerInvites.delete("/admin/providers/:id/owner-invites", async (c) => {
@@ -128,6 +196,11 @@ const stateOf = (inv: { expires_at: string; claimed_at: string | null; revoked_a
 ownerInvites.get("/owner-invites/:token", async (c) => {
   const inv = await readInvite(c.req.param("token"));
   const provider = await readProvider(inv.provider_id);
+  // "Opened" for the admin's list; best-effort (the column arrives with 20261110120000).
+  if (stateOf(inv) === "open") {
+    await db().from("provider_owner_invites").update({ opened_at: nowIso() }).eq("id", inv.id).is("opened_at", null)
+      .then(() => undefined, () => undefined);
+  }
   return c.json({ state: stateOf(inv), business: { id: provider.id, name: provider.name }, expiresAt: inv.expires_at });
 });
 
@@ -173,5 +246,14 @@ ownerInvites.post("/owner-invites/:token/claim", async (c) => {
   }).then(({ error }) => { if (error) console.warn("[owner-invites] audit log failed", error.message); });
 
   const provider = await readProvider(inv.provider_id);
+  const audience = await providerAudience(provider.id);
+  if (audience) {
+    await tellProvider({ ...audience, userIds: [user.id], emails: [] }, {
+      type: "provider_claimed",
+      title: "The business is yours",
+      body: `You now own ${provider.name} on EverySub. Finish its profile and plans — the checklist on the Overview shows what is left before it goes live.`,
+      email: false,
+    });
+  }
   return c.json({ providerId: provider.id, name: provider.name, already: false });
 });

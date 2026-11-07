@@ -4,6 +4,7 @@ import { db } from "../lib/db.ts";
 import { badRequest, forbidden, HttpError, notFound } from "../lib/http.ts";
 import { notifyUser } from "../lib/notify.ts";
 import { paypal } from "../lib/paypal.ts";
+import { providerAudience, tellProvider, universalProviderId } from "../lib/providerAudience.ts";
 
 /**
  * Port of AccountCancellationService (backend/src/account): cancel = "won't
@@ -32,7 +33,7 @@ async function setFlag(c: any, cancel: boolean) {
   if (!shape) throw badRequest(`Unknown service "${service}".`);
   const paypalCols = ",paypal_subscription_id,auto_renew"; // on all three tables since 20261028120000
   const { data: sub, error } = await db().from(shape.table)
-    .select(`id,user_id,end_date,cancel_at_period_end,${shape.statusCol}${paypalCols}`)
+    .select(`id,user_id,provider_id,end_date,cancel_at_period_end,${shape.statusCol}${paypalCols}`)
     // Beach cards still hand out the legacy id; the universal row carries it.
     .or(service === "beach" ? `id.eq.${id},source_subscription_id.eq.${id}` : `id.eq.${id}`)
     .limit(1).maybeSingle();
@@ -98,6 +99,32 @@ async function setFlag(c: any, cancel: boolean) {
     relatedEntityId: String(sub.id),
     actionUrl: "/my-subscriptions",
   });
+  // The business hears it too — it used to learn of a cancellation only when
+  // a renewal never came.
+  const providerId = await universalProviderId(shape.table, (sub as { provider_id?: string | null }).provider_id);
+  const audience = providerId ? await providerAudience(providerId) : null;
+  if (audience) {
+    const { data: who } = await db().from("users").select("display_name,name").eq("id", String(sub.user_id)).maybeSingle();
+    const customer = who?.display_name || who?.name || "A customer";
+    await tellProvider(audience, cancel
+      ? {
+          type: "provider_cancellation",
+          title: "A subscription won't renew",
+          body: `${customer} cancelled their ${shape.label}.${sub.end_date ? ` It runs until ${sub.end_date}; nothing changes before then.` : ""}`,
+          actionPath: `/my-provider/${audience.providerId}?tab=bookings`,
+          relatedEntityType: shape.table,
+          relatedEntityId: String(sub.id),
+        }
+      : {
+          type: "provider_resumed",
+          title: "A subscription will renew again",
+          body: `${customer} undid the cancellation of their ${shape.label}.`,
+          actionPath: `/my-provider/${audience.providerId}?tab=bookings`,
+          relatedEntityType: shape.table,
+          relatedEntityId: String(sub.id),
+          email: false,
+        });
+  }
   return c.json({ ok: true, cancelAtPeriodEnd: cancel, endsOn: sub.end_date ?? null }, 201);
 }
 
