@@ -373,7 +373,10 @@ export class BookingService {
     const subject = input.subjectRef ?? "";
     if (!subject) throw new BadRequestException("subject_required");
 
-    if (policy.requiresMembership) {
+    // Booking is for the business's subscribers, always (no longer a switch).
+    // Staff booking for a customer passes bypassPolicy and never gets here.
+    void policy.requiresMembership;
+    {
       const ok = await this.membershipCoversResource(subject, input.resourceId);
       if (ok === "none") throw new BadRequestException("membership_required");
       if (ok === "other_resource") throw new BadRequestException("resource_not_in_plan");

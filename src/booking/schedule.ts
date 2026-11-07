@@ -88,7 +88,7 @@ export const DEFAULT_POLICY: BookingPolicy = {
   // Off by default: turning a restriction on is a decision, and inheriting one
   // nobody chose would lock customers out of every provider that never opened
   // this screen.
-  requiresMembership: false,
+  requiresMembership: true,
   maxActiveBookings: 0,
   maxPerDay: 0,
   cancelNoticeHours: 0,
@@ -137,7 +137,8 @@ export function normalizePolicy(raw: unknown): BookingPolicy {
   const p = (raw ?? {}) as Partial<BookingPolicy>;
   const count = (v: unknown) => (Number(v) > 0 ? Math.floor(Number(v)) : 0);
   return {
-    requiresMembership: p.requiresMembership === true,
+    // Always — booking is for the provider's subscribers (mirrors frontend bookingSettings).
+    requiresMembership: true,
     maxActiveBookings: count(p.maxActiveBookings),
     maxPerDay: count(p.maxPerDay),
     cancelNoticeHours: Math.max(0, Number(p.cancelNoticeHours) || 0),

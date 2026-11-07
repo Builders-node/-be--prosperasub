@@ -19,24 +19,25 @@ describe("booking policy", () => {
     expect(normalizePolicy({})).toEqual(DEFAULT_POLICY);
   });
 
-  it("keeps settings written before the policy existed open", () => {
+  it("reads settings written before the policy existed as subscribers-only, limits off", () => {
     const legacy = normalizeSchedule({
       timezone: "America/Tegucigalpa",
       sessionDurationMin: 60,
       minNoticeHours: 12,
       maxAdvanceDays: 30,
     });
-    expect(legacy.policy.requiresMembership).toBe(false);
+    // Booking is for the provider's subscribers, always (2026-11) — not a setting.
+    expect(legacy.policy.requiresMembership).toBe(true);
     expect(legacy.policy.maxActiveBookings).toBe(0);
     expect(legacy.policy.maxPerDay).toBe(0);
     expect(legacy.policy.cancelNoticeHours).toBe(0);
   });
 
-  it("only locks on an explicit true", () => {
+  it("is subscribers-only whatever was stored", () => {
+    // It used to be a switch; a stored false must not reopen the calendar.
+    expect(normalizePolicy({ requiresMembership: false }).requiresMembership).toBe(true);
     expect(normalizePolicy({ requiresMembership: true }).requiresMembership).toBe(true);
-    // Anything else — a string, a 1, a missing key — is not a decision.
-    expect(normalizePolicy({ requiresMembership: "yes" }).requiresMembership).toBe(false);
-    expect(normalizePolicy({ requiresMembership: 1 }).requiresMembership).toBe(false);
+    expect(normalizePolicy({}).requiresMembership).toBe(true);
   });
 
   it("reads a limit only when it is a positive whole number", () => {
