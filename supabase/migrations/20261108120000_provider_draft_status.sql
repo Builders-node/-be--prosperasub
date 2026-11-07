@@ -1,4 +1,4 @@
--- 20261108120000 · provider_draft_status
+-- Applied 20261108120000 · provider_draft_status
 --
 -- A business being onboarded is a DRAFT, not "inactive". Until now there were
 -- two statuses, so a business still being set up and one taken off the
