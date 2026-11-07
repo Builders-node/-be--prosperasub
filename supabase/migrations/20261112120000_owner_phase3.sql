@@ -1,3 +1,4 @@
+-- Applied to production 2026-11-07 (by the owner).
 -- Owners, phase 3: team invites ride the owner-invite table.
 --
 -- `kind` = 'owner' (the hand-over link, default — every existing row) or
