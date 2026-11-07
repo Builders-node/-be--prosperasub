@@ -124,6 +124,19 @@ payouts.post("/account/providers/:providerId/payouts/request", async (c) => {
   const destination = String(body.destination ?? "").trim();
   if (!destination) throw badRequest("Where should the money go? Add a Lightning or Bitcoin address.");
   const dest = classifyPayoutDestination(destination);
+  // A Lightning address that doesn't answer fails at send time, after the
+  // request was accepted — six in a row on one address before this. Ask it
+  // first, so the owner fixes it while they are still on the screen.
+  if ((dest as { kind?: string }).kind === "lightning_address") {
+    const [name, domain] = String((dest as { value: string }).value).split("@");
+    let ok = false;
+    try {
+      const res = await fetch(`https://${domain}/.well-known/lnurlp/${encodeURIComponent(name)}`, { signal: AbortSignal.timeout(6000) });
+      const j = res.ok ? await res.json().catch(() => null) as { callback?: string; tag?: string } | null : null;
+      ok = !!j?.callback;
+    } catch { ok = false; }
+    if (!ok) throw badRequest(`${destination} doesn't answer as a Lightning address right now. Check it in your wallet, or use a Bitcoin address instead.`);
+  }
   const problem = payoutDestinationProblem(dest);
   if (problem) throw badRequest(problem);
 

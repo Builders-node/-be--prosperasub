@@ -63,12 +63,12 @@ ownerInvites.get("/admin/providers/:id/owner-invites", async (c) => {
   await requireOwnerAdmin(c);
   const provider = await readProvider(c.req.param("id"));
   const { data, error } = await db().from("provider_owner_invites")
-    .select("id,created_at,expires_at,claimed_at,claimed_by,revoked_at")
+    .select("*")
     .eq("provider_id", provider.id)
     .order("created_at", { ascending: false })
-    .limit(1);
+    .limit(10);
   if (error) throw new HttpError(503, "Could not read invites.");
-  const last = data?.[0] ?? null;
+  const last = (data ?? []).find((r) => (r as { kind?: string }).kind !== "member") ?? null;
   const open = !!last && !last.claimed_at && !last.revoked_at && Date.parse(last.expires_at) > Date.now();
   return c.json({ open: open ? { createdAt: last!.created_at, expiresAt: last!.expires_at } : null, last });
 });
@@ -82,11 +82,18 @@ export async function createOwnerInvite(opts: {
 }): Promise<{ url: string; expiresAt: string; emailed: boolean }> {
   const provider = await readProvider(opts.providerId);
 
-  const { error: revokeErr } = await db().from("provider_owner_invites")
+  // One open OWNER link per business; team invites are left alone.
+  let { error: revokeErr } = await db().from("provider_owner_invites")
     .update({ revoked_at: nowIso() })
     .eq("provider_id", provider.id)
     .is("claimed_at", null)
-    .is("revoked_at", null);
+    .is("revoked_at", null)
+    .or("kind.is.null,kind.eq.owner");
+  if (revokeErr && /kind/.test(revokeErr.message)) {
+    ({ error: revokeErr } = await db().from("provider_owner_invites")
+      .update({ revoked_at: nowIso() })
+      .eq("provider_id", provider.id).is("claimed_at", null).is("revoked_at", null));
+  }
   if (revokeErr) throw new HttpError(503, "Could not replace the previous link.");
 
   const token = newToken();
@@ -154,7 +161,10 @@ ownerInvites.get("/admin/owner-invites", async (c) => {
     .select("*").order("created_at", { ascending: false }).limit(500);
   if (error) throw new HttpError(503, "Could not read invites.");
   const latest = new Map<string, Record<string, unknown>>();
-  for (const r of data ?? []) if (!latest.has(String(r.provider_id))) latest.set(String(r.provider_id), r);
+  for (const r of data ?? []) {
+    if ((r as { kind?: string }).kind === "member") continue; // team invites aren't ownership
+    if (!latest.has(String(r.provider_id))) latest.set(String(r.provider_id), r);
+  }
   return c.json([...latest.values()].map((r) => ({
     providerId: r.provider_id,
     state: stateOf(r as { expires_at: string; claimed_at: string | null; revoked_at: string | null }),
@@ -181,12 +191,16 @@ ownerInvites.delete("/admin/providers/:id/owner-invites", async (c) => {
 async function readInvite(token: string) {
   if (!token || token.length < 20 || token.length > 100) throw notFound("This link is not valid.");
   const { data, error } = await db().from("provider_owner_invites")
-    .select("id,provider_id,expires_at,claimed_at,claimed_by,revoked_at")
+    .select("*")
     .eq("token_hash", await sha256(token))
     .maybeSingle();
   if (error) throw new HttpError(503, "Could not read the link.");
   if (!data) throw notFound("This link is not valid.");
-  return data as { id: string; provider_id: string; expires_at: string; claimed_at: string | null; claimed_by: string | null; revoked_at: string | null };
+  return data as {
+    id: string; provider_id: string; expires_at: string; claimed_at: string | null; claimed_by: string | null; revoked_at: string | null;
+    /** 'owner' (the default) or 'member' — a team invite (routes/provider-growth.ts). */
+    kind?: string | null; invited_email?: string | null;
+  };
 }
 
 const stateOf = (inv: { expires_at: string; claimed_at: string | null; revoked_at: string | null }) =>
@@ -201,7 +215,7 @@ ownerInvites.get("/owner-invites/:token", async (c) => {
     await db().from("provider_owner_invites").update({ opened_at: nowIso() }).eq("id", inv.id).is("opened_at", null)
       .then(() => undefined, () => undefined);
   }
-  return c.json({ state: stateOf(inv), business: { id: provider.id, name: provider.name }, expiresAt: inv.expires_at });
+  return c.json({ state: stateOf(inv), kind: inv.kind === "member" ? "member" : "owner", business: { id: provider.id, name: provider.name }, expiresAt: inv.expires_at });
 });
 
 ownerInvites.post("/owner-invites/:token/claim", async (c) => {
@@ -230,6 +244,25 @@ ownerInvites.post("/owner-invites/:token/claim", async (c) => {
     .select("id");
   if (claimErr) throw new HttpError(503, "Could not accept the link.");
   if (!claimed?.length) throw new HttpError(409, "This link has already been used. Ask EverySub for a new one.");
+
+  // A team invite makes a manager, never an owner.
+  if (inv.kind === "member") {
+    const { data: already } = await db().from("provider_members").select("id")
+      .eq("provider_id", inv.provider_id).eq("user_id", user.id).limit(1);
+    if (!already?.length) {
+      const { data: u } = await db().from("users").select("email,name,display_name").eq("id", user.id).maybeSingle();
+      const { error: memErr } = await db().from("provider_members").insert({
+        provider_id: inv.provider_id, user_id: user.id,
+        user_email: u?.email ?? user.email ?? null, user_name: u?.display_name || u?.name || null, role: "manager",
+      });
+      if (memErr) {
+        await db().from("provider_owner_invites").update({ claimed_at: null, claimed_by: null }).eq("id", inv.id);
+        throw new HttpError(503, "Could not add you to the team. Please try again.");
+      }
+    }
+    const provider = await readProvider(inv.provider_id);
+    return c.json({ providerId: provider.id, name: provider.name, already: false, kind: "member" });
+  }
 
   const { error: ownErr } = await db().from("providers")
     .update({ admin_user_id: user.id, updated_at: nowIso() })
