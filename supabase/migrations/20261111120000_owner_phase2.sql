@@ -1,3 +1,4 @@
+-- Applied to production 2026-11-07 (by the owner).
 -- Owners, phase 2: replies to reviews, "you have a new review", and a log of
 -- messages a business sends its subscribers.
 --
