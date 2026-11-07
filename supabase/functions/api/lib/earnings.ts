@@ -127,11 +127,13 @@ export interface EarningsSummary {
 }
 
 export async function summarize(providerId: string): Promise<EarningsSummary & { payoutBasis: PayoutBasis }> {
-  const provider = await rest<Array<{ source_service_key: string | null; source_provider_id: string | null; archetype_key: string | null; commission_pct: number | string | null }>>(
-    `providers?id=eq.${encodeURIComponent(providerId)}&select=source_service_key,source_provider_id,archetype_key,commission_pct`,
+  const provider = await rest<Array<{ source_service_key: string | null; source_provider_id: string | null; archetype_key: string | null; commission_pct: number | string | null; unit: string | null }>>(
+    `providers?id=eq.${encodeURIComponent(providerId)}&select=source_service_key,source_provider_id,archetype_key,commission_pct,unit`,
   );
   const row = provider?.[0];
-  const k = String(row?.source_service_key ?? row?.archetype_key ?? "").toLowerCase();
+  // A rental company has neither a legacy key nor an archetype — `unit` is the
+  // only thing that says so. Without this its payout ceiling was always 0.
+  const k = row?.unit === "vehicles" ? "vehicles" : String(row?.source_service_key ?? row?.archetype_key ?? "").toLowerCase();
   const source = REVENUE_ALIASES[k] ?? (k in REVENUE_SOURCES ? k : null);
   const legacyId = row?.source_provider_id ?? null;
 

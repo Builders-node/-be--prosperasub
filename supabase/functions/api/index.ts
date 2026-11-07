@@ -14,6 +14,7 @@ import { ownerInvites } from "./routes/owner-invites.ts";
 import { providerAlerts } from "./routes/provider-alerts.ts";
 import { providerCustomers } from "./routes/provider-customers.ts";
 import { providerGrowth } from "./routes/provider-growth.ts";
+import { rentals } from "./routes/rentals.ts";
 
 /**
  * The Supabase home of what used to be the NestJS API (api.prosperasub.com).
@@ -61,6 +62,7 @@ app.route("/", ownerInvites);
 app.route("/", providerAlerts);
 app.route("/", providerCustomers);
 app.route("/", providerGrowth);
+app.route("/", rentals);
 
 // Supabase prefixes every path with the function's name. The same code runs as
 // `api` (production) and `api-dev` (the dev branch), so the first segment is
