@@ -1,3 +1,4 @@
+-- Applied to production 2026-11-07 (by the owner).
 -- A link that hands a business to its owner.
 --
 -- Setting an owner used to need the person's account id typed into an admin
