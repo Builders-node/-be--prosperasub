@@ -109,7 +109,7 @@ export const DEFAULT_SCHEDULE: Schedule = {
   bufferBeforeMin: 0,
   bufferAfterMin: 0,
   minNoticeHours: 12,
-  maxAdvanceDays: 30,
+  maxAdvanceDays: 365,
   blockedDates: [],
   blockedRanges: [],
   policy: DEFAULT_POLICY,
@@ -161,7 +161,8 @@ export function normalizeSchedule(raw: unknown): Schedule {
     bufferBeforeMin: Math.max(0, Number(s.bufferBeforeMin) || 0),
     bufferAfterMin: Math.max(0, Number(s.bufferAfterMin) || 0),
     minNoticeHours: Math.max(0, Number(s.minNoticeHours) || 0),
-    maxAdvanceDays: Number(s.maxAdvanceDays) > 0 ? Number(s.maxAdvanceDays) : d.maxAdvanceDays,
+    // Fixed horizon — no longer a provider setting (mirrors frontend bookingSettings).
+    maxAdvanceDays: d.maxAdvanceDays,
     blockedDates: Array.isArray(s.blockedDates) ? s.blockedDates.filter((x): x is string => typeof x === "string") : [],
     // The date is optional and its absence is meaningful: no date = every day.
     // "" was what the old editor wrote when no date was picked, and it matched
