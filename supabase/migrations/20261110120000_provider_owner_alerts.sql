@@ -1,3 +1,4 @@
+-- Applied to production 2026-11-07 (by the owner).
 -- The owner's side of the platform: invites by email, "ready for review",
 -- and a morning digest of tomorrow's work.
 --
