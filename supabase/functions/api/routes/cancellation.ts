@@ -24,7 +24,9 @@ const SERVICES: Record<string, Shape> = {
   plan: { table: "provider_subscriptions", statusCol: "status", cancellable: ["active", "paused"], label: "subscription" },
 };
 
-async function setFlag(c: any, cancel: boolean) {
+/** The one subscription named in the URL, refused unless it is the caller's. */
+// deno-lint-ignore no-explicit-any
+async function loadOwned(c: any): Promise<{ service: string; shape: Shape; sub: Record<string, any> }> {
   const user = await requireAccount(c);
   const service = c.req.param("service");
   const id = c.req.param("id");
@@ -48,6 +50,40 @@ async function setFlag(c: any, cancel: boolean) {
     owns = !!u?.id && String(sub.user_id ?? "") === String(u.id);
   }
   if (!owns) throw forbidden("This subscription is not yours.");
+  return { service, shape, sub };
+}
+
+/**
+ * Why a customer left — one tap, from the cancel dialog or a reminder email.
+ * Five fixed answers so they can be counted; the note is optional. Never
+ * blocks the cancellation it rides on: a failed write is logged and dropped.
+ */
+const REASONS = ["moved", "price", "quality", "forgot", "other"] as const;
+async function recordFeedback(
+  service: string, sub: Record<string, any>, body: Record<string, unknown>, source: "cancel" | "email" | "app",
+): Promise<boolean> {
+  const reason = String(body.reason ?? "");
+  if (!(REASONS as readonly string[]).includes(reason)) return false;
+  const note = typeof body.note === "string" ? body.note.trim().slice(0, 1000) : "";
+  const { error } = await db().from("churn_feedback").insert({
+    user_id: String(sub.user_id),
+    service,
+    subscription_id: String(sub.id),
+    reason,
+    note: note || null,
+    source,
+  });
+  if (error) {
+    console.warn(`churn_feedback insert failed: ${error.message}`);
+    return false;
+  }
+  return true;
+}
+
+// deno-lint-ignore no-explicit-any
+async function setFlag(c: any, cancel: boolean) {
+  const { service, shape, sub } = await loadOwned(c);
+  const body = cancel ? await c.req.json().catch(() => ({})) : {};
 
   const status = String((sub as Record<string, unknown>)[shape.statusCol] ?? "").toLowerCase();
   if (cancel && !shape.cancellable.includes(status)) {
@@ -125,8 +161,20 @@ async function setFlag(c: any, cancel: boolean) {
           email: false,
         });
   }
+  if (cancel && body && typeof body === "object") await recordFeedback(service, sub, body as Record<string, unknown>, "cancel");
   return c.json({ ok: true, cancelAtPeriodEnd: cancel, endsOn: sub.end_date ?? null }, 201);
 }
 
 cancellation.post("/account/:service/subscriptions/:id/cancel", (c) => setFlag(c, true));
 cancellation.post("/account/:service/subscriptions/:id/resume", (c) => setFlag(c, false));
+
+// The answer from a reminder email (or any later "why"), for a subscription
+// that already ended or is ending. Same ownership rule as cancelling.
+cancellation.post("/account/:service/subscriptions/:id/feedback", async (c) => {
+  const { service, sub } = await loadOwned(c);
+  const body = await c.req.json().catch(() => ({}));
+  const source = body?.source === "email" ? "email" : "app";
+  const ok = await recordFeedback(service, sub, (body ?? {}) as Record<string, unknown>, source);
+  if (!ok) throw badRequest("Pick one of the answers.");
+  return c.json({ ok: true }, 201);
+});
