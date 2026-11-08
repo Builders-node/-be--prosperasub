@@ -17,6 +17,7 @@ import { providerGrowth } from "./routes/provider-growth.ts";
 import { rentals } from "./routes/rentals.ts";
 import { promotions } from "./routes/promotions.ts";
 import { providerApplications } from "./routes/provider-applications.ts";
+import { favorites } from "./routes/favorites.ts";
 
 /**
  * The Supabase home of what used to be the NestJS API (api.prosperasub.com).
@@ -67,6 +68,7 @@ app.route("/", providerGrowth);
 app.route("/", rentals);
 app.route("/", promotions);
 app.route("/", providerApplications);
+app.route("/", favorites);
 
 // Supabase prefixes every path with the function's name. The same code runs as
 // `api` (production) and `api-dev` (the dev branch), so the first segment is
