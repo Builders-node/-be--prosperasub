@@ -40,6 +40,9 @@ interface PendingReminder {
   planId: string | null;
   /** False when the plan is no longer sold: the link goes to Discovery instead. */
   planAvailable: boolean;
+  /** Unscheduled nudges only: the business owner, told alongside the customer. */
+  providerOwnerId?: string | null;
+  providerUniversalId?: string | null;
   /**
    * YYYY-MM-DD. For the expiry ladder this is when the plan runs out; for the
    * unscheduled nudges it is the day the customer paid, which is what the
@@ -482,11 +485,17 @@ export class SubscriptionExpirationService {
    *
    * Only subscriptions with no booking at all. One visit already on the
    * calendar means they found the screen.
+   *
+   * `active` with no visits is the same situation under another status — paid,
+   * period running, schedule empty — and it was invisible to both this nudge
+   * and the business. Only recent ones (14 days), so old subscriptions run
+   * outside the booking calendar are not woken up.
    */
   private async collectUnscheduledCleaningReminders(todayStr: string): Promise<PendingReminder[]> {
     const subs = await this.supabaseRest<any[]>(
-      `/cleaning_subscriptions?payment_status=eq.paid&subscription_status=eq.pending_schedule` +
-        `&deleted_at=is.null&select=id,user_id,package_id,created_at&limit=500`,
+      `/cleaning_subscriptions?payment_status=eq.paid&subscription_status=in.(pending_schedule,active)` +
+        `&deleted_at=is.null&created_at=gte.${this.shiftDate(todayStr, -14)}` +
+        `&select=id,user_id,package_id,provider_id,created_at&limit=500`,
     );
     if (!subs?.length) return [];
 
@@ -505,11 +514,13 @@ export class SubscriptionExpirationService {
       "/cleaning_packages",
       subs.map((s) => s.package_id).filter(Boolean),
     );
+    const owners = await this.cleaningOwners(subs.map((s) => s.provider_id));
 
     const out: PendingReminder[] = [];
     for (const s of subs) {
       if (!s.user_id || !s.created_at) continue;
       if (booked.has(String(s.id))) continue;
+      const owner = owners.get(String(s.provider_id));
 
       const paidOn = String(s.created_at).slice(0, 10);
       const daysSince = Math.round(
@@ -534,6 +545,8 @@ export class SubscriptionExpirationService {
         planName: planNames.get(s.package_id) || "your cleaning plan",
         planId: s.package_id ? String(s.package_id) : null,
         planAvailable: true,
+        providerOwnerId: owner?.ownerId ?? null,
+        providerUniversalId: owner?.id ?? null,
         expirationStr: paidOn,
       });
     }
@@ -622,6 +635,30 @@ export class SubscriptionExpirationService {
       metadata: { stage: item.stage, planName: item.planName, expirationDate: item.expirationStr, promoCode: promo?.code ?? null },
     });
     methods.push("in_app");
+
+    // The business hears it too: a paid customer with nothing on the schedule
+    // is theirs to fix, and until now neither side was told.
+    if (item.stage.startsWith("unscheduled") && item.providerOwnerId) {
+      try {
+        await this.notifications.create({
+          recipientUserId: item.providerOwnerId,
+          category: "booking",
+          type: "reminder_general",
+          title: "A paid customer has no visit scheduled",
+          body: `${user?.display_name || user?.name || "A customer"} paid for ${item.planName} on ` +
+            `${this.formatDate(item.expirationStr)} and nothing is on the schedule yet.`,
+          relatedEntityType: "cleaning_subscription",
+          relatedEntityId: item.subscriptionId,
+          actionUrl: item.providerUniversalId
+            ? `/my-provider/${item.providerUniversalId}?tab=bookings&view=customer`
+            : "/my-business",
+          metadata: { stage: item.stage },
+        });
+        methods.push("provider_in_app");
+      } catch (err) {
+        this.logger.warn(`Owner notice for ${item.subscriptionId} failed: ${(err as Error).message}`);
+      }
+    }
 
     if (user?.email) {
       await this.mail.sendMail({
@@ -867,6 +904,25 @@ export class SubscriptionExpirationService {
       }
     } catch (err) {
       this.logger.warn(`Plan lookup failed: ${(err as Error).message}`);
+    }
+    return map;
+  }
+
+  /** Legacy cleaning provider id → its universal row and owner. */
+  private async cleaningOwners(legacyIds: string[]): Promise<Map<string, { id: string; ownerId: string | null }>> {
+    const map = new Map<string, { id: string; ownerId: string | null }>();
+    const unique = Array.from(new Set(legacyIds.filter(Boolean).map(String)));
+    if (!unique.length) return map;
+    try {
+      const rows = await this.supabaseRest<any[]>(
+        `/providers?source_service_key=eq.cleaning&source_provider_id=in.(${unique.map((id) => `"${id}"`).join(",")})` +
+          `&select=id,admin_user_id,source_provider_id`,
+      );
+      for (const r of rows ?? []) {
+        map.set(String(r.source_provider_id), { id: String(r.id), ownerId: r.admin_user_id ? String(r.admin_user_id) : null });
+      }
+    } catch (err) {
+      this.logger.warn(`Owner lookup failed: ${(err as Error).message}`);
     }
     return map;
   }
