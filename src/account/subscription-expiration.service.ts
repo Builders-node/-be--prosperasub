@@ -514,13 +514,27 @@ export class SubscriptionExpirationService {
       "/cleaning_packages",
       subs.map((s) => s.package_id).filter(Boolean),
     );
-    const owners = await this.cleaningOwners(subs.map((s) => s.provider_id));
+    // A checkout row carries no provider_id — the business is the package's.
+    const pkgProvider = new Map<string, string>();
+    try {
+      const pkgIds = Array.from(new Set(subs.map((s) => s.package_id).filter(Boolean).map(String)));
+      if (pkgIds.length) {
+        const pkgs = await this.supabaseRest<any[]>(
+          `/cleaning_packages?id=in.(${pkgIds.map((id) => `"${id}"`).join(",")})&select=id,provider_id`,
+        );
+        for (const p of pkgs ?? []) if (p.provider_id) pkgProvider.set(String(p.id), String(p.provider_id));
+      }
+    } catch (err) {
+      this.logger.warn(`Package provider lookup failed: ${(err as Error).message}`);
+    }
+    const legacyOf = (s: any) => (s.provider_id ? String(s.provider_id) : pkgProvider.get(String(s.package_id)) ?? "");
+    const owners = await this.cleaningOwners(subs.map(legacyOf));
 
     const out: PendingReminder[] = [];
     for (const s of subs) {
       if (!s.user_id || !s.created_at) continue;
       if (booked.has(String(s.id))) continue;
-      const owner = owners.get(String(s.provider_id));
+      const owner = owners.get(legacyOf(s));
 
       const paidOn = String(s.created_at).slice(0, 10);
       const daysSince = Math.round(
