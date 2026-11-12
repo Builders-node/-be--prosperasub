@@ -49,10 +49,16 @@ export function calcRentalPrice(v: { daily_price_cents: number | null; weekly_pr
   const weeklyRaw = Number(v.weekly_price_cents) || 0;
   const weekly = weeklyRaw > 0 ? Math.min(weeklyRaw, daily > 0 ? daily * 7 : weeklyRaw) : 0;
   const monthly = Number(v.monthly_price_cents) || 0;
-  let subtotal = weekly > 0 && days >= 7
-    ? Math.floor(days / 7) * weekly + Math.min((days % 7) * daily, weekly)
-    : days * daily;
-  const total = monthly > 0 && subtotal > monthly ? monthly : subtotal;
+  const byWeeks = (d: number) => weekly > 0 && d >= 7
+    ? Math.floor(d / 7) * weekly + Math.min((d % 7) * daily, weekly)
+    : d * daily;
+  const subtotal = byWeeks(days);
+  // The monthly price caps each 30-day month, not the whole rental — capping
+  // the total let 60 or 90 days cost one month's price.
+  const byMonths = monthly > 0
+    ? Math.floor(days / 30) * monthly + Math.min(byWeeks(days % 30), monthly)
+    : subtotal;
+  const total = Math.min(subtotal, byMonths);
   const discount = Math.max(0, subtotal - total);
   return {
     rentalDays: days, subtotalCents: subtotal, totalCents: total, discountCents: discount,

@@ -26,6 +26,13 @@ describe("calcRentalPrice", () => {
     expect(p.discountPct).toBe(Math.round((p.discountCents / p.subtotalCents) * 100));
   });
 
+  it("caps each 30-day month, not the whole rental", () => {
+    // 60 days = two months, not one; 45 days = a month + 15 days by weeks.
+    expect(calcRentalPrice(car, 60).totalCents).toBe(200000);
+    expect(calcRentalPrice(car, 45).totalCents).toBe(100000 + 2 * 30000 + 5000);
+    expect(calcRentalPrice(car, 90).totalCents).toBe(300000);
+  });
+
   it("survives a car with no weekly or monthly price", () => {
     expect(calcRentalPrice({ daily_price_cents: 5000, weekly_price_cents: 0, monthly_price_cents: 0 }, 14).totalCents)
       .toBe(70000);

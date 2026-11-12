@@ -7,7 +7,7 @@
  *
  *  - daily (1–6 days)   → daily × days
  *  - weekly (7+ days)   → full_weeks × weekly + min(leftover × daily, weekly)
- *  - monthly cap        → the total can never exceed monthly_price_cents
+ *  - monthly cap        → each 30-day month costs at most monthly_price_cents
  */
 
 export interface RentalPriceInput {
@@ -30,17 +30,15 @@ export function calcRentalPrice(vehicle: RentalPriceInput, rentalDays: number): 
   const weekly = vehicle.weekly_price_cents || 0;
   const monthly = vehicle.monthly_price_cents || 0;
 
-  let subtotalCents: number;
-  if (weekly > 0 && rentalDays >= 7) {
-    const weeks = Math.floor(rentalDays / 7);
-    const leftoverDays = rentalDays % 7;
-    subtotalCents = weeks * weekly + Math.min(leftoverDays * daily, weekly);
-  } else {
-    subtotalCents = rentalDays * daily;
-  }
+  const byWeeks = (d: number) =>
+    weekly > 0 && d >= 7 ? Math.floor(d / 7) * weekly + Math.min((d % 7) * daily, weekly) : d * daily;
+  const subtotalCents = byWeeks(rentalDays);
 
+  // The monthly price caps each 30-day month, not the whole rental.
   let totalCents = subtotalCents;
-  if (monthly > 0 && totalCents > monthly) totalCents = monthly;
+  if (monthly > 0) {
+    totalCents = Math.min(totalCents, Math.floor(rentalDays / 30) * monthly + Math.min(byWeeks(rentalDays % 30), monthly));
+  }
 
   const discountCents = Math.max(0, subtotalCents - totalCents);
   const discountPct = subtotalCents > 0 ? Math.round((discountCents / subtotalCents) * 100) : 0;
