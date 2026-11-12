@@ -25,14 +25,14 @@ import { ensureBillingPlan, intervalFor, paypal, paypalConfig, uuidFrom, verifyW
 export const paypalSubscriptions = new Hono();
 
 const TZ = "America/Tegucigalpa";
-const today = () => new Date().toLocaleDateString("en-CA", { timeZone: TZ });
-const addDays = (d: string, n: number) => { const x = new Date(`${d}T00:00:00Z`); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); };
+export const today = () => new Date().toLocaleDateString("en-CA", { timeZone: TZ });
+export const addDays = (d: string, n: number) => { const x = new Date(`${d}T00:00:00Z`); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); };
 const addMonths = (d: string, n: number) => { const x = new Date(`${d}T00:00:00Z`); x.setUTCMonth(x.getUTCMonth() + n); return x.toISOString().slice(0, 10); };
 const nextStartAfter = (prevEnd: string) => { const n = addDays(prevEnd, 1); return n > today() ? n : today(); };
 const cents = (v: string | number | undefined) => Math.round(Number(v ?? 0) * 100);
 const ymd = (v: unknown) => (v ? String(v).slice(0, 10) : null);
 
-type Row = Record<string, any>;
+export type Row = Record<string, any>;
 type Interval = { unit: "WEEK" | "MONTH" | "YEAR"; count: number };
 
 interface Term {
@@ -45,7 +45,7 @@ interface Term {
   interval: Interval;
 }
 
-interface Kind {
+export interface Kind {
   key: "provider" | "food" | "cleaning";
   table: string;
   cols: string;
@@ -59,7 +59,7 @@ interface Kind {
   baseOfRenewal: (r: Row) => number;
 }
 
-async function planByIdOrSource(id: string | null) {
+export async function planByIdOrSource(id: string | null) {
   if (!id) return null;
   // Cleaning package ids are text ("pkg-…"); comparing one to the uuid id
   // column would fail the whole query, so only a uuid is tried as an id.
@@ -81,7 +81,8 @@ function capInterval(i: Interval, n: number): Interval {
   return { unit: i.unit, count };
 }
 
-const KINDS: Kind[] = [
+/** The three subscription tables — shared with the wallet renewals (routes/wallet.ts). */
+export const KINDS: Kind[] = [
   {
     key: "provider",
     table: "provider_subscriptions",
@@ -183,7 +184,7 @@ const KINDS: Kind[] = [
 const kindForService = (service: string | undefined) =>
   KINDS.find((k) => k.services.includes(String(service ?? "universal"))) ?? KINDS[0];
 
-async function load(kind: Kind, filter: (q: any) => any): Promise<Row | null> {
+export async function load(kind: Kind, filter: (q: any) => any): Promise<Row | null> {
   const { data, error } = await filter(db().from(kind.table).select(kind.cols)).maybeSingle();
   if (error) throw new HttpError(503, "Could not read the subscription.");
   return data as Row | null;
@@ -199,7 +200,7 @@ async function findByPayPalId(id: string): Promise<{ kind: Kind; row: Row } | nu
 }
 
 /** Legacy tables may hold a Google login's `google-…` id; the universal one holds users.id. */
-const owns = (row: Row, user: AuthUser) => [user.id, user.sub].includes(String(row.user_id ?? ""));
+export const owns = (row: Row, user: AuthUser) => [user.id, user.sub].includes(String(row.user_id ?? ""));
 
 async function surchargePct(): Promise<number> {
   const { data } = await db().from("payment_method_settings").select("surcharge_percent,enabled").eq("method", "paypal").maybeSingle();
