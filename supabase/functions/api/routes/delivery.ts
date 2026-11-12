@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { requireAdmin } from "../lib/auth.ts";
+import { requireAccount, requireAdmin } from "../lib/auth.ts";
 import { db } from "../lib/db.ts";
 import { badRequest, HttpError, notFound } from "../lib/http.ts";
 import { notifyUser } from "../lib/notify.ts";
@@ -15,6 +15,9 @@ import { notifyUser } from "../lib/notify.ts";
  *   GET    /admin/deliveries?status=      orders with a delivery, newest first
  *   PATCH  /admin/deliveries/:id          {status?, courierId?}
  *   GET    /admin/couriers · POST /admin/couriers · PATCH /admin/couriers/:id
+ *          {email?} links the courier to an account, which is what lets them in:
+ *   GET    /courier/deliveries            the signed-in courier's own deliveries
+ *   PATCH  /courier/deliveries/:id        {status: on_the_way | delivered | failed}
  *
  * Shoppers read active zones straight from the table (public RLS); writes
  * come only through here. The order's own delivery (zone, point, fee) is
@@ -188,27 +191,39 @@ delivery.patch("/admin/deliveries/:id", async (c) => {
   fail(error);
   if (!row) throw notFound("delivery_not_found");
 
-  // The customer hears when it leaves and when it arrives — nothing in between.
-  const said: Record<string, [string, string]> = {
-    on_the_way: ["Your order is on the way", "The courier has it and is heading to you."],
-    delivered: ["Delivered", "Your order has been delivered. Enjoy!"],
-  };
-  const msg = said[String(patch.delivery_status ?? "")];
-  if (msg && row.user_id) {
-    const plan = (row.metadata as { plan_name?: string } | null)?.plan_name;
-    await notifyUser({
-      recipientUserId: String(row.user_id), category: "orders", type: `delivery_${patch.delivery_status}`,
-      title: msg[0], body: plan ? `${plan} — ${msg[1]}` : msg[1],
-      relatedEntityType: "provider_subscriptions", relatedEntityId: row.id, actionUrl: "/my-subscriptions",
-    }).catch(() => undefined);
-  }
+  await tellCustomer(row, String(patch.delivery_status ?? ""));
   await db().from("admin_audit_logs").insert({
     admin_user_id: admin.id, action: "delivery_update", entity_type: "provider_subscription", entity_id: id, details: patch,
   }).then(() => undefined, () => undefined);
   return c.json({ ok: true, row });
 });
 
+/** The customer hears when it leaves and when it arrives — nothing in between. */
+async function tellCustomer(row: { id: string; user_id: unknown; metadata: unknown }, status: string) {
+  const said: Record<string, [string, string]> = {
+    on_the_way: ["Your order is on the way", "The courier has it and is heading to you."],
+    delivered: ["Delivered", "Your order has been delivered. Enjoy!"],
+  };
+  const msg = said[status];
+  if (!msg || !row.user_id) return;
+  const plan = (row.metadata as { plan_name?: string } | null)?.plan_name;
+  await notifyUser({
+    recipientUserId: String(row.user_id), category: "orders", type: `delivery_${status}`,
+    title: msg[0], body: plan ? `${plan} — ${msg[1]}` : msg[1],
+    relatedEntityType: "provider_subscriptions", relatedEntityId: row.id, actionUrl: "/my-subscriptions",
+  }).catch(() => undefined);
+}
+
 // ── Couriers ─────────────────────────────────────────────────────────────────
+
+/** An account id from an email, or a 400 that says so. */
+async function accountByEmail(raw: unknown): Promise<string> {
+  const email = String(raw ?? "").trim().toLowerCase();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw badRequest("That doesn't look like an email.");
+  const { data } = await db().from("users").select("id").ilike("email", email).limit(1).maybeSingle();
+  if (!data?.id) throw badRequest("No EverySub account with that email — ask them to sign up first.");
+  return String(data.id);
+}
 
 delivery.get("/admin/couriers", async (c) => {
   await requireAdmin(c, PERMISSION);
@@ -220,11 +235,12 @@ delivery.get("/admin/couriers", async (c) => {
 
 delivery.post("/admin/couriers", async (c) => {
   await requireAdmin(c, PERMISSION);
-  const b = await c.req.json().catch(() => ({})) as { name?: string; phone?: string };
+  const b = await c.req.json().catch(() => ({})) as { name?: string; phone?: string; email?: string };
   const name = String(b.name ?? "").trim();
   if (!name || name.length > 80) throw badRequest("Give the courier a name.");
   const phone = String(b.phone ?? "").trim().slice(0, 40) || null;
-  const { data, error } = await db().from("couriers").insert({ name, phone }).select().single();
+  const user_id = b.email ? await accountByEmail(b.email) : null;
+  const { data, error } = await db().from("couriers").insert({ name, phone, user_id }).select().single();
   fail(error);
   return c.json(data, 201);
 });
@@ -233,7 +249,7 @@ delivery.patch("/admin/couriers/:id", async (c) => {
   await requireAdmin(c, PERMISSION);
   const id = c.req.param("id");
   if (!UUID_RE.test(id)) throw notFound("courier_not_found");
-  const b = await c.req.json().catch(() => ({})) as { name?: string; phone?: string; isActive?: boolean };
+  const b = await c.req.json().catch(() => ({})) as { name?: string; phone?: string; isActive?: boolean; email?: string | null };
   const patch: Record<string, unknown> = {};
   if (b.name !== undefined) {
     const name = String(b.name).trim();
@@ -242,9 +258,56 @@ delivery.patch("/admin/couriers/:id", async (c) => {
   }
   if (b.phone !== undefined) patch.phone = String(b.phone ?? "").trim().slice(0, 40) || null;
   if (b.isActive !== undefined) patch.is_active = !!b.isActive;
+  if (b.email !== undefined) patch.user_id = b.email ? await accountByEmail(b.email) : null;
   if (!Object.keys(patch).length) throw badRequest("Nothing to change.");
   const { data, error } = await db().from("couriers").update(patch).eq("id", id).select().maybeSingle();
   fail(error);
   if (!data) throw notFound("courier_not_found");
   return c.json(data);
+});
+
+// ── The courier's own screen ─────────────────────────────────────────────────
+
+/** The signed-in person's active courier row, or a 403. */
+async function myCourier(c: Parameters<typeof requireAccount>[0]) {
+  const user = await requireAccount(c);
+  const { data, error } = await db().from("couriers").select("id,name").eq("user_id", user.id).eq("is_active", true).limit(1).maybeSingle();
+  if (error && missing(error.message)) throw new HttpError(503, "delivery_not_enabled");
+  if (!data) throw new HttpError(403, "not_a_courier");
+  return data as { id: string; name: string };
+}
+
+const COURIER_SELECT = "id,start_date,delivery_status,delivery_point,delivered_at,delivery_fee_cents,customer_whatsapp,notes,metadata,created_at,providers(name,location,contact_phone),delivery_zones(name)";
+
+delivery.get("/courier/deliveries", async (c) => {
+  const me = await myCourier(c);
+  const since = new Date(Date.now() - 36 * 3_600_000).toISOString();
+  // What is still to do, plus what was finished in the last day and a half.
+  const [open, done] = await Promise.all([
+    db().from("provider_subscriptions").select(COURIER_SELECT)
+      .eq("courier_id", me.id).in("delivery_status", ["assigned", "on_the_way", "pending"])
+      .order("created_at", { ascending: true }).limit(100),
+    db().from("provider_subscriptions").select(COURIER_SELECT)
+      .eq("courier_id", me.id).in("delivery_status", ["delivered", "failed"]).gte("delivered_at", since)
+      .order("delivered_at", { ascending: false }).limit(50),
+  ]);
+  fail(open.error); fail(done.error);
+  return c.json({ courier: me, open: open.data ?? [], done: done.data ?? [] });
+});
+
+delivery.patch("/courier/deliveries/:id", async (c) => {
+  const me = await myCourier(c);
+  const id = c.req.param("id");
+  if (!UUID_RE.test(id)) throw notFound("delivery_not_found");
+  const b = await c.req.json().catch(() => ({})) as { status?: string };
+  const status = String(b.status ?? "");
+  if (!["on_the_way", "delivered", "failed"].includes(status)) throw badRequest("Unknown status.");
+  const { data: row, error } = await db().from("provider_subscriptions")
+    .update({ delivery_status: status, delivered_at: status === "on_the_way" ? null : new Date().toISOString() })
+    .eq("id", id).eq("courier_id", me.id)
+    .select("id,user_id,delivery_status,metadata").maybeSingle();
+  fail(error);
+  if (!row) throw notFound("delivery_not_found");
+  await tellCustomer(row, status);
+  return c.json({ ok: true, row });
 });
