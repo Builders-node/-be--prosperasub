@@ -116,7 +116,9 @@ reminders.post("/cron/reminders", async (c) => {
   const until = new Date(now.getTime() + LOOKAHEAD_MS);
 
   const { data: occ, error } = await db().from("service_occurrences")
-    .select("id,user_id,provider_id,item_key,starts_at,access_instructions,source_service_key,providers(name,archetype_key)")
+    // No embed: service_occurrences has no foreign key to providers, so
+    // PostgREST cannot join them — the businesses are read separately below.
+    .select("id,user_id,provider_id,item_key,starts_at,access_instructions,source_service_key")
     .eq("status", "scheduled").not("user_id", "is", null)
     .gt("starts_at", now.toISOString()).lte("starts_at", until.toISOString())
     .order("starts_at").limit(1000);
@@ -127,6 +129,13 @@ reminders.post("/cron/reminders", async (c) => {
   const ids = rows.map((r) => r.id);
   const { data: done } = await db().from("occurrence_reminders").select("occurrence_id").in("occurrence_id", ids);
   const reminded = new Set((done ?? []).map((r: any) => r.occurrence_id));
+
+  const providerIds = [...new Set(rows.map((r) => r.provider_id).filter(Boolean).map(String))];
+  const { data: provs } = providerIds.length
+    ? await db().from("providers").select("id,name,archetype_key").in("id", providerIds)
+    : { data: [] as any[] };
+  const providerOf = new Map((provs ?? []).map((p: any) => [String(p.id), p]));
+  for (const r of rows) r.providers = providerOf.get(String(r.provider_id)) ?? null;
 
   const userIds = [...new Set(rows.map((r) => String(r.user_id)))];
   const [{ data: prefRows }, { data: users }, { data: archetypes }] = await Promise.all([
