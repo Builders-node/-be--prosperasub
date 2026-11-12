@@ -364,6 +364,54 @@ promotions.get("/admin/promotions", async (c) => {
   });
 });
 
+/**
+ * A featured slot GIVEN by the platform — free: no payout row, price 0, the
+ * same provider_promotions row a purchase makes, so the rails, the slot
+ * limits, the stats and "End" all treat it the same. For launching a new
+ * business, a partner, a test. The business is told it was featured.
+ */
+promotions.post("/admin/promotions/grant", async (c) => {
+  const admin = await requireAdmin(c, "payments.read");
+  const b = await c.req.json().catch(() => ({})) as { providerId?: unknown; planId?: unknown; placement?: unknown; weeks?: unknown };
+  const providerId = String(b.providerId ?? "");
+  if (!UUID_RE.test(providerId)) throw badRequest("Pick a business.");
+  const placement: Placement = b.placement === "home" ? "home" : b.placement === "service" ? "service" : (() => { throw badRequest("Pick where to feature it."); })();
+  const weeks = Number(b.weeks);
+  if (!Number.isInteger(weeks) || weeks < 1 || weeks > 12) throw badRequest("Between 1 and 12 weeks.");
+  const planId = typeof b.planId === "string" && UUID_RE.test(b.planId) ? b.planId : null;
+  if (planId) await assertOwnPlan(providerId, planId);
+
+  const { data: prov } = await db().from("providers").select("name,status,archetype_key,admin_user_id").eq("id", providerId).maybeSingle();
+  if (!prov) throw notFound("Business not found.");
+  if (prov.status !== "active" && prov.status !== "approved") throw badRequest("That business isn't live — a featured slot would send people to a closed page.");
+  if (placement === "service" && !prov.archetype_key) throw badRequest("That business has no service listing to be featured in — use Home.");
+
+  const s = await settings();
+  const capacity = placement === "home" ? s.slotsHome : s.slotsService;
+  const from = new Date();
+  const to = new Date(from.getTime() + weeks * WEEK_MS);
+  if (await liveFeaturedCount(placement, prov.archetype_key, from, to) >= capacity) {
+    throw new HttpError(409, `All ${capacity} ${placement === "home" ? "home" : "service"} slots are taken for those dates. End one, or raise the slot count below.`);
+  }
+
+  const { data: promo, error } = await db().from("provider_promotions").insert({
+    provider_id: providerId, plan_id: planId, kind: "featured", placement,
+    starts_at: from.toISOString(), ends_at: to.toISOString(), price_cents: 0, status: "active",
+    payout_id: null, created_by: admin.id,
+  }).select("id").single();
+  if (error || !promo) throw new HttpError(503, "Could not give the slot.");
+
+  if (prov.admin_user_id) {
+    await notifyUser({
+      recipientUserId: String(prov.admin_user_id), category: "business", type: "promotion_granted",
+      title: "You're featured on EverySub",
+      body: `${placement === "home" ? "On the home page" : "At the top of your service"} for ${weeks} week${weeks > 1 ? "s" : ""}, on us.`,
+      relatedEntityType: "provider_promotion", relatedEntityId: promo.id,
+    }).catch(() => undefined);
+  }
+  return c.json({ ok: true, id: promo.id, endsAt: to.toISOString() }, 201);
+});
+
 promotions.post("/admin/promotions/:promoId/end", async (c) => {
   await requireAdmin(c, "payments.read");
   const id = c.req.param("promoId");
