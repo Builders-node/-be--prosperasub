@@ -116,6 +116,11 @@ async function renewable(user: AuthUser) {
       if (kind.key === "provider" && !(row.source_service_key === "beach" || row.source_service_key === null)) continue;
       const plan = await planByIdOrSource(kind.key === "food" ? row.meal_plan_id : kind.key === "cleaning" ? row.package_id : row.plan_id);
       if (isOneTime(row, plan)) continue;
+      // The same rules the renewal run applies: something to renew (a plan and
+      // a price), and not a lapse older than its window. A June backfill row
+      // with no plan and $0 used to show here as "Subscription · $0.00".
+      if (!plan || !(kind.baseOfRenewal(row) > 0)) continue;
+      if (row.end_date && String(row.end_date) < addDays(today(), -14)) continue;
       out.push({
         id: row.id,
         planName: plan?.name ?? "Subscription",
@@ -237,7 +242,7 @@ wallet.post("/cron/wallet-renewals", async (c) => {
         if (!running(kind, row) || !UUID_RE.test(String(row.user_id ?? ""))) { result.skipped++; continue; }
         if (kind.key === "provider" && !(row.source_service_key === "beach" || row.source_service_key === null)) { result.skipped++; continue; }
         const plan = await planByIdOrSource(kind.key === "food" ? row.meal_plan_id : kind.key === "cleaning" ? row.package_id : row.plan_id);
-        if (isOneTime(row, plan)) { result.skipped++; continue; }
+        if (isOneTime(row, plan) || !plan) { result.skipped++; continue; }
 
         const r = kind.renewal(row);
         const price = kind.baseOfRenewal(row);
