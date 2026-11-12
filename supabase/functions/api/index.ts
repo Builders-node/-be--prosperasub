@@ -19,6 +19,7 @@ import { promotions } from "./routes/promotions.ts";
 import { providerApplications } from "./routes/provider-applications.ts";
 import { favorites } from "./routes/favorites.ts";
 import { collections } from "./routes/collections.ts";
+import { tags } from "./routes/tags.ts";
 
 /**
  * The Supabase home of what used to be the NestJS API (api.prosperasub.com).
@@ -71,6 +72,7 @@ app.route("/", promotions);
 app.route("/", providerApplications);
 app.route("/", favorites);
 app.route("/", collections);
+app.route("/", tags);
 
 // Supabase prefixes every path with the function's name. The same code runs as
 // `api` (production) and `api-dev` (the dev branch), so the first segment is

@@ -8,7 +8,9 @@ import { badRequest, HttpError, notFound } from "../lib/http.ts";
  *
  *   GET    /admin/collections            → every shelf with its plan ids, inactive too
  *   POST   /admin/collections            {title, subtitle?, isActive?}
- *   PATCH  /admin/collections/:id        {title?, subtitle?, isActive?, sortOrder?}
+ *   PATCH  /admin/collections/:id        {title?, subtitle?, isActive?, sortOrder?, tagKey?}
+ *          tagKey: the shelf also fills itself with every live plan carrying
+ *          that tag (hand-picked plans first). null turns it off.
  *   DELETE /admin/collections/:id
  *   PUT    /admin/collections/:id/plans  {planIds: string[]}  → replaces the shelf, in that order
  *
@@ -32,18 +34,24 @@ function text(v: unknown, max: number, field: string): string | null {
 
 collections.get("/admin/collections", async (c) => {
   await requireAdmin(c, PERMISSION);
-  const { data, error } = await db().from("home_collections")
-    .select("id,title,subtitle,sort_order,is_active,home_collection_plans(plan_id,sort_order)")
+  // tag_key arrives with the catalog_tags migration; read without it until then.
+  const read = (cols: string) => db().from("home_collections")
+    .select(`${cols},home_collection_plans(plan_id,sort_order)`)
     .order("sort_order", { ascending: true })
     .order("created_at", { ascending: true });
+  let { data, error } = await read("id,title,subtitle,sort_order,is_active,tag_key");
+  const tagsReady = !(error && /tag_key/i.test(error.message));
+  if (!tagsReady) ({ data, error } = await read("id,title,subtitle,sort_order,is_active"));
   if (error) {
     if (missing(error.message)) return c.json({ enabled: false, rows: [] });
     throw new HttpError(503, "Could not read collections.");
   }
   return c.json({
     enabled: true,
+    tagsReady,
     rows: (data ?? []).map((r: any) => ({
       id: r.id, title: r.title, subtitle: r.subtitle, sortOrder: r.sort_order, isActive: r.is_active,
+      tagKey: r.tag_key ?? null,
       planIds: [...(r.home_collection_plans ?? [])]
         .sort((a: any, b: any) => a.sort_order - b.sort_order)
         .map((p: any) => String(p.plan_id)),
@@ -81,6 +89,11 @@ collections.patch("/admin/collections/:id", async (c) => {
   }
   if (b.subtitle !== undefined) patch.subtitle = text(b.subtitle, 160, "Subtitle");
   if (b.isActive !== undefined) patch.is_active = !!b.isActive;
+  if (b.tagKey !== undefined) {
+    const k = b.tagKey === null || b.tagKey === "" ? null : String(b.tagKey);
+    if (k !== null && !/^[a-z0-9_]{1,40}$/.test(k)) throw badRequest("Bad tag.");
+    patch.tag_key = k;
+  }
   if (b.sortOrder !== undefined) {
     const n = Number(b.sortOrder);
     if (!Number.isInteger(n) || n < 0 || n > 10_000) throw badRequest("Bad order.");
