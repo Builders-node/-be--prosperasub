@@ -77,6 +77,24 @@ async function surchargePct(method: string): Promise<number> {
 }
 const surchargeFor = (base: number, pct: number) => (pct > 0 ? Math.round(base * (1 + pct / 100)) - base : 0);
 
+/** A block (service, repair) over any of these days? False before the operations migration. */
+async function blocked(vehicleId: string, start: string, end: string, exceptId?: string): Promise<boolean> {
+  let q = db().from("rental_blocks").select("id").eq("vehicle_id", vehicleId).lte("start_date", end).gte("end_date", start).limit(1);
+  if (exceptId) q = q.neq("id", exceptId);
+  const { data, error } = await q;
+  if (error) return false;
+  return (data ?? []).length > 0;
+}
+
+/** A live booking over any of these days (cancelled and deleted ones don't hold). */
+async function booked(vehicleId: string, start: string, end: string, exceptId?: string): Promise<boolean> {
+  let q = db().from("rental_bookings").select("id").eq("vehicle_id", vehicleId).neq("status", "cancelled").is("deleted_at", null)
+    .lte("start_date", end).gte("end_date", start).limit(1);
+  if (exceptId) q = q.neq("id", exceptId);
+  const { data } = await q;
+  return (data ?? []).length > 0;
+}
+
 // ── Create ───────────────────────────────────────────────────────────────────
 
 rentals.post("/rentals/bookings", async (c) => {
@@ -115,6 +133,7 @@ rentals.post("/rentals/bookings", async (c) => {
       .in("id", holds.map((h) => h.id)).neq("payment_status", "paid");
   }
 
+  if (await blocked(v.id, startDate, endDate)) throw new HttpError(409, "dates_taken");
   const pricing = calcRentalPrice(v, days);
   if (pricing.totalCents <= 0) throw badRequest("vehicle_unavailable");
   const scope = { provider_id: v.provider_id, is_active: true };
@@ -269,7 +288,21 @@ rentals.post("/rentals/bookings/:id/cancel", async (c) => {
 
 // ── Admin ────────────────────────────────────────────────────────────────────
 
-const ADMIN_FIELDS = new Set(["status", "start_date", "end_date", "customer_name", "customer_whatsapp", "delivery_address", "delivery_notes", "total_cents"]);
+/**
+ * Who may run a fleet: an EverySub admin, or the owner / a member of the
+ * rental company that owns the car.
+ */
+async function requireOperator(c: Context, providerId: string | null) {
+  const user = await requireAccount(c);
+  if (isSuperAdmin(user.roles)) return user;
+  if (await runsProvider(user.id, user.roles, providerId)) return user;
+  return await requireAdmin(c, "subscriptions.read");
+}
+
+const ADMIN_FIELDS = new Set(["status", "start_date", "end_date", "customer_name", "customer_whatsapp", "delivery_address", "delivery_notes", "total_cents", "admin_notes"]);
+const fuel = (v: unknown) => { const n = Math.round(Number(v)); return Number.isFinite(n) && n >= 0 && n <= 8 ? n : null; };
+const km = (v: unknown) => { const n = Math.round(Number(v)); return Number.isFinite(n) && n >= 0 ? n : null; };
+const note = (v: unknown) => String(v ?? "").trim().slice(0, 1000) || null;
 
 /**
  * An admin edit. The lifecycle and the money are separate on purpose: changing
@@ -277,15 +310,40 @@ const ADMIN_FIELDS = new Set(["status", "start_date", "end_date", "customer_name
  * Cancelling a PAID booking keeps the payment on record and flags a refund.
  */
 rentals.patch("/admin/rentals/bookings/:id", async (c) => {
-  const admin = await requireAdmin(c, "subscriptions.read");
   const id = c.req.param("id");
   if (!UUID.test(id)) throw notFound("booking_not_found");
   const b = await c.req.json().catch(() => ({})) as Record<string, any>;
-  const { data: row } = await db().from("rental_bookings").select("id,status,payment_status").eq("id", id).maybeSingle();
+  const { data: row } = await db().from("rental_bookings").select("id,status,payment_status,provider_id,vehicle_id,start_date,end_date").eq("id", id).maybeSingle();
   if (!row) throw notFound("booking_not_found");
+  const admin = await requireOperator(c, row.provider_id ? String(row.provider_id) : null);
 
   const patch: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(b.fields ?? {})) if (ADMIN_FIELDS.has(k)) patch[k] = v;
+  // New dates: the days must be free of blocks (the overlap with other
+  // bookings is the database's exclusion constraint).
+  if (patch.start_date || patch.end_date) {
+    const s0 = String(patch.start_date ?? row.start_date), e0 = String(patch.end_date ?? row.end_date);
+    if (!ISO.test(s0) || !ISO.test(e0) || e0 < s0) throw badRequest("invalid_dates");
+    if (await blocked(String(row.vehicle_id), s0, e0)) throw new HttpError(409, "dates_taken");
+    patch.rental_days = rentalDaysBetween(s0, e0);
+  }
+  // The car leaves: odometer, fuel, notes.
+  if (b.handover) {
+    patch.status = "active";
+    patch.pickup_at = new Date().toISOString();
+    patch.pickup_odometer_km = km(b.handover.odometerKm);
+    patch.pickup_fuel_eighths = fuel(b.handover.fuelEighths);
+    patch.pickup_notes = note(b.handover.notes);
+  }
+  // The car comes back: the same, plus what was damaged.
+  if (b.return) {
+    patch.status = "completed";
+    patch.return_at = new Date().toISOString();
+    patch.return_odometer_km = km(b.return.odometerKm);
+    patch.return_fuel_eighths = fuel(b.return.fuelEighths);
+    patch.return_notes = note(b.return.notes);
+    patch.damage_notes = note(b.return.damage);
+  }
   if (b.markPaid) {
     const note = String(b.markPaid.note ?? "").trim();
     if (note.length < 3) throw badRequest("Say why it is paid (cash, bank transfer…).");
@@ -309,13 +367,127 @@ rentals.patch("/admin/rentals/bookings/:id", async (c) => {
 });
 
 rentals.delete("/admin/rentals/bookings/:id", async (c) => {
-  await requireAdmin(c, "subscriptions.read");
   const id = c.req.param("id");
   if (!UUID.test(id)) throw notFound("booking_not_found");
-  const { data: row } = await db().from("rental_bookings").select("payment_status").eq("id", id).maybeSingle();
+  const { data: row } = await db().from("rental_bookings").select("payment_status,provider_id").eq("id", id).maybeSingle();
   if (!row) throw notFound("booking_not_found");
+  await requireOperator(c, row.provider_id ? String(row.provider_id) : null);
   if (row.payment_status === "paid") throw new HttpError(409, "A paid booking is history — cancel or refund it.");
   await db().from("rental_bookings").update({ deleted_at: new Date().toISOString(), status: "cancelled" }).eq("id", id);
+  return c.json({ ok: true });
+});
+
+/**
+ * A booking taken by the fleet itself — a walk-in, a phone call, a repeat
+ * customer. Priced by the same arithmetic as the storefront (an override is
+ * allowed and recorded), on the same row, so the calendar, revenue and
+ * payouts read it like any other. Paid now (cash, transfer) or left unpaid.
+ */
+rentals.post("/admin/rentals/bookings", async (c) => {
+  const b = await c.req.json().catch(() => ({})) as Record<string, any>;
+  const vehicleId = String(b.vehicleId ?? "");
+  if (!UUID.test(vehicleId)) throw badRequest("Pick a vehicle.");
+  const { data: v } = await db().from("rental_vehicles")
+    .select("id,name,provider_id,daily_price_cents,weekly_price_cents,monthly_price_cents").eq("id", vehicleId).maybeSingle();
+  if (!v) throw notFound("Vehicle not found.");
+  const admin = await requireOperator(c, v.provider_id ? String(v.provider_id) : null);
+
+  const startDate = String(b.startDate ?? ""), endDate = String(b.endDate ?? "");
+  if (!ISO.test(startDate) || !ISO.test(endDate) || endDate < startDate) throw badRequest("Pick the dates.");
+  const days = rentalDaysBetween(startDate, endDate);
+  if (days > 365) throw badRequest("Up to a year at a time.");
+  const customerName = String(b.customerName ?? "").trim().slice(0, 120);
+  if (!customerName) throw badRequest("Who is renting it?");
+  if (await blocked(v.id, startDate, endDate)) throw new HttpError(409, "The car is blocked on some of those days.");
+
+  // An account by email, if they have one — the booking then shows in their profile.
+  let userId = "walk-in";
+  const email = String(b.customerEmail ?? "").trim().toLowerCase();
+  if (email) {
+    const { data: u } = await db().from("users").select("id").ilike("email", email).limit(1).maybeSingle();
+    if (u?.id) userId = String(u.id);
+  }
+
+  const pricing = calcRentalPrice(v, days);
+  const scope = { provider_id: v.provider_id, is_active: true };
+  let insurance: any = null;
+  if (b.insuranceTierId) {
+    ({ data: insurance } = await db().from("rental_insurance_tiers").select("id,name,price_per_day_cents").eq("id", String(b.insuranceTierId)).match(scope).maybeSingle());
+    if (!insurance) throw badRequest("That insurance isn't offered.");
+  }
+  const extraIds = [...new Set(((b.extraIds ?? []) as unknown[]).map(String).filter(Boolean))];
+  let extras: any[] = [];
+  if (extraIds.length) {
+    ({ data: extras } = await db().from("rental_extras").select("id,name,price_cents,price_type").in("id", extraIds).match(scope) as any);
+  }
+  let zone: any = null;
+  if (b.deliveryZoneId) {
+    ({ data: zone } = await db().from("rental_delivery_zones").select("id,name,fee_cents").eq("id", String(b.deliveryZoneId)).match(scope).maybeSingle());
+  }
+  const insuranceCents = insurance ? Number(insurance.price_per_day_cents || 0) * days : 0;
+  const extrasPriced = (extras ?? []).map((e) => ({ id: e.id, name: e.name, cents: extraCost(e, days) }));
+  const extrasCents = extrasPriced.reduce((sum, e) => sum + e.cents, 0);
+  const deliveryFee = Number(zone?.fee_cents ?? 0);
+  const computed = pricing.totalCents + insuranceCents + extrasCents + deliveryFee;
+  const override = b.totalCentsOverride === undefined || b.totalCentsOverride === null ? null : Math.round(Number(b.totalCentsOverride));
+  if (override !== null && (!Number.isFinite(override) || override < 0)) throw badRequest("Bad total.");
+  const total = override ?? computed;
+
+  const paid = !!b.paid;
+  const { data: row, error } = await db().from("rental_bookings").insert({
+    user_id: userId, vehicle_id: v.id, start_date: startDate, end_date: endDate, rental_days: days,
+    daily_price_cents: pricing.effectiveDailyRate, subtotal_cents: pricing.subtotalCents,
+    discount_pct: pricing.discountPct, discount_cents: pricing.discountCents,
+    insurance_tier_id: insurance?.id ?? null, insurance_cents: insuranceCents,
+    delivery_zone_id: zone?.id ?? null, delivery_fee_cents: deliveryFee,
+    extras: extrasPriced, extras_cents: extrasCents, total_cents: total, surcharge_cents: 0,
+    customer_name: customerName,
+    customer_whatsapp: String(b.customerWhatsapp ?? "").trim().slice(0, 40) || null,
+    delivery_address: String(b.deliveryAddress ?? "").trim().slice(0, 300) || zone?.name || null,
+    delivery_notes: String(b.notes ?? "").trim().slice(0, 500) || null,
+    admin_notes: override !== null && override !== computed ? `Price set by hand: ${override} (computed ${computed}).` : null,
+    status: "confirmed",
+    payment_status: paid ? "paid" : "pending",
+    payment_method: paid ? String(b.paymentMethod ?? "cash").slice(0, 40) : "manual",
+  }).select("id").single();
+  if (error) {
+    if (/23P01|exclusion/i.test(error.message)) throw new HttpError(409, "The car is already booked on some of those days.");
+    throw new HttpError(503, error.message);
+  }
+  await db().from("admin_audit_logs").insert({
+    admin_user_id: admin.id, action: "manual_booking", entity_type: "rental_booking", entity_id: row.id,
+    details: { vehicleId, startDate, endDate, total, paid },
+  }).then(() => undefined, () => undefined);
+  if (paid) await notifyNewOrder("rental_bookings", row.id).catch(() => undefined);
+  return c.json({ id: row.id, totalCents: total, computedCents: computed }, 201);
+});
+
+/** Days a car can't be rented — service, repair, own use. */
+rentals.post("/admin/rentals/blocks", async (c) => {
+  const b = await c.req.json().catch(() => ({})) as Record<string, any>;
+  const vehicleId = String(b.vehicleId ?? "");
+  if (!UUID.test(vehicleId)) throw badRequest("Pick a vehicle.");
+  const { data: v } = await db().from("rental_vehicles").select("id,provider_id").eq("id", vehicleId).maybeSingle();
+  if (!v) throw notFound("Vehicle not found.");
+  const user = await requireOperator(c, v.provider_id ? String(v.provider_id) : null);
+  const startDate = String(b.startDate ?? ""), endDate = String(b.endDate ?? "");
+  if (!ISO.test(startDate) || !ISO.test(endDate) || endDate < startDate) throw badRequest("Pick the dates.");
+  if (await booked(v.id, startDate, endDate)) throw new HttpError(409, "Someone has it booked on some of those days — move or cancel that booking first.");
+  const { data, error } = await db().from("rental_blocks").insert({
+    vehicle_id: v.id, provider_id: v.provider_id, start_date: startDate, end_date: endDate,
+    reason: String(b.reason ?? "").trim().slice(0, 200) || null, created_by: user.id,
+  }).select().single();
+  if (error) throw new HttpError(/rental_blocks|does not exist/i.test(error.message) ? 503 : 400, error.message);
+  return c.json(data, 201);
+});
+
+rentals.delete("/admin/rentals/blocks/:id", async (c) => {
+  const id = c.req.param("id");
+  if (!UUID.test(id)) throw notFound("block_not_found");
+  const { data: row } = await db().from("rental_blocks").select("id,provider_id").eq("id", id).maybeSingle();
+  if (!row) throw notFound("block_not_found");
+  await requireOperator(c, row.provider_id ? String(row.provider_id) : null);
+  await db().from("rental_blocks").delete().eq("id", id);
   return c.json({ ok: true });
 });
 
