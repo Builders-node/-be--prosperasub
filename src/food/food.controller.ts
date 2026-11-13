@@ -10,8 +10,8 @@ import type { RenewalPaymentMethod } from "../payments/subscription-renewal.serv
  * reference; the audit row needs amount + idempotency key.
  */
 class RenewSubscriptionDto {
-  @ApiProperty({ enum: ["lightning", "onchain", "crypto", "infinita", "paypal"], example: "lightning" })
-  @IsIn(["lightning", "onchain", "crypto", "infinita", "paypal"])
+  @ApiProperty({ enum: ["lightning", "onchain", "paypal"], example: "lightning" })
+  @IsIn(["lightning", "onchain", "paypal"])
   payment_method!: RenewalPaymentMethod;
 
   @ApiProperty({ example: "abc123deadbeef" })
@@ -57,7 +57,7 @@ export class FoodController {
   @ApiOperation({
     summary: "Renew a food subscription — verified payment + idempotent",
     description:
-      "Requires payment_method + payment_reference which the server verifies with the actual provider (Blink / SimpleFi / PayPal). Same idempotency_key is a safe no-op. Emits an audit row in subscription_renewals.",
+      "Requires payment_method + payment_reference which the server verifies with the actual provider (Blink / PayPal). Same idempotency_key is a safe no-op. Emits an audit row in subscription_renewals.",
   })
   @ApiBody({ type: RenewSubscriptionDto })
   @ApiResponse({ status: 201, description: "Renewed; returns new start/end dates + idempotent flag." })

@@ -7,7 +7,7 @@ import type { PaymentMethod } from "./payment-provider.port";
 export interface RecordPaymentInput {
   method: PaymentMethod;
   providerRef: string;
-  provider?: string;              // concrete gateway (blink / simplefi / paypal)
+  provider?: string;              // concrete gateway (blink / paypal / nowpayments)
   amountCents?: number | null;
   currency?: string;
   subjectRef?: string | null;

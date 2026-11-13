@@ -182,7 +182,7 @@ export class FoodService {
    *
    * Now hardened:
    *   - Requires payment_method + payment_reference; verifies with the actual
-   *     provider (Blink / SimpleFi / PayPal) so a stolen JWT can't extend a
+   *     provider (Blink / PayPal) so a stolen JWT can't extend a
    *     subscription for free.
    *   - Requires idempotency_key; retries within the same key return the same
    *     result without double-extending or double-billing.

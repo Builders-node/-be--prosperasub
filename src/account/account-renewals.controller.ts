@@ -52,7 +52,7 @@ export class AccountRenewalsController {
   @ApiOperation({
     summary: "Renew a cleaning subscription — verified payment + idempotent",
     description:
-      "Extends the existing cleaning_subscriptions row's period (does NOT create a duplicate). Payment reference is verified against the provider (Blink / SimpleFi / PayPal). Retries with the same idempotency_key are safe no-ops.",
+      "Extends the existing cleaning_subscriptions row's period (does NOT create a duplicate). Payment reference is verified against the provider (Blink / PayPal). Retries with the same idempotency_key are safe no-ops.",
   })
   @ApiBody({ type: RenewPayloadDto })
   @ApiResponse({ status: 201, description: "Renewed; returns new start/end dates + idempotent flag." })
