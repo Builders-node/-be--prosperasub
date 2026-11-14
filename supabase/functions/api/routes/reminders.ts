@@ -147,6 +147,42 @@ reminders.post("/cron/reminders", async (c) => {
   const userOf = new Map((users ?? []).map((u: any) => [String(u.id), u]));
   const labelOf = new Map((archetypes ?? []).map((a: any) => [String(a.key), String(a.label)]));
 
+  /**
+   * Meals are one message a day, without a clock time.
+   *
+   * A meal's hour is not something the restaurant told us: provider_items
+   * carries 8:00 / 12:00 / 19:00 placeholders, so "Breakfast today at 8:00 AM"
+   * went to customers of a kitchen that delivers nothing at 8 — three e-mails
+   * a day, each with a time that wasn't true. Until a kitchen sets its own
+   * delivery times, a meal reminder says WHAT comes today and from whom, once.
+   *
+   * Every meal of that day is claimed with the first one, so the later meals
+   * never send a message of their own.
+   */
+  const isMeal = (o: any) => (o.providers?.archetype_key ?? o.source_service_key) === "food";
+  const mealDay = new Map<string, any[]>();
+  for (const o of rows) {
+    if (!isMeal(o)) continue;
+    const k = `${o.user_id}|${o.provider_id}|${dayOf(new Date(o.starts_at))}`;
+    mealDay.set(k, [...(mealDay.get(k) ?? []), o]);
+  }
+  // Meals later today that the lookahead has not reached yet still belong to
+  // today's single message — read them too, so they are claimed with it.
+  if (mealDay.size) {
+    const endOfDay = new Date(now.getTime() + 36 * 3_600_000).toISOString();
+    const { data: later } = await db().from("service_occurrences")
+      .select("id,user_id,provider_id,item_key,starts_at,source_service_key")
+      .eq("status", "scheduled").eq("source_service_key", "food")
+      .in("user_id", [...new Set([...mealDay.values()].flat().map((o) => String(o.user_id)))])
+      .gt("starts_at", until.toISOString()).lte("starts_at", endOfDay);
+    for (const o of (later ?? []) as any[]) {
+      const k = `${o.user_id}|${o.provider_id}|${dayOf(new Date(o.starts_at))}`;
+      const group = mealDay.get(k);
+      if (group && !group.some((g) => g.id === o.id)) group.push(o);
+    }
+  }
+  const andList = (xs: string[]) => xs.length <= 1 ? (xs[0] ?? "") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`;
+
   let sent = 0, skipped = 0;
   for (const o of rows) {
     if (reminded.has(o.id)) continue;
@@ -161,11 +197,30 @@ reminders.post("/cron/reminders", async (c) => {
     const { error: claimErr } = await db().from("occurrence_reminders").insert({ occurrence_id: o.id, user_id: uid });
     if (claimErr) continue;
 
-    // "Lunch today at 12:30 PM", "Tennis Court 1 tomorrow at 9:00 AM",
-    // "Cleaning today at 2:00 PM" — the occurrence's own word, else its service.
-    const service = arch ? labelOf.get(arch) ?? tidy(arch) : null;
-    const what = tidy(o.item_key) ?? service ?? "Your booking";
-    const title = `${what} ${whenText(at, now)}`;
+    let title: string;
+    if (isMeal(o)) {
+      const day = dayOf(at);
+      const group = (mealDay.get(`${o.user_id}|${o.provider_id}|${day}`) ?? [o])
+        .sort((a, b) => String(a.starts_at).localeCompare(String(b.starts_at)));
+      // The rest of the day's meals are covered by this message.
+      const others = group.filter((g) => g.id !== o.id && !reminded.has(g.id));
+      if (others.length) {
+        await db().from("occurrence_reminders").upsert(
+          others.map((g) => ({ occurrence_id: g.id, user_id: uid, methods: ["grouped"] })),
+          { onConflict: "occurrence_id", ignoreDuplicates: true },
+        );
+        others.forEach((g) => reminded.add(g.id));
+      }
+      const meals = [...new Set(group.map((g) => tidy(g.item_key)).filter(Boolean) as string[])];
+      const when = day === dayOf(now) ? "today" : day === dayOf(new Date(now.getTime() + 86_400_000)) ? "tomorrow" : new Intl.DateTimeFormat("en-US", { timeZone: TZ, weekday: "long" }).format(at);
+      title = `Your meals ${when}${meals.length ? `: ${andList(meals).toLowerCase().replace(/^\w/, (x) => x.toUpperCase())}` : ""}`;
+    } else {
+      // "Tennis Court 1 tomorrow at 9:00 AM", "Cleaning today at 2:00 PM" —
+      // the occurrence's own word, else its service.
+      const service = arch ? labelOf.get(arch) ?? tidy(arch) : null;
+      const what = tidy(o.item_key) ?? service ?? "Your booking";
+      title = `${what} ${whenText(at, now)}`;
+    }
     const note = o.access_instructions || prefs.access_instructions;
     const body = [o.providers?.name, note ? `Note: ${note}` : null].filter(Boolean).join(" · ") || "See it in My subscriptions.";
     const methods: string[] = [];
