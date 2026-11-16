@@ -35,12 +35,18 @@ async function rest<T>(path: string): Promise<T> {
   return rows as T;
 }
 
+/**
+ * A fee charged in the business's OWN zone (its delivery or its call-out) is
+ * the business's money; one in a platform zone is the platform's and is not.
+ */
+const ownFee = (r: any): number => (r.delivered_by === "provider" ? Number(r.delivery_fee_cents) || 0 : 0);
+
 const UNIVERSAL_REVENUE: RevenueSource = {
   table: "provider_subscriptions",
-  select: "total_cents:price_cents,created_at,start_date,end_date,commission_pct",
+  select: "total_cents:price_cents,delivery_fee_cents,delivered_by,created_at,start_date,end_date,commission_pct",
   scope: "universal",
   where: "&payment_status=eq.paid",
-  toInput: (r) => ({ totalCents: r.total_cents || 0, serviceStart: r.start_date || r.created_at, serviceEnd: r.end_date, fallbackDays: 30 }),
+  toInput: (r) => ({ totalCents: (r.total_cents || 0) + ownFee(r), serviceStart: r.start_date || r.created_at, serviceEnd: r.end_date, fallbackDays: 30 }),
 };
 const REVENUE_ALIASES: Record<string, string> = { beach_club: "beach", entertainment: "beach" };
 const REVENUE_SOURCES: Record<string, RevenueSource> = {

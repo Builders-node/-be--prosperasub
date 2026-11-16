@@ -1,7 +1,7 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { requireAccount, requireAdmin } from "../lib/auth.ts";
 import { db } from "../lib/db.ts";
-import { badRequest, HttpError, notFound } from "../lib/http.ts";
+import { badRequest, forbidden, HttpError, notFound } from "../lib/http.ts";
 import { notifyUser } from "../lib/notify.ts";
 
 /**
@@ -12,7 +12,11 @@ import { notifyUser } from "../lib/notify.ts";
  *   PATCH  /admin/delivery/zones/:id      any of its fields
  *   DELETE /admin/delivery/zones/:id      removed; one that orders point at is
  *                                         switched off instead, so history keeps its zone
- *   GET    /admin/deliveries?status=      orders with a delivery, newest first
+ *   …/account/providers/:providerId/delivery/zones[/:id]
+ *                                         the same four for a business's OWN zones
+ *                                         (owner, team or admin) — where it delivers
+ *                                         itself or comes to the customer
+ *   GET    /admin/deliveries?status=      platform-courier orders, newest first
  *   PATCH  /admin/deliveries/:id          {status?, courierId?}
  *   GET    /admin/couriers · POST /admin/couriers · PATCH /admin/couriers/:id
  *          {email?} links the courier to an account, which is what lets them in:
@@ -100,54 +104,106 @@ const fail = (e: { message: string } | null) => {
 };
 
 // ── Zones ────────────────────────────────────────────────────────────────────
+//
+// The same four handlers serve two owners: the platform (provider_id NULL,
+// admins) and a business (its own zones, its owner and team). A business's
+// zone is where IT goes — to deliver, or to do the work at the customer's.
 
-delivery.get("/admin/delivery/zones", async (c) => {
-  await requireAdmin(c, PERMISSION);
-  const { data, error } = await db().from("delivery_zones").select("*")
-    .is("provider_id", null).order("sort_order").order("created_at");
-  if (error && missing(error.message)) return c.json({ enabled: false, zones: [] });
+type ZoneOwner = string | null;
+
+async function listZones(owner: ZoneOwner) {
+  let q = db().from("delivery_zones").select("*");
+  q = owner ? q.eq("provider_id", owner) : q.is("provider_id", null);
+  const { data, error } = await q.order("sort_order").order("created_at");
+  if (error && missing(error.message)) return { enabled: false, zones: [] };
   fail(error);
-  return c.json({ enabled: true, zones: data ?? [] });
-});
+  return { enabled: true, zones: data ?? [] };
+}
 
-delivery.post("/admin/delivery/zones", async (c) => {
-  await requireAdmin(c, PERMISSION);
-  const b = await c.req.json().catch(() => ({})) as Record<string, any>;
+async function createZone(owner: ZoneOwner, b: Record<string, any>) {
   const row = zoneRow(b, false);
-  const { data, error } = await db().from("delivery_zones").insert({ ...row, provider_id: null }).select().single();
+  const { data, error } = await db().from("delivery_zones").insert({ ...row, provider_id: owner }).select().single();
   fail(error);
-  return c.json(data, 201);
-});
+  return data;
+}
 
-delivery.patch("/admin/delivery/zones/:id", async (c) => {
-  await requireAdmin(c, PERMISSION);
-  const id = c.req.param("id");
+async function updateZone(owner: ZoneOwner, id: string, b: Record<string, any>) {
   if (!UUID_RE.test(id)) throw notFound("zone_not_found");
-  const b = await c.req.json().catch(() => ({})) as Record<string, any>;
   const row = zoneRow(b, true);
   if (!Object.keys(row).length) throw badRequest("Nothing to change.");
-  const { data, error } = await db().from("delivery_zones")
-    .update({ ...row, updated_at: new Date().toISOString() }).eq("id", id).select().maybeSingle();
+  let q = db().from("delivery_zones").update({ ...row, updated_at: new Date().toISOString() }).eq("id", id);
+  q = owner ? q.eq("provider_id", owner) : q.is("provider_id", null);
+  const { data, error } = await q.select().maybeSingle();
   fail(error);
   if (!data) throw notFound("zone_not_found");
-  return c.json(data);
-});
+  return data;
+}
 
-delivery.delete("/admin/delivery/zones/:id", async (c) => {
-  await requireAdmin(c, PERMISSION);
-  const id = c.req.param("id");
+async function deleteZone(owner: ZoneOwner, id: string) {
   if (!UUID_RE.test(id)) throw notFound("zone_not_found");
+  const scoped = <T extends { eq: any; is: any }>(q: T): T => (owner ? q.eq("provider_id", owner) : q.is("provider_id", null));
+  const { data: z } = await scoped(db().from("delivery_zones").select("id").eq("id", id)).maybeSingle();
+  if (!z) throw notFound("zone_not_found");
   const { count } = await db().from("provider_subscriptions")
     .select("id", { count: "exact", head: true }).eq("delivery_zone_id", id);
   if ((count ?? 0) > 0) {
     // Orders point at it: keep the row so they still say where they went.
     const { error } = await db().from("delivery_zones").update({ is_active: false, updated_at: new Date().toISOString() }).eq("id", id);
     fail(error);
-    return c.json({ ok: true, archived: true });
+    return { ok: true, archived: true };
   }
   const { error } = await db().from("delivery_zones").delete().eq("id", id);
   fail(error);
-  return c.json({ ok: true, archived: false });
+  return { ok: true, archived: false };
+}
+
+const body = async (c: Context) => await c.req.json().catch(() => ({})) as Record<string, any>;
+
+delivery.get("/admin/delivery/zones", async (c) => {
+  await requireAdmin(c, PERMISSION);
+  return c.json(await listZones(null));
+});
+delivery.post("/admin/delivery/zones", async (c) => {
+  await requireAdmin(c, PERMISSION);
+  return c.json(await createZone(null, await body(c)), 201);
+});
+delivery.patch("/admin/delivery/zones/:id", async (c) => {
+  await requireAdmin(c, PERMISSION);
+  return c.json(await updateZone(null, c.req.param("id"), await body(c)));
+});
+delivery.delete("/admin/delivery/zones/:id", async (c) => {
+  await requireAdmin(c, PERMISSION);
+  return c.json(await deleteZone(null, c.req.param("id")));
+});
+
+const isSuperAdmin = (roles: string[]) => roles.some((r) => r === "SUPER_ADMIN" || r === "super_admin");
+
+/** The owner, a team member or an admin — the people who edit the business's offers. */
+async function runsProvider(c: Context): Promise<string> {
+  const user = await requireAccount(c);
+  const providerId = c.req.param("providerId");
+  if (!UUID_RE.test(providerId)) throw notFound("Business not found.");
+  if (isSuperAdmin(user.roles ?? [])) return providerId;
+  const { data: p } = await db().from("providers").select("admin_user_id").eq("id", providerId).maybeSingle();
+  if (!p) throw notFound("Business not found.");
+  if (p.admin_user_id && String(p.admin_user_id) === String(user.id)) return providerId;
+  const { data: m } = await db().from("provider_members").select("id").eq("provider_id", providerId).eq("user_id", user.id).limit(1);
+  if (!m?.length) throw forbidden("You don't run this business.");
+  return providerId;
+}
+
+delivery.get("/account/providers/:providerId/delivery/zones", async (c) => c.json(await listZones(await runsProvider(c))));
+delivery.post("/account/providers/:providerId/delivery/zones", async (c) => {
+  const owner = await runsProvider(c);
+  return c.json(await createZone(owner, await body(c)), 201);
+});
+delivery.patch("/account/providers/:providerId/delivery/zones/:id", async (c) => {
+  const owner = await runsProvider(c);
+  return c.json(await updateZone(owner, c.req.param("id"), await body(c)));
+});
+delivery.delete("/account/providers/:providerId/delivery/zones/:id", async (c) => {
+  const owner = await runsProvider(c);
+  return c.json(await deleteZone(owner, c.req.param("id")));
 });
 
 // ── Deliveries ───────────────────────────────────────────────────────────────
@@ -158,6 +214,9 @@ delivery.get("/admin/deliveries", async (c) => {
   let q = db().from("provider_subscriptions")
     .select("id,provider_id,plan_id,user_id,start_date,status,payment_status,price_cents,delivery_fee_cents,delivery_point,delivery_zone_id,delivery_status,delivered_by,courier_id,delivered_at,customer_whatsapp,notes,metadata,created_at,providers(name),delivery_zones(name)")
     .not("delivery_zone_id", "is", null)
+    // The platform's couriers' work only: a business's own deliveries and
+    // visits are in its own Orders.
+    .or("delivered_by.is.null,delivered_by.eq.platform")
     .eq("payment_status", "paid")
     .order("created_at", { ascending: false })
     .limit(300);
