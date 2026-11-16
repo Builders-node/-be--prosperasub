@@ -67,7 +67,7 @@ const REVENUE_SOURCES: Record<string, RevenueSource> = {
   },
   food: {
     table: "food_subscriptions",
-    select: "weekly_price_cents,commitment_weeks,periods_paid,created_at,started_at,end_date,commission_pct",
+    select: "weekly_price_cents,commitment_weeks,periods_paid,delivery_fee_cents,delivered_by,created_at,started_at,end_date,commission_pct",
     scope: "legacy", where: "&payment_status=eq.paid&status=in.(active,paused,expired)",
     toInput: (r) => {
       const weeks = (r.commitment_weeks || 1) * (r.periods_paid || 1);
@@ -76,9 +76,9 @@ const REVENUE_SOURCES: Record<string, RevenueSource> = {
       // keeps the weeks already delivered in the past, where they happened —
       // from started_at they were all pushed into the future.
       if (r.end_date) {
-        return { totalCents: (r.weekly_price_cents || 0) * weeks, serviceStart: addDays(String(r.end_date), -weeks * 7), serviceEnd: String(r.end_date), fallbackDays: weeks * 7 };
+        return { totalCents: (r.weekly_price_cents || 0) * weeks + ownFee(r), serviceStart: addDays(String(r.end_date), -weeks * 7), serviceEnd: String(r.end_date), fallbackDays: weeks * 7 };
       }
-      return { totalCents: (r.weekly_price_cents || 0) * weeks, serviceStart: r.started_at || r.created_at, serviceEnd: null, fallbackDays: weeks * 7 };
+      return { totalCents: (r.weekly_price_cents || 0) * weeks + ownFee(r), serviceStart: r.started_at || r.created_at, serviceEnd: null, fallbackDays: weeks * 7 };
     },
   },
   beach: UNIVERSAL_REVENUE,

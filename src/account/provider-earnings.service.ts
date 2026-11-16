@@ -93,13 +93,13 @@ const REVENUE_SOURCES: Record<string, RevenueSource> = {
 
   food: {
     table: "food_subscriptions",
-    select: "weekly_price_cents,commitment_weeks,periods_paid,created_at,started_at,commission_pct",
+    select: "weekly_price_cents,commitment_weeks,periods_paid,delivery_fee_cents,delivered_by,created_at,started_at,commission_pct",
     scope: "legacy",
     where: "&payment_status=eq.paid&status=in.(active,paused,expired)",
     toInput: (r) => {
       const weeks = (r.commitment_weeks || 1) * (r.periods_paid || 1);
       return {
-        totalCents: (r.weekly_price_cents || 0) * weeks,
+        totalCents: (r.weekly_price_cents || 0) * weeks + ownFee(r),
         serviceStart: r.started_at || r.created_at,
         serviceEnd: null,
         fallbackDays: weeks * 7,
