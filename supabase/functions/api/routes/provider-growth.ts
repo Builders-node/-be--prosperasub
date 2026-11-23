@@ -101,6 +101,54 @@ async function sha256(text: string): Promise<string> {
   return Array.from(new Uint8Array(buf)).map((x) => x.toString(16).padStart(2, "0")).join("");
 }
 
+/**
+ * The invites this business has sent and what became of them. The table is
+ * service-role only (it holds token hashes), so the Team tab reads it here —
+ * the hash never leaves.
+ */
+providerGrowth.get("/account/providers/:id/team-invites", async (c) => {
+  const user = await requireAccount(c);
+  const providerId = c.req.param("id");
+  await assertOwner(user.id, providerId, user.roles);
+  const { data, error } = await db().from("provider_owner_invites")
+    .select("id,invited_email,created_at,expires_at,opened_at,claimed_at,claimed_by,revoked_at")
+    .eq("provider_id", providerId).eq("kind", "member")
+    .order("created_at", { ascending: false }).limit(50);
+  if (error) throw new HttpError(503, "Could not read the invites.");
+  const now = Date.now();
+  const invites = (data ?? []).map((i) => ({
+    id: i.id,
+    email: i.invited_email,
+    sentAt: i.created_at,
+    expiresAt: i.expires_at,
+    openedAt: i.opened_at ?? null,
+    acceptedAt: i.claimed_at,
+    cancelledAt: i.revoked_at,
+    state: i.claimed_at ? "accepted"
+      : i.revoked_at ? "cancelled"
+      : Date.parse(i.expires_at) <= now ? "expired"
+      : i.opened_at ? "opened" : "sent",
+  }));
+  return c.json({ invites });
+});
+
+/** Withdraw an invite nobody has accepted yet. The link stops working at once. */
+providerGrowth.delete("/account/providers/:id/team-invites/:inviteId", async (c) => {
+  const user = await requireAccount(c);
+  const providerId = c.req.param("id");
+  const inviteId = c.req.param("inviteId");
+  await assertOwner(user.id, providerId, user.roles);
+  if (!UUID_RE.test(inviteId)) throw notFound("Invite not found.");
+  const { data, error } = await db().from("provider_owner_invites")
+    .update({ revoked_at: new Date().toISOString() })
+    .eq("id", inviteId).eq("provider_id", providerId).eq("kind", "member")
+    .is("claimed_at", null).is("revoked_at", null)
+    .select("id");
+  if (error) throw new HttpError(503, "Could not cancel the invite.");
+  if (!data?.length) throw new HttpError(409, "That invite was already accepted or cancelled.");
+  return c.json({ cancelled: true });
+});
+
 providerGrowth.post("/account/providers/:id/team-invites", async (c) => {
   const user = await requireAccount(c);
   const providerId = c.req.param("id");
