@@ -79,10 +79,11 @@ promotions.get("/promotions/active", async (c) => {
   const placement = c.req.query("placement") === "service" ? "service" : "home";
   const archetype = c.req.query("archetype") ?? null;
   const s = await settings();
-  const limit = placement === "home" ? Math.max(s.slotsHome, 1) + 3 : Math.max(s.slotsService, 1) + 2;
+  // Boosts fill in after every featured card, up to this many.
+  const boostRoom = placement === "home" ? 3 : 2;
 
   let q = db().from("provider_promotions")
-    .select("id,kind,placement,plan_id,provider_id,created_at,providers!inner(id,name,description,avatar_url,banner_url,archetype_key,unit,status,source_service_key,source_provider_id)");
+    .select("id,kind,placement,plan_id,provider_id,price_cents,created_at,providers!inner(id,name,description,avatar_url,banner_url,archetype_key,unit,status,source_service_key,source_provider_id)");
   q = liveFilter(q);
   q = q.in("providers.status", ["active", "approved"]);
   if (placement === "service") {
@@ -96,10 +97,15 @@ promotions.get("/promotions/active", async (c) => {
     throw new HttpError(503, "Could not read promotions.");
   }
   const rows = (data ?? []) as any[];
-  const featured = rows.filter((r) => r.kind === "featured" && r.placement === placement);
+  // Bought slots first (capped by the slot count when sold), then the ones the
+  // platform gave away (uncapped — they take no slot), then boosts.
+  const featuredRows = rows.filter((r) => r.kind === "featured" && r.placement === placement);
+  const paid = featuredRows.filter((r) => Number(r.price_cents) > 0);
+  const free = featuredRows.filter((r) => !(Number(r.price_cents) > 0));
   const boosts = rows.filter((r) => r.kind === "boost").sort(() => Math.random() - 0.5);
   const seen = new Set<string>();
-  const picked = [...featured, ...boosts].filter((r) => (seen.has(r.provider_id) ? false : (seen.add(r.provider_id), true))).slice(0, limit);
+  const once = (r: any) => (seen.has(r.provider_id) ? false : (seen.add(r.provider_id), true));
+  const picked = [...[...paid, ...free].filter(once), ...boosts.filter(once).slice(0, boostRoom)];
 
   const planIds = picked.map((r) => r.plan_id).filter(Boolean);
   const { data: plans } = planIds.length
@@ -263,10 +269,13 @@ async function assertOwnPlan(providerId: string, planId: string) {
   if (data.status !== "active") throw badRequest("That offer isn't on sale.");
 }
 
-/** Featured slots that overlap [from, to) for a placement (and service). */
+/** PAID featured slots that overlap [from, to) for a placement (and service). */
 async function liveFeaturedCount(placement: Placement, archetype: string | null, from: Date, to: Date, exceptId?: string): Promise<number> {
   let q = db().from("provider_promotions").select("id,providers!inner(archetype_key)")
     .eq("kind", "featured").eq("placement", placement).eq("status", "active")
+    // Only BOUGHT slots are scarce. A placement the platform gives away
+    // (price 0) is shown beside them and never keeps a business from buying.
+    .gt("price_cents", 0)
     .lt("starts_at", to.toISOString()).gt("ends_at", from.toISOString());
   if (placement === "service" && archetype) q = q.eq("providers.archetype_key", archetype);
   if (exceptId) q = q.neq("id", exceptId);
@@ -366,8 +375,9 @@ promotions.get("/admin/promotions", async (c) => {
 
 /**
  * A featured slot GIVEN by the platform — free: no payout row, price 0, the
- * same provider_promotions row a purchase makes, so the rails, the slot
- * limits, the stats and "End" all treat it the same. For launching a new
+ * same provider_promotions row a purchase makes, so the rails, the stats and
+ * "End" treat it the same. It takes NO slot: the slot count limits what is
+ * sold, and a gift must never stop a business from buying. For launching a new
  * business, a partner, a test. The business is told it was featured.
  */
 promotions.post("/admin/promotions/grant", async (c) => {
@@ -386,13 +396,9 @@ promotions.post("/admin/promotions/grant", async (c) => {
   if (prov.status !== "active" && prov.status !== "approved") throw badRequest("That business isn't live — a featured slot would send people to a closed page.");
   if (placement === "service" && !prov.archetype_key) throw badRequest("That business has no service listing to be featured in — use Home.");
 
-  const s = await settings();
-  const capacity = placement === "home" ? s.slotsHome : s.slotsService;
+  // A gift takes no slot — the slot count limits what is SOLD.
   const from = new Date();
   const to = new Date(from.getTime() + weeks * WEEK_MS);
-  if (await liveFeaturedCount(placement, prov.archetype_key, from, to) >= capacity) {
-    throw new HttpError(409, `All ${capacity} ${placement === "home" ? "home" : "service"} slots are taken for those dates. End one, or raise the slot count below.`);
-  }
 
   const { data: promo, error } = await db().from("provider_promotions").insert({
     provider_id: providerId, plan_id: planId, kind: "featured", placement,
