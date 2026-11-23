@@ -110,17 +110,35 @@ providerGrowth.post("/account/providers/:id/team-invites", async (c) => {
   if (!EMAIL_RE.test(email)) throw badRequest("That email address doesn't look right.");
   const name = typeof b.name === "string" ? b.name.trim().slice(0, 80) || null : null;
 
-  // Someone with an account joins at once.
-  const { data: existing } = await db().from("users").select("id,email,name").eq("email", email).limit(1).maybeSingle();
+  const audience = await providerAudience(providerId);
+  const bizName = audience?.name ?? "a business";
+  const origin = isAllowedOrigin(c.req.header("origin")) ? c.req.header("origin")! : appUrl();
+
+  // Someone with an account joins at once — and is told so. Emails are stored
+  // in whatever case the person typed at sign-up, so match without case.
+  const { data: existing } = await db().from("users").select("id,email,name")
+    .ilike("email", email.replace(/[\\%_]/g, (m) => `\\${m}`)).limit(1).maybeSingle();
   if (existing?.id) {
     const { data: already } = await db().from("provider_members").select("id").eq("provider_id", providerId).eq("user_id", existing.id).limit(1);
-    if (!already?.length) {
-      const { error } = await db().from("provider_members").insert({
-        provider_id: providerId, user_id: existing.id, user_email: email, user_name: name || existing.name || null, role: "manager",
+    if (already?.length) return c.json({ added: false, already: true, invited: false });
+    const { error } = await db().from("provider_members").insert({
+      provider_id: providerId, user_id: existing.id, user_email: existing.email ?? email, user_name: name || existing.name || null, role: "manager",
+    });
+    if (error) throw new HttpError(503, "Could not add them.");
+    const url = `${origin}/my-provider/${providerId}`;
+    let emailed = false;
+    try {
+      const r = await sendMail({
+        to: existing.email ?? email,
+        subject: `You now help run ${bizName} on EverySub`,
+        text: `You've been given access to ${bizName} on EverySub — its schedule, customers and plans.\n\nSign in with this email and open it here:\n${url}`,
+        html: `<h2>You now help run ${escapeHtml(bizName)}</h2><p>You've been given access to ${escapeHtml(bizName)} on EverySub — its schedule, customers and plans.</p><p><a href="${escapeHtml(url)}" style="display:inline-block;padding:12px 20px;border-radius:999px;background:#F5A623;color:#000;text-decoration:none;font-weight:600">Open ${escapeHtml(bizName)}</a></p><p style="color:#666">Sign in with this email address to see it.</p>`,
       });
-      if (error) throw new HttpError(503, "Could not add them.");
+      emailed = !!r.sent;
+    } catch (e) {
+      console.warn(`[team-invite] ${email}: ${(e as Error).message}`);
     }
-    return c.json({ added: true, invited: false });
+    return c.json({ added: true, invited: false, emailed });
   }
 
   // Nobody yet: a link, by email, that makes them a manager when they accept.
@@ -133,9 +151,6 @@ providerGrowth.post("/account/providers/:id/team-invites", async (c) => {
   });
   if (error) throw new HttpError(503, /kind/.test(error.message) ? "Team invites aren't switched on yet." : "Could not create the invite.");
 
-  const audience = await providerAudience(providerId);
-  const bizName = audience?.name ?? "a business";
-  const origin = isAllowedOrigin(c.req.header("origin")) ? c.req.header("origin")! : appUrl();
   const url = `${origin}/claim-business?token=${token}`;
   let emailed = false;
   try {
