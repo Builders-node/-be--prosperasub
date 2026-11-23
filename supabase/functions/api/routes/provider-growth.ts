@@ -205,8 +205,8 @@ providerGrowth.post("/account/providers/:id/team-invites", async (c) => {
     const r = await sendMail({
       to: email,
       subject: `Join ${bizName} on EverySub`,
-      text: `You're invited to help run ${bizName} on EverySub — its schedule, customers and plans.\n\nOpen the link, sign in (or create an account with this email) and accept:\n${url}\n\nThe link works once and for 14 days.`,
-      html: `<h2>Join ${escapeHtml(bizName)} on EverySub</h2><p>You're invited to help run ${escapeHtml(bizName)} — its schedule, customers and plans.</p><p><a href="${escapeHtml(url)}" style="display:inline-block;padding:12px 20px;border-radius:999px;background:#F5A623;color:#000;text-decoration:none;font-weight:600">Accept the invite</a></p><p style="color:#666">The link works once and for 14 days.</p>`,
+      text: `You're invited to help run ${bizName} on EverySub — its schedule, customers and plans.\n\nOpen the link and create your account — you join the team as soon as you're in:\n${url}\n\nThe link works once and for 14 days.`,
+      html: `<h2>Join ${escapeHtml(bizName)} on EverySub</h2><p>You're invited to help run ${escapeHtml(bizName)} — its schedule, customers and plans.</p><p><a href="${escapeHtml(url)}" style="display:inline-block;padding:12px 20px;border-radius:999px;background:#F5A623;color:#000;text-decoration:none;font-weight:600">Join the team</a></p><p style="color:#666">Create your account from the link and you're on the team straight away. The link works once and for 14 days.</p>`,
     });
     emailed = !!r.sent;
   } catch (e) {
