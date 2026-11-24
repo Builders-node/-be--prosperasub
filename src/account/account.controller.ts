@@ -6,6 +6,7 @@ import { AccountNotificationsService } from "./account-notifications.service";
 import { AccountPasswordService } from "./account-password.service";
 import { AccountPreferencesService } from "./account-preferences.service";
 import { AccountCancellationService } from "./account-cancellation.service";
+import { AccountPauseService } from "./account-pause.service";
 import { ProviderPayoutsService } from "./provider-payouts.service";
 import { OccurrencesService } from "./occurrences.service";
 import { ProviderMembersService } from "./provider-members.service";
@@ -31,6 +32,12 @@ class ClaimReferralDto {
   @ApiProperty({ description: "The code the friend shared, e.g. 9C37UX" })
   @IsString()
   code!: string;
+}
+
+class PauseSubscriptionDto {
+  @ApiProperty({ enum: [14, 30, 60], description: "How long to pause, in days." })
+  @IsInt()
+  days!: number;
 }
 
 class RescheduleBookingDto {
@@ -166,6 +173,7 @@ export class AccountController {
     private readonly payment: AccountPaymentService,
     private readonly cleaning: AccountCleaningService,
     private readonly cancellation: AccountCancellationService,
+    private readonly pauses: AccountPauseService,
     private readonly payouts: ProviderPayoutsService,
     private readonly occurrences: OccurrencesService,
     private readonly referrals: ReferralsService,
@@ -340,6 +348,31 @@ export class AccountController {
     @Param("id") subscriptionId: string,
   ) {
     return this.cancellation.resume(req.authUser!.id, service, subscriptionId, req.authUser!.email);
+  }
+
+  // ── Pause ──────────────────────────────────────────────────────────────────
+  // A break instead of a cancellation: access stops today and the paid period
+  // ends `days` later. Memberships only (beach | plan).
+
+  @ApiOperation({ summary: "Pause a membership for 14, 30 or 60 days; the end date moves by the same" })
+  @Post(":service/subscriptions/:id/pause")
+  pauseSubscription(
+    @Req() req: AccountRequest,
+    @Param("service") service: string,
+    @Param("id") subscriptionId: string,
+    @Body() body: PauseSubscriptionDto,
+  ) {
+    return this.pauses.pause(req.authUser!.id, service, subscriptionId, body?.days, req.authUser!.email);
+  }
+
+  @ApiOperation({ summary: "End your own pause early; unused days come off the end date" })
+  @Post(":service/subscriptions/:id/unpause")
+  unpauseSubscription(
+    @Req() req: AccountRequest,
+    @Param("service") service: string,
+    @Param("id") subscriptionId: string,
+  ) {
+    return this.pauses.unpause(req.authUser!.id, service, subscriptionId, req.authUser!.email);
   }
 
 

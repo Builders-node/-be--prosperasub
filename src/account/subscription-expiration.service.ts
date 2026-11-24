@@ -5,6 +5,7 @@ import { MailService } from "../mail/mail.service";
 import { AccountNotificationsService, NotificationType } from "./account-notifications.service";
 import { publicAppUrl } from "../config/app-origins";
 import { APP_BRAND_NAME } from "../config/branding";
+import { withoutPause } from "./account-pause.service";
 
 const BUSINESS_TZ = process.env.BUSINESS_TIMEZONE || "America/Tegucigalpa";
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -90,6 +91,9 @@ export class SubscriptionExpirationService {
 
     // Lifecycle sweep: flip any overdue subscriptions to "expired" before
     // sending reminders, so admin views + access checks stay correct.
+    // A customer's pause that has run out comes back first, so the rest of
+    // the run sees it as the active plan it now is.
+    await this.resumeFinishedPauses(todayStr);
     await this.expireOverdueFoodSubscriptions(todayStr);
     await this.expireOverdueCleaningSubscriptions(todayStr);
     await this.expireOverdueBeachSubscriptions(todayStr);
@@ -143,6 +147,47 @@ export class SubscriptionExpirationService {
   }
 
   // ─── Collectors ─────────────────────────────────────────────────────────────
+
+  /**
+   * A membership the customer paused (AccountPauseService) comes back on its
+   * `until` day. Only rows carrying `metadata.pause` — a pause set by the
+   * business or an admin has no end date and stays theirs to lift.
+   */
+  private async resumeFinishedPauses(todayStr: string): Promise<void> {
+    try {
+      const rows = await this.supabaseRest<Array<{ id: string; user_id: string | null; end_date: string | null; metadata: any }>>(
+        `/provider_subscriptions?status=eq.paused&metadata->pause->>until=lte.${todayStr}` +
+          `&select=id,user_id,end_date,metadata&limit=500`,
+      );
+      for (const row of rows ?? []) {
+        try {
+          const updated = await this.supabaseRest<unknown[]>(
+            `/provider_subscriptions?id=eq.${encodeURIComponent(row.id)}&status=eq.paused`,
+            {
+              method: "PATCH",
+              body: JSON.stringify({ status: "active", metadata: withoutPause(row.metadata), updated_at: new Date().toISOString() }),
+            },
+          );
+          if (row.user_id && Array.isArray(updated) && updated.length) {
+            await this.notifications.create({
+              recipientUserId: String(row.user_id),
+              category: "subscription",
+              type: "subscription_created",
+              title: "Your subscription is active again",
+              body: row.end_date ? `Your pause is over. Your plan runs until ${row.end_date}.` : "Your pause is over.",
+              relatedEntityType: "provider_subscriptions",
+              relatedEntityId: String(row.id),
+              actionUrl: "/my-subscriptions",
+            }).catch(() => undefined);
+          }
+        } catch (err) {
+          this.logger.warn(`Auto-resume failed for ${row.id}: ${(err as Error).message}`);
+        }
+      }
+    } catch (err) {
+      this.logger.warn(`Pause resume sweep failed: ${(err as Error).message}`);
+    }
+  }
 
   /** Mark food subscriptions whose end_date has passed as expired. */
   private async expireOverdueFoodSubscriptions(todayStr: string): Promise<void> {
