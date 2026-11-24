@@ -24,6 +24,7 @@ import { reminders } from "./routes/reminders.ts";
 import { tags } from "./routes/tags.ts";
 import { funnel } from "./routes/funnel.ts";
 import { wallet } from "./routes/wallet.ts";
+import { redeem } from "./routes/redeem.ts";
 
 /**
  * The Supabase home of what used to be the NestJS API (api.prosperasub.com).
@@ -81,6 +82,7 @@ app.route("/", reminders);
 app.route("/", tags);
 app.route("/", funnel);
 app.route("/", wallet);
+app.route("/", redeem);
 
 // Supabase prefixes every path with the function's name. The same code runs as
 // `api` (production) and `api-dev` (the dev branch), so the first segment is
