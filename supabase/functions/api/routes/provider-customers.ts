@@ -225,7 +225,7 @@ providerCustomers.post("/account/providers/:id/reviews/:reviewId/reply", async (
 providerCustomers.get("/account/people", async (c) => {
   const user = await requireAccount(c);
   const providerId = c.req.query("providerId") ?? "";
-  const admin = isSuperAdmin(user.roles);
+  const admin = await isPlatformAdmin(user);
   if (!admin) {
     if (!providerId) throw forbidden("Only a platform admin can list people.");
     await assertRuns(user.id, providerId, user.roles);
@@ -264,4 +264,102 @@ providerCustomers.get("/account/people", async (c) => {
   const { data, error } = await q;
   if (error) throw new HttpError(503, "Could not read the list.");
   return c.json({ people: data ?? [] });
+});
+
+// ── Names and emails, for the people a caller is allowed to know ─────────────
+
+/** A platform admin: SUPER_ADMIN on the token, or an active RBAC admin role. */
+async function isPlatformAdmin(user: { id: string; roles: string[] }): Promise<boolean> {
+  if (isSuperAdmin(user.roles)) return true;
+  if (!UUID_RE.test(user.id)) return false;
+  const { data, error } = await db().rpc("edge_admin_allowed", { p_user_id: user.id, p_permission: null });
+  return !error && data === true;
+}
+
+/**
+ * Of `ids`, the ones this caller may see: themselves, the teams of the
+ * businesses they run (owner or member), and anyone who has bought from one of
+ * those businesses. Everyone else stays unknown — the browser shows the name
+ * written on the order instead.
+ */
+async function allowedPeople(userId: string, ids: string[]): Promise<Set<string>> {
+  const allowed = new Set<string>();
+  if (ids.includes(userId)) allowed.add(userId);
+  if (!UUID_RE.test(userId)) return allowed;
+
+  const [{ data: owned }, { data: memberOf }] = await Promise.all([
+    db().from("providers").select("id").eq("admin_user_id", userId),
+    db().from("provider_members").select("provider_id").eq("user_id", userId),
+  ]);
+  const bizIds = [...new Set([...(owned ?? []).map((p) => String(p.id)), ...(memberOf ?? []).map((m) => String(m.provider_id))])];
+  if (!bizIds.length) return allowed;
+
+  const { data: biz } = await db().from("providers").select("id,admin_user_id,source_service_key,source_provider_id").in("id", bizIds);
+  const add = (rows: Array<Record<string, unknown>> | null | undefined, col = "user_id") =>
+    (rows ?? []).forEach((r) => { const id = String(r[col] ?? ""); if (ids.includes(id)) allowed.add(id); });
+  (biz ?? []).forEach((p) => add([p as Record<string, unknown>], "admin_user_id"));
+
+  const foodIds = (biz ?? []).filter((p) => p.source_service_key === "food" && p.source_provider_id).map((p) => String(p.source_provider_id));
+  const cleaningIds = (biz ?? []).filter((p) => p.source_service_key === "cleaning" && p.source_provider_id).map((p) => String(p.source_provider_id));
+
+  const reads: Array<PromiseLike<void>> = [
+    db().from("provider_members").select("user_id").in("provider_id", bizIds).in("user_id", ids).then(({ data }) => add(data)),
+    db().from("provider_subscriptions").select("user_id").in("provider_id", bizIds).in("user_id", ids).then(({ data }) => add(data)),
+    db().from("rental_bookings").select("user_id").in("provider_id", bizIds).in("user_id", ids).then(({ data }) => add(data)),
+    db().from("provider_clients").select("user_id").in("provider_id", bizIds).in("user_id", ids).then(({ data }) => add(data)),
+  ];
+  if (foodIds.length) {
+    reads.push(db().from("food_subscriptions").select("user_id").in("provider_id", foodIds).in("user_id", ids).then(({ data }) => add(data)));
+  }
+  if (cleaningIds.length) {
+    reads.push(db().from("cleaning_packages").select("id").in("provider_id", cleaningIds).then(async ({ data: pkgs }) => {
+      const pk = (pkgs ?? []).map((x: { id: unknown }) => String(x.id));
+      if (!pk.length) return;
+      const { data } = await db().from("cleaning_subscriptions").select("user_id").in("package_id", pk).in("user_id", ids);
+      add(data);
+    }));
+  }
+  await Promise.all(reads);
+  return allowed;
+}
+
+/**
+ * Names and emails for a list of ids (or, for an admin, of emails). This is
+ * what the browser uses instead of reading `users`, which is no longer open
+ * to the public key: an admin gets every one asked for; anyone else only the
+ * people allowedPeople() lets them know.
+ */
+providerCustomers.post("/account/people/lookup", async (c) => {
+  const user = await requireAccount(c);
+  const b = await c.req.json().catch(() => ({})) as { ids?: unknown; emails?: unknown };
+  const ids = Array.isArray(b.ids) ? [...new Set(b.ids.map(String).filter((x) => UUID_RE.test(x)))].slice(0, 1000) : [];
+  // As typed AND lower-cased: accounts keep the case they signed up with.
+  const emails = Array.isArray(b.emails)
+    ? [...new Set(b.emails.flatMap((e) => { const t = String(e).trim(); return t ? [t, t.toLowerCase()] : []; }))].slice(0, 400)
+    : [];
+  const admin = await isPlatformAdmin(user);
+  if (emails.length && !admin) throw forbidden("Only a platform admin can look people up by email.");
+
+  const cols = "id,email,name,display_name,avatar_url";
+  const out: Array<Record<string, unknown>> = [];
+  if (ids.length) {
+    const visible = admin ? ids : [...await allowedPeople(user.id, ids)];
+    if (visible.length) {
+      const { data, error } = await db().from("users").select(cols).in("id", visible);
+      if (error) throw new HttpError(503, "Could not read the names.");
+      out.push(...(data ?? []));
+    }
+  }
+  if (emails.length) {
+    const { data, error } = await db().from("users").select(cols).in("email", emails);
+    if (error) throw new HttpError(503, "Could not read the names.");
+    out.push(...(data ?? []));
+  }
+  return c.json({ people: out });
+});
+
+/** The caller's own account id (the uuid, never a "google-…" token id). */
+providerCustomers.get("/account/me/uuid", async (c) => {
+  const user = await requireAccount(c);
+  return c.json({ id: UUID_RE.test(user.id) ? user.id : null });
 });
