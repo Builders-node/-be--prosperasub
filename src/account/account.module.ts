@@ -13,6 +13,7 @@ import { AccountCleaningService } from "./account-cleaning.service";
 import { AccountLocationsService } from "./account-locations.service";
 import { AccountRenewalsService } from "./account-renewals.service";
 import { AccountCancellationService } from "./account-cancellation.service";
+import { AccountPauseService } from "./account-pause.service";
 import { ProviderPayoutsService } from "./provider-payouts.service";
 import { ProviderEarningsService } from "./provider-earnings.service";
 import { OccurrencesService } from "./occurrences.service";
@@ -38,6 +39,7 @@ import { RemindersController } from "./reminders.controller";
     AccountLocationsService,
     AccountRenewalsService,
     AccountCancellationService,
+    AccountPauseService,
     ProviderPayoutsService,
     ProviderEarningsService,
     OccurrencesService,
