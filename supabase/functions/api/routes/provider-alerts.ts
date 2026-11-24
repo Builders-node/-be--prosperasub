@@ -8,7 +8,6 @@ import { notifyUser } from "../lib/notify.ts";
 import {
   appUrl, providerAudience, superAdminIds, tellProvider, universalProviderId, usd,
 } from "../lib/providerAudience.ts";
-import { isAllowedOrigin } from "../lib/cors.ts";
 import { createOwnerInvite } from "./owner-invites.ts";
 
 /**
@@ -189,7 +188,8 @@ providerAlerts.post("/admin/provider-applications/:id/decision", async (c) => {
   if (app.status !== "approved" && app.status !== "rejected") throw badRequest("The application has no decision yet.");
 
   const name = String(app.business_name ?? "your business");
-  const origin = isAllowedOrigin(c.req.header("origin")) ? c.req.header("origin")! : appUrl();
+  // Emailed links always go to the live site, even when sent from dev.
+  const origin = appUrl();
   let link: string | null = null;
   let ownerSet = false;
 

@@ -1,6 +1,5 @@
 import { Hono } from "hono";
 import { requireAccount } from "../lib/auth.ts";
-import { isAllowedOrigin } from "../lib/cors.ts";
 import { db } from "../lib/db.ts";
 import { badRequest, forbidden, HttpError, notFound } from "../lib/http.ts";
 import { escapeHtml, sendMail } from "../lib/mail.ts";
@@ -160,7 +159,8 @@ providerGrowth.post("/account/providers/:id/team-invites", async (c) => {
 
   const audience = await providerAudience(providerId);
   const bizName = audience?.name ?? "a business";
-  const origin = isAllowedOrigin(c.req.header("origin")) ? c.req.header("origin")! : appUrl();
+  // Emailed links always go to the live site, even when sent from dev.
+  const origin = appUrl();
 
   // Someone with an account joins at once — and is told so. Emails are stored
   // in whatever case the person typed at sign-up, so match without case.

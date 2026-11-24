@@ -1,11 +1,10 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { requireAccount } from "../lib/auth.ts";
-import { isAllowedOrigin } from "../lib/cors.ts";
 import { db } from "../lib/db.ts";
 import { forbidden, HttpError, notFound } from "../lib/http.ts";
 import { escapeHtml, sendMail } from "../lib/mail.ts";
-import { providerAudience, tellProvider } from "../lib/providerAudience.ts";
+import { appUrl, providerAudience, tellProvider } from "../lib/providerAudience.ts";
 
 /**
  * Hand a business to its owner with a link.
@@ -49,10 +48,12 @@ async function readProvider(id: string) {
   return data as { id: string; name: string; admin_user_id: string | null };
 }
 
-/** The link points back at the site the admin is using (dev or prod). */
-function siteOrigin(c: Context): string {
-  const origin = c.req.header("origin");
-  return isAllowedOrigin(origin) ? origin : "https://everysub.net";
+/**
+ * Emailed links always go to the live site. They used to follow the admin's
+ * own origin, so an invite made from dev sent a real person to dev.
+ */
+function siteOrigin(_c: Context): string {
+  return appUrl();
 }
 
 const nowIso = () => new Date().toISOString();
