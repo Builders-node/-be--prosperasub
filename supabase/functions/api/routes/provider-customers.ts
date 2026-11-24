@@ -209,3 +209,59 @@ providerCustomers.post("/account/providers/:id/reviews/:reviewId/reply", async (
   return c.json({ ok: true });
 });
 
+
+// ── People a caller may pick from ────────────────────────────────────────────
+
+/**
+ * Who a person picker may show — the only place the browser gets a list of
+ * people with their emails.
+ *
+ * A platform admin sees everyone. Anyone else must name a business they run,
+ * and sees only the people who have bought from IT (any order row in its
+ * tables, or a client it brought itself). The picker used to read the whole
+ * `users` table into the browser of whoever opened it — every business saw
+ * every account on the platform with its email.
+ */
+providerCustomers.get("/account/people", async (c) => {
+  const user = await requireAccount(c);
+  const providerId = c.req.query("providerId") ?? "";
+  const admin = isSuperAdmin(user.roles);
+  if (!admin) {
+    if (!providerId) throw forbidden("Only a platform admin can list people.");
+    await assertRuns(user.id, providerId, user.roles);
+  }
+
+  let ids: string[] | null = null; // null = everyone (admin)
+  if (!admin) {
+    const { data: p } = await db().from("providers").select("source_service_key,source_provider_id").eq("id", providerId).maybeSingle();
+    const found = new Set<string>();
+    const add = (rows: Array<{ user_id?: unknown }> | null | undefined) =>
+      (rows ?? []).forEach((r) => { const id = String(r.user_id ?? ""); if (UUID_RE.test(id)) found.add(id); });
+    const reads: Array<PromiseLike<void>> = [
+      db().from("provider_subscriptions").select("user_id").eq("provider_id", providerId).limit(5000).then(({ data }) => add(data)),
+      db().from("rental_bookings").select("user_id").eq("provider_id", providerId).limit(5000).then(({ data }) => add(data)),
+      db().from("provider_clients").select("user_id").eq("provider_id", providerId).limit(5000).then(({ data }) => add(data)),
+    ];
+    const legacy = p?.source_provider_id ? String(p.source_provider_id) : null;
+    if (legacy && p?.source_service_key === "food") {
+      reads.push(db().from("food_subscriptions").select("user_id").eq("provider_id", legacy).limit(5000).then(({ data }) => add(data)));
+    }
+    if (legacy && p?.source_service_key === "cleaning") {
+      reads.push(db().from("cleaning_packages").select("id").eq("provider_id", legacy).then(async ({ data: pkgs }) => {
+        const pk = (pkgs ?? []).map((x: { id: unknown }) => String(x.id));
+        if (!pk.length) return;
+        const { data } = await db().from("cleaning_subscriptions").select("user_id").in("package_id", pk).limit(5000);
+        add(data);
+      }));
+    }
+    await Promise.all(reads);
+    ids = [...found];
+    if (!ids.length) return c.json({ people: [] });
+  }
+
+  let q = db().from("users").select("id,email,name,display_name").is("deleted_at", null).order("email", { ascending: true }).limit(5000);
+  if (ids) q = q.in("id", ids.slice(0, 1000));
+  const { data, error } = await q;
+  if (error) throw new HttpError(503, "Could not read the list.");
+  return c.json({ people: data ?? [] });
+});
