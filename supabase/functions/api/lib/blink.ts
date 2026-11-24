@@ -112,6 +112,34 @@ export async function sendPayout(input: {
   const amount = unit === "sat" ? await satsForCents(cents) : cents;
 
   let result: { status?: string; errors?: Array<{ message?: string }> } | undefined;
+  // A Lightning address ON Blink (name@blink.sv) is another Blink account.
+  // Blink refuses to pay its own users over LNURL ("LNURL service unreachable
+  // or not allowed"), so it is paid inside Blink instead: the user's default
+  // wallet in the same currency we pay from, by username. Same units rule —
+  // intraLedgerUsdPaymentSend takes CENTS, intraLedgerPaymentSend SATS.
+  const blinkUser = ln ? blinkUsername(input.destination.value) : null;
+  if (blinkUser) {
+    const currency = from === "btc" ? "BTC" : "USD";
+    const r = await request<{ accountDefaultWallet?: { id?: string } }>(
+      `query($username: Username!, $walletCurrency: WalletCurrency) { accountDefaultWallet(username: $username, walletCurrency: $walletCurrency) { id } }`,
+      { username: blinkUser, walletCurrency: currency },
+    ).catch((e) => { throw new HttpError(503, `No Blink account called "${blinkUser}" — check the address. (${(e as Error).message})`); });
+    const recipientWalletId = r.accountDefaultWallet?.id;
+    if (!recipientWalletId) throw new HttpError(503, `No Blink account called "${blinkUser}" — check the address.`);
+    const intraUnit: "sat" | "cent" = from === "btc" ? "sat" : "cent";
+    const intraAmount = intraUnit === "sat" ? await satsForCents(cents) : cents;
+    const field = from === "btc" ? "intraLedgerPaymentSend" : "intraLedgerUsdPaymentSend";
+    const inputType = from === "btc" ? "IntraLedgerPaymentSendInput" : "IntraLedgerUsdPaymentSendInput";
+    const out = await request<Record<string, typeof result>>(
+      `mutation($input: ${inputType}!) { ${field}(input: $input) { status errors { message } } }`,
+      { input: { walletId, recipientWalletId, amount: intraAmount, memo: input.memo } },
+    );
+    const res = out[field];
+    const err = res?.errors?.find((e) => e.message)?.message ?? null;
+    const st = (res?.status ?? (err ? "FAILURE" : "PENDING")).toUpperCase();
+    const ok = ["SUCCESS", "PENDING", "FAILURE", "ALREADY_PAID"].includes(st);
+    return { status: (ok ? st : "FAILURE") as "SUCCESS", error: err, sentAmount: intraAmount, sentUnit: intraUnit };
+  }
   if (ln) {
     result = (await request<{ lnAddressPaymentSend?: typeof result }>(
       `mutation($input: LnAddressPaymentSendInput!) { lnAddressPaymentSend(input: $input) { status errors { message } } }`,
@@ -132,6 +160,12 @@ export async function sendPayout(input: {
   const status = (result?.status ?? (error ? "FAILURE" : "PENDING")).toUpperCase();
   const known = ["SUCCESS", "PENDING", "FAILURE", "ALREADY_PAID"].includes(status);
   return { status: (known ? status : "FAILURE") as "SUCCESS", error, sentAmount: amount, sentUnit: unit };
+}
+
+/** "name@blink.sv" → "name"; anything not on Blink → null. */
+export function blinkUsername(address: string): string | null {
+  const m = /^([a-z0-9_]{3,50})@(?:pay\.)?blink\.sv$/i.exec(String(address ?? "").trim());
+  return m ? m[1] : null;
 }
 
 // ── Destination (port of payments/payout-destination.ts) ───────────────────────
