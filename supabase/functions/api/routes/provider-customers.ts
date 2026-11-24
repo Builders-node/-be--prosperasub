@@ -363,3 +363,50 @@ providerCustomers.get("/account/me/uuid", async (c) => {
   const user = await requireAccount(c);
   return c.json({ id: UUID_RE.test(user.id) ? user.id : null });
 });
+
+// ── Phones and addresses (user_profiles) ─────────────────────────────────────
+
+/**
+ * What a profile may tell. Never `nwc_connection` — a wallet connection string
+ * spends from the wallet; nothing in the app reads it.
+ */
+const PROFILE_COLS = "id,user_id,phone_number,whatsapp,telegram_username,default_delivery_address,address_street,address_house,address_apartment,address_area,address_notes,created_at,updated_at";
+
+/** The caller's own profile (phone, address). Stored under the uuid or, for old rows, the token id. */
+providerCustomers.get("/account/profile", async (c) => {
+  const user = await requireAccount(c);
+  const keys = [...new Set([user.id, user.sub].filter(Boolean).map(String))];
+  const { data, error } = await db().from("user_profiles").select(PROFILE_COLS).in("user_id", keys).limit(1);
+  if (error) throw new HttpError(503, "Could not read your profile.");
+  return c.json({ profile: data?.[0] ?? null });
+});
+
+/**
+ * Phones and addresses of other people — the same rule as names: an admin
+ * gets everyone (or all, with `all`), anyone else only themselves, their
+ * teams and the customers of the businesses they run.
+ */
+providerCustomers.post("/account/profiles/lookup", async (c) => {
+  const user = await requireAccount(c);
+  const b = await c.req.json().catch(() => ({})) as { userIds?: unknown; all?: unknown };
+  const admin = await isPlatformAdmin(user);
+  if (b.all === true) {
+    if (!admin) throw forbidden("Only a platform admin can list every profile.");
+    const { data, error } = await db().from("user_profiles").select(PROFILE_COLS).order("id").limit(10_000);
+    if (error) throw new HttpError(503, "Could not read the profiles.");
+    return c.json({ profiles: data ?? [] });
+  }
+  const ids = Array.isArray(b.userIds) ? [...new Set(b.userIds.map(String).filter(Boolean))].slice(0, 1000) : [];
+  if (!ids.length) return c.json({ profiles: [] });
+  let visible: string[];
+  if (admin) visible = ids;
+  else {
+    const self = new Set([user.id, user.sub].filter(Boolean).map(String));
+    const allowed = await allowedPeople(user.id, ids.filter((id) => UUID_RE.test(id)));
+    visible = ids.filter((id) => self.has(id) || allowed.has(id));
+  }
+  if (!visible.length) return c.json({ profiles: [] });
+  const { data, error } = await db().from("user_profiles").select(PROFILE_COLS).in("user_id", visible);
+  if (error) throw new HttpError(503, "Could not read the profiles.");
+  return c.json({ profiles: data ?? [] });
+});
