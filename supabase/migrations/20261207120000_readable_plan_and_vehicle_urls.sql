@@ -1,7 +1,7 @@
 -- Plans and cars get addresses made of words, the way big shops do it:
 --
---   /services/clubs/plans/beach-club-membership-1042
---   /vehicles/vehicle/jeep-wrangler-4x4-1007
+--   /plans/beach-club-membership-1042
+--   /cars/jeep-wrangler-4x4-1007
 --
 -- instead of /services/clubs/plans/6d258149-6cf5-43d8-a0ce-fa60fcc8dfa0.
 --
@@ -69,7 +69,7 @@ create trigger provider_plans_fill_slug
   for each row execute function public.fill_slug_from_name('plan');
 
 comment on column public.provider_plans.public_no is
-  'The short number in the plan''s public address (/services/<service>/plans/<slug>-<public_no>). Never changes; the address is looked up by it.';
+  'The short number in the plan''s public address (/plans/<slug>-<public_no>). Never changes; the address is looked up by it.';
 comment on column public.provider_plans.slug is
   'The words in the plan''s public address, made from the name and kept in step with it. Not unique — public_no is.';
 
@@ -89,6 +89,6 @@ create trigger rental_vehicles_fill_slug
   for each row execute function public.fill_slug_from_name('car');
 
 comment on column public.rental_vehicles.public_no is
-  'The short number in the car''s public address (/vehicles/vehicle/<slug>-<public_no>). Never changes; the address is looked up by it.';
+  'The short number in the car''s public address (/cars/<slug>-<public_no>). Never changes; the address is looked up by it.';
 comment on column public.rental_vehicles.slug is
   'The words in the car''s public address, made from the name and kept in step with it. Not unique — public_no is.';
