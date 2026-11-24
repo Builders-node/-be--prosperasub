@@ -81,12 +81,22 @@ function capInterval(i: Interval, n: number): Interval {
   return { unit: i.unit, count };
 }
 
+/**
+ * VAT on a renewal: the order's own stamped rate (providers.vat_pct at purchase)
+ * on the term's base price. Charged on top; the business's money, never a fee —
+ * so it is not written as surcharge. Same rule as lib/checkout/vat on the web.
+ */
+export const vatOnRenewal = (row: { vat_pct?: unknown }, baseCents: number): number => {
+  const pct = Number(row.vat_pct) || 0;
+  return pct > 0 && baseCents > 0 ? Math.round((baseCents * pct) / 100) : 0;
+};
+
 /** The three subscription tables — shared with the wallet renewals (routes/wallet.ts). */
 export const KINDS: Kind[] = [
   {
     key: "provider",
     table: "provider_subscriptions",
-    cols: "id,user_id,plan_id,provider_id,status,payment_status,price_cents,periods_paid,start_date,end_date,source_service_key,promo_code,credit_applied_cents,metadata,paypal_subscription_id,auto_renew",
+    cols: "id,user_id,plan_id,provider_id,status,payment_status,price_cents,periods_paid,start_date,end_date,source_service_key,promo_code,credit_applied_cents,metadata,paypal_subscription_id,auto_renew,vat_pct",
     services: ["beach", "universal"],
     paid: (r) => r.payment_status === "paid",
     term: async (r) => {
@@ -119,7 +129,7 @@ export const KINDS: Kind[] = [
   {
     key: "food",
     table: "food_subscriptions",
-    cols: "id,user_id,meal_plan_id,provider_id,status,payment_status,weekly_price_cents,commitment_weeks,periods_paid,started_at,end_date,promo_code,credit_applied_cents,paypal_subscription_id,auto_renew",
+    cols: "id,user_id,meal_plan_id,provider_id,status,payment_status,weekly_price_cents,commitment_weeks,periods_paid,started_at,end_date,promo_code,credit_applied_cents,paypal_subscription_id,auto_renew,vat_pct",
     services: ["food"],
     paid: (r) => r.payment_status === "paid",
     term: async (r) => {
@@ -149,7 +159,7 @@ export const KINDS: Kind[] = [
   {
     key: "cleaning",
     table: "cleaning_subscriptions",
-    cols: "id,user_id,package_id,subscription_status,payment_status,monthly_price_cents,billing_period_months,total_price_cents,start_date,end_date,promo_code,credit_applied_cents,paypal_subscription_id,auto_renew",
+    cols: "id,user_id,package_id,subscription_status,payment_status,monthly_price_cents,billing_period_months,total_price_cents,start_date,end_date,promo_code,credit_applied_cents,paypal_subscription_id,auto_renew,vat_pct",
     services: ["cleaning"],
     paid: (r) => r.payment_status === "paid",
     term: async (r) => {
@@ -243,7 +253,10 @@ paypalSubscriptions.post("/payments/paypal/subscriptions", async (c) => {
 
   const t = await kind.term(row);
   const pct = await surchargePct();
-  const unitCharged = Math.round(t.unitBaseCents * (1 + pct / 100));
+  // VAT on top of the term's price, then the PayPal fee on the lot — the same
+  // order the checkout page adds them in.
+  const unitWithVat = t.unitBaseCents + vatOnRenewal(row, t.unitBaseCents);
+  const unitCharged = Math.round(unitWithVat * (1 + pct / 100));
   const planId = await ensureBillingPlan({
     providerPlanId: t.providerPlanId, name: t.planName, providerName: t.providerName,
     unitPriceCents: unitCharged, interval: t.interval,
@@ -379,7 +392,8 @@ async function onSaleCompleted(subscriptionId: string, saleId: string, amountCen
     new_start: r.newStart,
     new_end: r.newEnd,
     amount_cents: base,
-    surcharge_cents: Math.max(0, amountCents - base),
+    // VAT is the business's (recomputed from the order's rate), not a fee.
+    surcharge_cents: Math.max(0, amountCents - base - vatOnRenewal(row, base)),
     payment_method: "paypal",
     payment_reference: saleId,
     idempotency_key: await uuidFrom(`paypal-sale:${saleId}`),

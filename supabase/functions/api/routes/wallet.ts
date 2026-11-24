@@ -6,7 +6,7 @@ import { notifyUser } from "../lib/notify.ts";
 import { sendMail, escapeHtml } from "../lib/mail.ts";
 import { uuidFrom } from "../lib/paypal.ts";
 import { referenceAlreadyUsed, verifyPayment } from "../lib/paymentCheck.ts";
-import { KINDS, addDays, load, owns, planByIdOrSource, today, type Kind, type Row } from "./paypal-subscriptions.ts";
+import { KINDS, addDays, load, owns, planByIdOrSource, today, vatOnRenewal, type Kind, type Row } from "./paypal-subscriptions.ts";
 
 /**
  * The wallet — a prepaid balance, and automatic renewal from it (migration
@@ -125,7 +125,8 @@ async function renewable(user: AuthUser) {
         id: row.id,
         planName: plan?.name ?? "Subscription",
         endDate: row.end_date ?? null,
-        priceCents: kind.baseOfRenewal(row),
+        // What the balance will be charged: the price plus the order's VAT.
+        priceCents: kind.baseOfRenewal(row) + vatOnRenewal(row, kind.baseOfRenewal(row)),
         autoRenew: !!row.auto_renew,
         viaPayPal: !!row.paypal_subscription_id && !!row.auto_renew,
       });
@@ -245,8 +246,10 @@ wallet.post("/cron/wallet-renewals", async (c) => {
         if (isOneTime(row, plan) || !plan) { result.skipped++; continue; }
 
         const r = kind.renewal(row);
-        const price = kind.baseOfRenewal(row);
-        if (!(price > 0)) { result.skipped++; continue; }
+        const base = kind.baseOfRenewal(row);
+        if (!(base > 0)) { result.skipped++; continue; }
+        // The balance pays the price plus the order's VAT (the business's).
+        const price = base + vatOnRenewal(row, base);
         const reference = `${kind.table}:${row.id}:${r.newStart}`;
 
         const { data: after, error: spendErr } = await db().rpc("wallet_spend", {
@@ -266,7 +269,7 @@ wallet.post("/cron/wallet-renewals", async (c) => {
           previous_end: r.previousEnd,
           new_start: r.newStart,
           new_end: r.newEnd,
-          amount_cents: price,
+          amount_cents: base,
           surcharge_cents: 0,
           payment_method: "balance",
           payment_reference: reference,
