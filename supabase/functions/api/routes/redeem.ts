@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { jwtVerify } from "jose";
 import { requireAccount } from "../lib/auth.ts";
 import { db } from "../lib/db.ts";
 import { badRequest, forbidden, HttpError, notFound } from "../lib/http.ts";
@@ -125,13 +126,13 @@ redeem.get("/redeem/:providerId", async (c) => {
   return c.json({ business: { id: provider.id, name: provider.name, avatar: provider.avatar_url }, day: today(), subscriptions });
 });
 
-/** Get one item. The server re-reads what is left; the button is only a request. */
-redeem.post("/redeem/:providerId", async (c) => {
-  const user = await requireAccount(c);
-  if (!UUID_RE.test(user.id)) throw new HttpError(409, "Your account isn't fully set up yet — sign out and in again.");
-  const provider = await readProvider(c.req.param("providerId"));
-  const b = await c.req.json().catch(() => ({})) as { table?: string; subscriptionId?: string; itemKey?: string };
-  const subs = await whatTheyHave(user.id, provider);
+/**
+ * Record one collection — the one path for both the customer's own Get and the
+ * till (PIN). Re-reads what is left; the button is only a request.
+ */
+async function collect(provider: Awaited<ReturnType<typeof readProvider>>, userId: string,
+  b: { table?: string; subscriptionId?: string; itemKey?: string }, method: "customer" | "pin") {
+  const subs = await whatTheyHave(userId, provider);
   const sub = subs.find((s) => s.table === b.table && s.id === String(b.subscriptionId ?? ""));
   if (!sub) throw notFound("That subscription isn't active at this business.");
   const item = sub.items.find((i) => i.key === b.itemKey);
@@ -143,15 +144,15 @@ redeem.post("/redeem/:providerId", async (c) => {
   if (occurrenceId) {
     // Compare-and-set: two presses cannot both collect the same meal.
     const { data: flipped, error } = await db().from("service_occurrences")
-      .update({ status: "done", updated_at: new Date().toISOString(), completion: { collected_at: new Date().toISOString(), via: "till_qr" } })
+      .update({ status: "done", updated_at: new Date().toISOString(), completion: { collected_at: new Date().toISOString(), via: method === "pin" ? "till_pin" : "till_qr" } })
       .eq("id", occurrenceId).eq("status", "scheduled").select("id");
     if (error) throw new HttpError(503, "Could not record it.");
     if (!flipped?.length) throw new HttpError(409, "Already collected.");
   }
   const { data: row, error } = await db().from("redemptions").insert({
-    provider_id: provider.id, user_id: user.id, subscription_table: sub.table, subscription_id: sub.id,
+    provider_id: provider.id, user_id: userId, subscription_table: sub.table, subscription_id: sub.id,
     plan_name: sub.planName, item_key: occurrenceId ? `occ:${occurrenceId}` : item.key, item_label: item.label,
-    occurrence_id: occurrenceId, method: "customer", day,
+    occurrence_id: occurrenceId, method, day,
   }).select("id,created_at").single();
   if (error) {
     if (occurrenceId) await db().from("service_occurrences").update({ status: "scheduled" }).eq("id", occurrenceId);
@@ -161,16 +162,25 @@ redeem.post("/redeem/:providerId", async (c) => {
 
   // The business hears about it in the app (no email for every coffee).
   const audience = await providerAudience(provider.id);
+  const { data: me } = await db().from("users").select("name,display_name").eq("id", userId).maybeSingle();
+  const who = me?.display_name || me?.name || "A customer";
   if (audience) {
-    const { data: me } = await db().from("users").select("name,display_name,email").eq("id", user.id).maybeSingle();
-    const who = me?.display_name || me?.name || "A customer";
     await tellProvider(audience, {
       type: "provider_redemption", title: `${who} collected ${item.label}`,
-      body: `${sub.planName} — at the till.`, email: false,
+      body: `${sub.planName} — ${method === "pin" ? "recorded at the till" : "at the till"}.`, email: false,
       relatedEntityType: "redemption", relatedEntityId: String(row.id),
     }).catch(() => undefined);
   }
-  return c.json({ ok: true, id: row.id, at: row.created_at, label: item.label, planName: sub.planName, business: provider.name }, 201);
+  return { ok: true, id: row.id, at: row.created_at, label: item.label, planName: sub.planName, business: provider.name, customer: who };
+}
+
+/** The customer's own Get, after scanning the till QR. */
+redeem.post("/redeem/:providerId", async (c) => {
+  const user = await requireAccount(c);
+  if (!UUID_RE.test(user.id)) throw new HttpError(409, "Your account isn't fully set up yet — sign out and in again.");
+  const provider = await readProvider(c.req.param("providerId"));
+  const b = await c.req.json().catch(() => ({})) as { table?: string; subscriptionId?: string; itemKey?: string };
+  return c.json(await collect(provider, user.id, b, "customer"), 201);
 });
 
 // ── The business's side ──────────────────────────────────────────────────────
@@ -222,4 +232,155 @@ redeem.post("/account/providers/:id/redemptions/:rid/void", async (c) => {
   const occ = data[0].occurrence_id;
   if (occ) await db().from("service_occurrences").update({ status: "scheduled", updated_at: new Date().toISOString() }).eq("id", occ).eq("status", "done");
   return c.json({ ok: true });
+});
+
+
+// ── The till: staff scan the customer's QR and enter the business PIN ───────
+
+const PIN_RE = /^\d{4,6}$/;
+const MAX_TRIES = 5;
+const LOCK_MS = 15 * 60_000;
+
+function verifySecret(): Uint8Array {
+  const s = Deno.env.get("JWT_VERIFY_SECRET");
+  if (!s || s.length < 32) throw new HttpError(503, "Verification is not configured");
+  return new TextEncoder().encode(s);
+}
+
+const hex = (buf: ArrayBuffer) => Array.from(new Uint8Array(buf)).map((x) => x.toString(16).padStart(2, "0")).join("");
+
+/** PBKDF2-SHA256, 100k rounds, per-business salt. */
+async function hashPin(pin: string, salt: string): Promise<string> {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(pin), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", hash: "SHA-256", salt: new TextEncoder().encode(salt), iterations: 100_000 }, key, 256);
+  return hex(bits);
+}
+
+/** Constant-time string compare. */
+function same(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let d = 0;
+  for (let i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return d === 0;
+}
+
+/**
+ * The customer's subscription QR (the same signed token /verify reads) →
+ * who they are, which business that subscription is with, and that one
+ * subscription as it stands today. A token without a subscription in it (the
+ * old account-wide code) is refused: the till must know which business.
+ */
+async function fromCustomerQr(token: unknown) {
+  if (typeof token !== "string" || !token) throw badRequest("Scan the customer's code again.");
+  let userId: string; let sid: string;
+  try {
+    const { payload } = await jwtVerify(token, verifySecret(), { algorithms: ["HS256"] });
+    if (payload.typ !== "verify" || !payload.sub) throw new Error("typ");
+    if (typeof payload.sid !== "string" || !payload.sid) {
+      throw new HttpError(409, "Ask the customer to open the subscription itself and show its QR.");
+    }
+    userId = String(payload.sub); sid = payload.sid;
+  } catch (e) {
+    if (e instanceof HttpError) throw e;
+    throw new HttpError(409, "This code has expired — ask the customer to show it again.");
+  }
+  if (!UUID_RE.test(userId)) throw notFound("Customer not found.");
+
+  // Which business: the subscription row names it (food by its legacy id).
+  let providerId: string | null = null;
+  const { data: ps } = UUID_RE.test(sid)
+    ? await db().from("provider_subscriptions").select("provider_id,user_id").eq("id", sid).maybeSingle()
+    : { data: null };
+  if (ps?.provider_id && String(ps.user_id) === userId) providerId = String(ps.provider_id);
+  if (!providerId && UUID_RE.test(sid)) {
+    const { data: fs } = await db().from("food_subscriptions").select("provider_id,user_id").eq("id", sid).maybeSingle();
+    if (fs?.provider_id && String(fs.user_id) === userId) {
+      const { data: p } = await db().from("providers").select("id")
+        .eq("source_service_key", "food").eq("source_provider_id", String(fs.provider_id)).maybeSingle();
+      providerId = p?.id ? String(p.id) : null;
+    }
+  }
+  if (!providerId) throw new HttpError(409, "This subscription can't be collected at a till.");
+  const provider = await readProvider(providerId);
+  const sub = (await whatTheyHave(userId, provider)).find((s) => s.id === sid) ?? null;
+  const { data: u } = await db().from("users").select("name,display_name").eq("id", userId).maybeSingle();
+  const { data: pin } = await db().from("provider_till_pins").select("provider_id").eq("provider_id", provider.id).maybeSingle();
+  return { userId, provider, sub, customer: (u?.display_name || u?.name || "Customer") as string, hasPin: !!pin };
+}
+
+/** Staff scanned a customer's QR: who, which business, what is available today. No sign-in. */
+redeem.post("/till/lookup", async (c) => {
+  const b = await c.req.json().catch(() => ({})) as { token?: unknown };
+  const r = await fromCustomerQr(b.token);
+  return c.json({
+    business: { id: r.provider.id, name: r.provider.name },
+    customer: r.customer,
+    hasPin: r.hasPin,
+    subscription: r.sub,
+    reason: r.sub ? null : "This subscription isn't active.",
+  });
+});
+
+/** Staff press Get and type the business PIN. Five wrong PINs lock the till for 15 minutes. */
+redeem.post("/till/redeem", async (c) => {
+  const b = await c.req.json().catch(() => ({})) as { token?: unknown; itemKey?: unknown; pin?: unknown };
+  const r = await fromCustomerQr(b.token);
+  if (!r.sub) throw new HttpError(409, "This subscription isn't active.");
+  const pin = String(b.pin ?? "").trim();
+  if (!PIN_RE.test(pin)) throw badRequest("The PIN is 4 to 6 digits.");
+
+  const { data: row } = await db().from("provider_till_pins")
+    .select("pin_hash,salt,failed_count,locked_until").eq("provider_id", r.provider.id).maybeSingle();
+  if (!row) throw new HttpError(409, "This business hasn't set a till PIN yet — the owner sets it in the workspace.");
+  if (row.locked_until && Date.parse(row.locked_until) > Date.now()) {
+    const mins = Math.ceil((Date.parse(row.locked_until) - Date.now()) / 60_000);
+    throw new HttpError(429, `Too many wrong PINs — try again in ${mins} min.`);
+  }
+  if (!same(await hashPin(pin, String(row.salt)), String(row.pin_hash))) {
+    const fails = (Number(row.failed_count) || 0) + 1;
+    await db().from("provider_till_pins").update({
+      failed_count: fails >= MAX_TRIES ? 0 : fails,
+      locked_until: fails >= MAX_TRIES ? new Date(Date.now() + LOCK_MS).toISOString() : null,
+    }).eq("provider_id", r.provider.id);
+    throw new HttpError(403, fails >= MAX_TRIES ? "Too many wrong PINs — the till is locked for 15 minutes." : `Wrong PIN. ${MAX_TRIES - fails} tries left.`);
+  }
+  if (Number(row.failed_count) > 0) {
+    await db().from("provider_till_pins").update({ failed_count: 0, locked_until: null }).eq("provider_id", r.provider.id);
+  }
+  return c.json(await collect(r.provider, r.userId, { table: r.sub.table, subscriptionId: r.sub.id, itemKey: String(b.itemKey ?? "") }, "pin"), 201);
+});
+
+/** Whether the till PIN is set (never the PIN). The team may know; only the owner changes it. */
+redeem.get("/account/providers/:id/till-pin", async (c) => {
+  const user = await requireAccount(c);
+  const providerId = c.req.param("id");
+  await assertRuns(user.id, providerId, user.roles);
+  const { data } = await db().from("provider_till_pins").select("updated_at").eq("provider_id", providerId).maybeSingle();
+  return c.json({ set: !!data, updatedAt: data?.updated_at ?? null });
+});
+
+/** Set or change the till PIN — owner or admin. */
+redeem.put("/account/providers/:id/till-pin", async (c) => {
+  const user = await requireAccount(c);
+  const providerId = c.req.param("id");
+  if (!UUID_RE.test(providerId)) throw notFound("Business not found.");
+  if (!isSuperAdmin(user.roles)) {
+    const { data: p } = await db().from("providers").select("admin_user_id").eq("id", providerId).maybeSingle();
+    if (!p) throw notFound("Business not found.");
+    if (String(p.admin_user_id ?? "") !== String(user.id)) throw forbidden("Only the owner can change the till PIN.");
+  }
+  const b = await c.req.json().catch(() => ({})) as { pin?: unknown };
+  const pin = String(b.pin ?? "").trim();
+  if (!PIN_RE.test(pin)) throw badRequest("The PIN is 4 to 6 digits.");
+  if (/^(\d)\1+$/.test(pin) || "0123456789".includes(pin) || "9876543210".includes(pin)) {
+    throw badRequest("Pick a PIN that's harder to guess than 1111 or 1234.");
+  }
+  const salt = hex(crypto.getRandomValues(new Uint8Array(16)).buffer);
+  const { error } = await db().from("provider_till_pins").upsert({
+    provider_id: providerId, pin_hash: await hashPin(pin, salt), salt,
+    failed_count: 0, locked_until: null, updated_by: UUID_RE.test(user.id) ? user.id : null, updated_at: new Date().toISOString(),
+  }, { onConflict: "provider_id" });
+  if (error) throw new HttpError(503, /provider_till_pins/.test(error.message) ? "The till PIN isn't switched on yet." : "Could not save the PIN.");
+  return c.json({ set: true });
 });
