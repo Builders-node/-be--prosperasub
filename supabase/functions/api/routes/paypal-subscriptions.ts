@@ -96,7 +96,7 @@ export const KINDS: Kind[] = [
   {
     key: "provider",
     table: "provider_subscriptions",
-    cols: "id,user_id,plan_id,provider_id,status,payment_status,price_cents,periods_paid,start_date,end_date,source_service_key,promo_code,credit_applied_cents,metadata,paypal_subscription_id,auto_renew,vat_pct",
+    cols: "id,user_id,plan_id,provider_id,status,payment_status,price_cents,periods_paid,start_date,end_date,source_service_key,promo_code,offer_discount_cents,credit_applied_cents,metadata,paypal_subscription_id,auto_renew,vat_pct",
     services: ["beach", "universal"],
     paid: (r) => r.payment_status === "paid",
     term: async (r) => {
@@ -129,7 +129,7 @@ export const KINDS: Kind[] = [
   {
     key: "food",
     table: "food_subscriptions",
-    cols: "id,user_id,meal_plan_id,provider_id,status,payment_status,weekly_price_cents,commitment_weeks,periods_paid,started_at,end_date,promo_code,credit_applied_cents,paypal_subscription_id,auto_renew,vat_pct",
+    cols: "id,user_id,meal_plan_id,provider_id,status,payment_status,weekly_price_cents,commitment_weeks,periods_paid,started_at,end_date,promo_code,offer_discount_cents,credit_applied_cents,paypal_subscription_id,auto_renew,vat_pct",
     services: ["food"],
     paid: (r) => r.payment_status === "paid",
     term: async (r) => {
@@ -159,7 +159,7 @@ export const KINDS: Kind[] = [
   {
     key: "cleaning",
     table: "cleaning_subscriptions",
-    cols: "id,user_id,package_id,subscription_status,payment_status,monthly_price_cents,billing_period_months,total_price_cents,start_date,end_date,promo_code,credit_applied_cents,paypal_subscription_id,auto_renew,vat_pct",
+    cols: "id,user_id,package_id,subscription_status,payment_status,monthly_price_cents,billing_period_months,total_price_cents,start_date,end_date,promo_code,offer_discount_cents,credit_applied_cents,paypal_subscription_id,auto_renew,vat_pct",
     services: ["cleaning"],
     paid: (r) => r.payment_status === "paid",
     term: async (r) => {
@@ -257,9 +257,17 @@ paypalSubscriptions.post("/payments/paypal/subscriptions", async (c) => {
   // order the checkout page adds them in.
   const unitWithVat = t.unitBaseCents + vatOnRenewal(row, t.unitBaseCents);
   const unitCharged = Math.round(unitWithVat * (1 + pct / 100));
+  // An automatic discount (provider_discounts) makes the FIRST term cheaper and
+  // only that one: PayPal bills it as a one-cycle trial, then the list price.
+  // The figure was checked by the database when the row was written.
+  const discount = Math.max(0, Number(row.offer_discount_cents) || 0);
+  const trialBase = discount > 0 ? Math.max(1, Math.round((t.unitBaseCents * t.quantity - discount) / t.quantity)) : 0;
+  const trialCharged = discount > 0
+    ? Math.round((trialBase + vatOnRenewal(row, trialBase)) * (1 + pct / 100))
+    : null;
   const planId = await ensureBillingPlan({
     providerPlanId: t.providerPlanId, name: t.planName, providerName: t.providerName,
-    unitPriceCents: unitCharged, interval: t.interval,
+    unitPriceCents: unitCharged, interval: t.interval, trialPriceCents: trialCharged,
   });
   const sub = await paypal<{ id: string }>("/v1/billing/subscriptions", {
     method: "POST",
@@ -271,7 +279,7 @@ paypalSubscriptions.post("/payments/paypal/subscriptions", async (c) => {
     },
   });
   await db().from(kind.table).update({ paypal_subscription_id: sub.id, payment_method: "paypal", updated_at: new Date().toISOString() }).eq("id", row.id);
-  return c.json({ id: sub.id, amount_cents: unitCharged * t.quantity }, 201);
+  return c.json({ id: sub.id, amount_cents: (trialCharged ?? unitCharged) * t.quantity, renews_at_cents: unitCharged * t.quantity }, 201);
 });
 
 /** custom_id is "<kind>:<row id>"; rows created before kinds existed carry the bare id. */

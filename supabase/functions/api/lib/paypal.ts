@@ -104,7 +104,14 @@ export async function ensureBillingPlan(input: {
   providerName: string | null;
   unitPriceCents: number;
   interval: { unit: "WEEK" | "MONTH" | "YEAR"; count: number };
+  /**
+   * A cheaper FIRST cycle (an intro or a sale on the first term): the plan gets
+   * a one-cycle TRIAL at this price before the regular cycles. Absent = none.
+   */
+  trialPriceCents?: number | null;
 }): Promise<string> {
+  const trial = input.trialPriceCents && input.trialPriceCents > 0 && input.trialPriceCents < input.unitPriceCents
+    ? input.trialPriceCents : null;
   const { env } = paypalConfig();
   const { data: existing } = await db()
     .from("paypal_billing_plans")
@@ -115,6 +122,7 @@ export async function ensureBillingPlan(input: {
     .eq("currency", "USD")
     .eq("interval_unit", input.interval.unit)
     .eq("interval_count", input.interval.count)
+    .filter("trial_price_cents", trial ? "eq" : "is", trial ?? null)
     .maybeSingle();
   if (existing?.paypal_plan_id) return existing.paypal_plan_id as string;
 
@@ -126,15 +134,21 @@ export async function ensureBillingPlan(input: {
   });
   const plan = await paypal<{ id: string }>("/v1/billing/plans", {
     method: "POST",
-    requestId: `plan-${input.providerPlanId}-${env}-${input.unitPriceCents}-${input.interval.unit}${input.interval.count}`,
+    requestId: `plan-${input.providerPlanId}-${env}-${input.unitPriceCents}-${input.interval.unit}${input.interval.count}${trial ? `-t${trial}` : ""}`,
     body: {
       product_id: product.id,
       name: label || "EverySub membership",
       status: "ACTIVE",
-      billing_cycles: [{
+      billing_cycles: [...(trial ? [{
+        frequency: { interval_unit: input.interval.unit, interval_count: input.interval.count },
+        tenure_type: "TRIAL",
+        sequence: 1,
+        total_cycles: 1,
+        pricing_scheme: { fixed_price: { value: usd(trial), currency_code: "USD" } },
+      }] : []), {
         frequency: { interval_unit: input.interval.unit, interval_count: input.interval.count },
         tenure_type: "REGULAR",
-        sequence: 1,
+        sequence: trial ? 2 : 1,
         total_cycles: 0, // until cancelled
         pricing_scheme: { fixed_price: { value: usd(input.unitPriceCents), currency_code: "USD" } },
       }],
@@ -153,6 +167,7 @@ export async function ensureBillingPlan(input: {
     currency: "USD",
     interval_unit: input.interval.unit,
     interval_count: input.interval.count,
+    trial_price_cents: trial,
     paypal_product_id: product.id,
     paypal_plan_id: plan.id,
   });
@@ -160,7 +175,8 @@ export async function ensureBillingPlan(input: {
     // Lost a race to a concurrent checkout: use the winner's plan.
     const { data: winner } = await db().from("paypal_billing_plans").select("paypal_plan_id")
       .eq("provider_plan_id", input.providerPlanId).eq("env", env).eq("unit_price_cents", input.unitPriceCents)
-      .eq("interval_unit", input.interval.unit).eq("interval_count", input.interval.count).maybeSingle();
+      .eq("interval_unit", input.interval.unit).eq("interval_count", input.interval.count)
+      .filter("trial_price_cents", trial ? "eq" : "is", trial ?? null).maybeSingle();
     if (winner?.paypal_plan_id) return winner.paypal_plan_id as string;
     throw new HttpError(503, "Could not save the PayPal plan.");
   }
