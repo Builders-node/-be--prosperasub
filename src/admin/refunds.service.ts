@@ -41,12 +41,12 @@ const ORDER_SHAPES: Record<RefundableTable, {
   statusPatch: Record<string, unknown>;
 }> = {
   provider_subscriptions: {
-    select: "id,user_id,price_cents,surcharge_cents,payment_status,payment_method,payment_reference",
+    select: "id,user_id,price_cents,surcharge_cents,payment_status,payment_method,payment_reference,promo_discount_cents,offer_discount_cents",
     paidCents: (r) => Number(r.price_cents) || 0,
     statusPatch: { status: "cancelled" },
   },
   food_subscriptions: {
-    select: "id,user_id,weekly_price_cents,commitment_weeks,periods_paid,payment_status,payment_method,payment_reference",
+    select: "id,user_id,weekly_price_cents,commitment_weeks,periods_paid,payment_status,payment_method,payment_reference,promo_discount_cents,offer_discount_cents",
     paidCents: (r) =>
       (Number(r.weekly_price_cents) || 0) *
       Math.max(Number(r.commitment_weeks) || 1, 1) *
@@ -54,12 +54,12 @@ const ORDER_SHAPES: Record<RefundableTable, {
     statusPatch: { status: "cancelled" },
   },
   cleaning_subscriptions: {
-    select: "id,user_id,total_price_cents,monthly_price_cents,payment_status,payment_method,payment_reference",
+    select: "id,user_id,total_price_cents,monthly_price_cents,payment_status,payment_method,payment_reference,promo_discount_cents,offer_discount_cents",
     paidCents: (r) => Number(r.total_price_cents) || Number(r.monthly_price_cents) || 0,
     statusPatch: { subscription_status: "cancelled", is_active: false },
   },
   rental_bookings: {
-    select: "id,user_id,total_cents,payment_status,payment_method,payment_reference",
+    select: "id,user_id,total_cents,payment_status,payment_method,payment_reference,promo_discount_cents,offer_discount_cents",
     paidCents: (r) => Number(r.total_cents) || 0,
     statusPatch: { status: "cancelled" },
   },
@@ -106,7 +106,10 @@ export class RefundsService {
       throw new BadRequestException("Only a paid order can be refunded.");
     }
 
-    const paid = shape.paidCents(order);
+    // What the customer actually paid for the goods: the list price less a
+    // promo code or the business's own discount.
+    const paid = Math.max(0, shape.paidCents(order)
+      - (Number(order.promo_discount_cents) || 0) - (Number(order.offer_discount_cents) || 0));
     const amount = Math.round(input.amountCents ?? paid);
     if (amount <= 0) throw new BadRequestException("A refund has to be more than nothing.");
     if (amount > paid) {
