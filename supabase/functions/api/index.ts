@@ -26,6 +26,7 @@ import { funnel } from "./routes/funnel.ts";
 import { wallet } from "./routes/wallet.ts";
 import { redeem } from "./routes/redeem.ts";
 import { howItWorks } from "./routes/how-it-works.ts";
+import { discounts } from "./routes/discounts.ts";
 
 /**
  * The Supabase home of what used to be the NestJS API (api.prosperasub.com).
@@ -75,6 +76,7 @@ app.route("/", providerCustomers);
 app.route("/", providerGrowth);
 app.route("/", rentals);
 app.route("/", promotions);
+app.route("/", discounts);
 app.route("/", providerApplications);
 app.route("/", favorites);
 app.route("/", collections);

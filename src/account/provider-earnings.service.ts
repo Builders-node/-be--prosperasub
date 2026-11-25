@@ -51,6 +51,9 @@ interface RevenueSource {
  */
 const ownFee = (r: any): number => (r.delivered_by === "provider" ? Number(r.delivery_fee_cents) || 0 : 0);
 
+/** The business-funded part of an order's discounts (stamped by the database). Comes off its revenue. */
+const ownDiscount = (r: any): number => Math.max(0, Number(r.provider_discount_cents) || 0);
+
 /**
  * VAT on an order: the goods after the promo × the rate the order was bought
  * at (stamped from providers.vat_pct). On top of the price, the business's in
@@ -59,17 +62,17 @@ const ownFee = (r: any): number => (r.delivered_by === "provider" ? Number(r.del
 const vatOf = (goodsCents: number, r: any): number => {
   const pct = Number(r.vat_pct) || 0;
   if (pct <= 0) return 0;
-  const base = Math.max(0, goodsCents - (Number(r.promo_discount_cents) || 0));
+  const base = Math.max(0, goodsCents - (Number(r.promo_discount_cents) || 0) - (Number(r.offer_discount_cents) || 0));
   return Math.round((base * pct) / 100);
 };
 
 const UNIVERSAL_REVENUE: RevenueSource = {
   table: "provider_subscriptions",
-  select: "total_cents:price_cents,delivery_fee_cents,delivered_by,created_at,start_date,end_date,commission_pct,vat_pct,promo_discount_cents",
+  select: "total_cents:price_cents,delivery_fee_cents,delivered_by,created_at,start_date,end_date,commission_pct,vat_pct,promo_discount_cents,offer_discount_cents,provider_discount_cents",
   scope: "universal",
   where: "&payment_status=eq.paid",
   toInput: (r) => ({
-    totalCents: (r.total_cents || 0) + ownFee(r),
+    totalCents: Math.max(0, (r.total_cents || 0) - ownDiscount(r)) + ownFee(r),
     vatCents: vatOf(r.total_cents || 0, r),
     serviceStart: r.start_date || r.created_at,
     serviceEnd: r.end_date,
@@ -82,7 +85,7 @@ const REVENUE_ALIASES: Record<string, string> = { beach_club: "beach", entertain
 const REVENUE_SOURCES: Record<string, RevenueSource> = {
   cleaning: {
     table: "cleaning_subscriptions",
-    select: "total_price_cents,monthly_price_cents,created_at,service_start_date,service_end_date,start_date,end_date,commission_pct,vat_pct,promo_discount_cents",
+    select: "total_price_cents,monthly_price_cents,created_at,service_start_date,service_end_date,start_date,end_date,commission_pct,vat_pct,promo_discount_cents,offer_discount_cents,provider_discount_cents",
     scope: "legacy",
     scopeColumn: "package_id",
     where: "&payment_status=eq.paid&deleted_at=is.null",
@@ -96,7 +99,7 @@ const REVENUE_SOURCES: Record<string, RevenueSource> = {
       const monthly = Number(r.monthly_price_cents || 0);
       const months = monthly > 0 && total >= monthly ? Math.max(1, Math.round(total / monthly)) : 1;
       return {
-        totalCents: total || monthly,
+        totalCents: Math.max(0, (total || monthly) - ownDiscount(r)),
         vatCents: vatOf(total || monthly, r),
         serviceStart: r.service_start_date || r.start_date || r.created_at,
         serviceEnd: r.service_end_date || r.end_date,
@@ -107,13 +110,13 @@ const REVENUE_SOURCES: Record<string, RevenueSource> = {
 
   food: {
     table: "food_subscriptions",
-    select: "weekly_price_cents,commitment_weeks,periods_paid,delivery_fee_cents,delivered_by,created_at,started_at,commission_pct,vat_pct,promo_discount_cents",
+    select: "weekly_price_cents,commitment_weeks,periods_paid,delivery_fee_cents,delivered_by,created_at,started_at,commission_pct,vat_pct,promo_discount_cents,offer_discount_cents,provider_discount_cents",
     scope: "legacy",
     where: "&payment_status=eq.paid&status=in.(active,paused,expired)",
     toInput: (r) => {
       const weeks = (r.commitment_weeks || 1) * (r.periods_paid || 1);
       return {
-        totalCents: (r.weekly_price_cents || 0) * weeks + ownFee(r),
+        totalCents: Math.max(0, (r.weekly_price_cents || 0) * weeks - ownDiscount(r)) + ownFee(r),
         vatCents: vatOf((r.weekly_price_cents || 0) * weeks, r),
         serviceStart: r.started_at || r.created_at,
         serviceEnd: null,
@@ -129,11 +132,11 @@ const REVENUE_SOURCES: Record<string, RevenueSource> = {
 
   vehicles: {
     table: "rental_bookings",
-    select: "total_cents,created_at,start_date,end_date,rental_days,commission_pct",
+    select: "total_cents,created_at,start_date,end_date,rental_days,commission_pct,provider_discount_cents",
     scope: "universal",
     where: "&payment_status=eq.paid&status=neq.cancelled&deleted_at=is.null",
     toInput: (r) => ({
-      totalCents: Number(r.total_cents || 0),
+      totalCents: Math.max(0, Number(r.total_cents || 0) - ownDiscount(r)),
       serviceStart: r.start_date || r.created_at,
       serviceEnd: r.end_date,
       fallbackDays: Math.max(1, Number(r.rental_days) || 1),

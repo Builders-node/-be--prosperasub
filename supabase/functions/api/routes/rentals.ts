@@ -97,6 +97,22 @@ async function booked(vehicleId: string, start: string, end: string, exceptId?: 
 
 // ── Create ───────────────────────────────────────────────────────────────────
 
+/** What the customer pays before the method's fee: the total less the business's discount. */
+const payableOf = (row: { total_cents?: unknown; offer_discount_cents?: unknown }) =>
+  Math.max(0, (Number(row.total_cents) || 0) - (Number(row.offer_discount_cents) || 0));
+
+/** The best automatic discount on this car for this person (database: discount_quote). Never fails a booking. */
+async function offerFor(providerId: string | null, vehicleId: string, userId: string, carCents: number) {
+  if (!providerId || carCents <= 0) return { id: null as string | null, cents: 0, title: null as string | null };
+  const { data, error } = await db().rpc("discount_quote", {
+    p_provider: providerId, p_target: vehicleId, p_parent: null, p_user: userId,
+    p_periods: 1, p_amount_cents: carCents, p_discount_id: null,
+  });
+  const q = data as { ok?: boolean; discount_id?: string; discount_cents?: number; title?: string | null } | null;
+  if (error || !q?.ok || !q.discount_id || !(Number(q.discount_cents) > 0)) return { id: null, cents: 0, title: null };
+  return { id: q.discount_id, cents: Math.round(Number(q.discount_cents)), title: q.title ?? null };
+}
+
 rentals.post("/rentals/bookings", async (c) => {
   const user = await requireAccount(c);
   if (!UUID.test(user.id)) throw new HttpError(409, "Your account isn't fully set up yet — sign out and in again.");
@@ -162,7 +178,12 @@ rentals.post("/rentals/bookings", async (c) => {
   const extrasCents = extrasPriced.reduce((s, e) => s + e.cents, 0);
   const deliveryFee = Number(zone?.fee_cents ?? 0);
   const baseTotal = pricing.totalCents + insuranceCents + extrasCents + deliveryFee;
-  const surcharge = surchargeFor(baseTotal, await surchargePct(method));
+  // The business's own discount (provider_discounts), on the car itself — not
+  // on insurance, extras or delivery. Priced by the database; the order
+  // trigger prices it again. total_cents keeps the full figure, like a promo.
+  const offer = await offerFor(v.provider_id, v.id, user.id, pricing.totalCents);
+  const payable = baseTotal - offer.cents;
+  const surcharge = surchargeFor(payable, await surchargePct(method));
 
   const insertRow = () => db().from("rental_bookings").insert({
     user_id: user.id, vehicle_id: v.id, start_date: startDate, end_date: endDate, rental_days: days,
@@ -171,6 +192,7 @@ rentals.post("/rentals/bookings", async (c) => {
     insurance_tier_id: insurance?.id ?? null, insurance_cents: insuranceCents,
     delivery_zone_id: zone?.id ?? null, delivery_fee_cents: deliveryFee,
     extras: extrasPriced, extras_cents: extrasCents, total_cents: baseTotal, surcharge_cents: surcharge,
+    offer_discount_id: offer.id, offer_discount_cents: offer.cents,
     customer_name: String(b.customerName ?? "").trim().slice(0, 120) || null,
     customer_whatsapp: String(b.customerWhatsapp ?? "").trim().slice(0, 40) || null,
     delivery_address: String(b.deliveryAddress ?? "").trim().slice(0, 300) || zone?.name || null,
@@ -200,7 +222,10 @@ rentals.post("/rentals/bookings", async (c) => {
     if (error && /23P01|exclusion/i.test(error.message)) throw new HttpError(409, "dates_taken");
     throw new HttpError(503, "booking_failed");
   }
-  return c.json({ id: row.id, total_cents: baseTotal, surcharge_cents: surcharge, charged_cents: baseTotal + surcharge }, 201);
+  return c.json({
+    id: row.id, total_cents: baseTotal, offer_discount_cents: offer.cents, offer_title: offer.title,
+    surcharge_cents: surcharge, charged_cents: payable + surcharge,
+  }, 201);
 });
 
 // ── The customer's own booking ───────────────────────────────────────────────
@@ -210,7 +235,7 @@ async function ownBooking(c: Context) {
   const id = c.req.param("id");
   if (!UUID.test(id)) throw notFound("booking_not_found");
   const { data: row } = await db().from("rental_bookings")
-    .select("id,user_id,vehicle_id,start_date,end_date,status,payment_status,payment_method,payment_reference,total_cents,surcharge_cents")
+    .select("id,user_id,vehicle_id,start_date,end_date,status,payment_status,payment_method,payment_reference,total_cents,surcharge_cents,offer_discount_cents")
     .eq("id", id).is("deleted_at", null).maybeSingle();
   if (!row) throw notFound("booking_not_found");
   if (String(row.user_id) !== String(user.id) && !isSuperAdmin(user.roles)) throw forbidden("not_your_booking");
@@ -226,7 +251,7 @@ rentals.post("/rentals/bookings/:id/reference", async (c) => {
   if (!ref || ref.length > 200) throw badRequest("payment_reference_required");
   if (row.payment_status === "paid") return c.json({ ok: true });
   if (row.status === "cancelled") throw new HttpError(409, "booking_cancelled");
-  const base = Number(row.total_cents) || 0;
+  const base = payableOf(row);
   const surcharge = ["lightning", "onchain", "paypal"].includes(method) ? surchargeFor(base, await surchargePct(method)) : Number(row.surcharge_cents) || 0;
   await db().from("rental_bookings").update({
     payment_reference: ref, payment_method: method || row.payment_method, surcharge_cents: surcharge, updated_at: new Date().toISOString(),
@@ -243,7 +268,7 @@ rentals.post("/rentals/bookings/:id/confirm", async (c) => {
   if (!ref) throw badRequest("payment_reference_required");
 
   if (await referenceAlreadyUsed(ref, { table: "rental_bookings", id: row.id })) throw forbidden("payment_already_used");
-  const base = Number(row.total_cents) || 0;
+  const base = payableOf(row);
   const surcharge = surchargeFor(base, await surchargePct(method));
   const check = await verifyPayment(method, ref, base + surcharge);
   if (!check.ok) throw forbidden(check.reason);
