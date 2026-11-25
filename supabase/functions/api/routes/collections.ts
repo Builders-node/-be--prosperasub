@@ -7,8 +7,11 @@ import { badRequest, HttpError, notFound } from "../lib/http.ts";
  * Home collections — shelves of offers an admin curates for the home page.
  *
  *   GET    /admin/collections            → every shelf with its plan ids, inactive too
- *   POST   /admin/collections            {title, subtitle?, isActive?}
- *   PATCH  /admin/collections/:id        {title?, subtitle?, isActive?, sortOrder?, tagKey?}
+ *   POST   /admin/collections            {title, subtitle?, isActive?}  → slug made from the title
+ *   PATCH  /admin/collections/:id        {title?, subtitle?, isActive?, sortOrder?, tagKey?,
+ *                                         slug?, coverUrl?, description?}
+ *          slug/coverUrl/description: the collection's own page, /collections/<slug>
+ *          (migration 20261209120000_collection_pages). A rename keeps the slug.
  *          tagKey: the shelf also fills itself with every live plan carrying
  *          that tag (hand-picked plans first). null turns it off.
  *   DELETE /admin/collections/:id
@@ -20,7 +23,28 @@ import { badRequest, HttpError, notFound } from "../lib/http.ts";
 export const collections = new Hono();
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const MAX_PLANS = 24;
+const MAX_PLANS = 60;
+const SLUG_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+// The page columns arrive with 20261209120000_collection_pages; until then
+// everything else keeps working without them.
+const PAGE_COLS = "slug,cover_url,description";
+const noPageCols = (msg: string) => /slug|cover_url|description/i.test(msg);
+
+/** Same words the database's slugify_text gives, for the common Latin case. */
+function slugify(title: string): string {
+  return title.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
+    .replace(/&/g, "-and-").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60)
+    .replace(/-+$/g, "") || "collection";
+}
+
+/** `base`, or `base-2`, `base-3`… — the first one no other collection uses. */
+async function freeSlug(base: string, exceptId?: string): Promise<string> {
+  const { data, error } = await db().from("home_collections").select("id,slug").like("slug", `${base}%`);
+  if (error) throw error;
+  const taken = new Set((data ?? []).filter((r: any) => r.id !== exceptId).map((r: any) => r.slug));
+  if (!taken.has(base)) return base;
+  for (let n = 2; ; n++) if (!taken.has(`${base}-${n}`)) return `${base}-${n}`;
+}
 const PERMISSION = "admin_settings.read";
 
 const missing = (msg: string) => /home_collection|does not exist/i.test(msg);
@@ -39,7 +63,9 @@ collections.get("/admin/collections", async (c) => {
     .select(`${cols},home_collection_plans(plan_id,sort_order)`)
     .order("sort_order", { ascending: true })
     .order("created_at", { ascending: true });
-  let { data, error } = await read("id,title,subtitle,sort_order,is_active,tag_key");
+  let { data, error } = await read(`id,title,subtitle,sort_order,is_active,tag_key,${PAGE_COLS}`);
+  const pagesReady = !(error && noPageCols(error.message));
+  if (!pagesReady) ({ data, error } = await read("id,title,subtitle,sort_order,is_active,tag_key"));
   const tagsReady = !(error && /tag_key/i.test(error.message));
   if (!tagsReady) ({ data, error } = await read("id,title,subtitle,sort_order,is_active"));
   if (error) {
@@ -49,9 +75,11 @@ collections.get("/admin/collections", async (c) => {
   return c.json({
     enabled: true,
     tagsReady,
+    pagesReady,
     rows: (data ?? []).map((r: any) => ({
       id: r.id, title: r.title, subtitle: r.subtitle, sortOrder: r.sort_order, isActive: r.is_active,
       tagKey: r.tag_key ?? null,
+      slug: r.slug ?? null, coverUrl: r.cover_url ?? null, description: r.description ?? null,
       planIds: [...(r.home_collection_plans ?? [])]
         .sort((a: any, b: any) => a.sort_order - b.sort_order)
         .map((p: any) => String(p.plan_id)),
@@ -66,14 +94,17 @@ collections.post("/admin/collections", async (c) => {
   if (!title) throw badRequest("A collection needs a title.");
   const { data: last } = await db().from("home_collections")
     .select("sort_order").order("sort_order", { ascending: false }).limit(1).maybeSingle();
-  const { data, error } = await db().from("home_collections").insert({
+  const row: Record<string, unknown> = {
     title,
     subtitle: text(b.subtitle, 160, "Subtitle"),
     is_active: b.isActive === undefined ? true : !!b.isActive,
     sort_order: (last?.sort_order ?? -1) + 1,
-  }).select("id").single();
-  if (error) throw new HttpError(503, "Could not create the collection.");
-  return c.json({ ok: true, id: data.id }, 201);
+  };
+  const slug = await freeSlug(slugify(title)).catch(() => null);
+  let { data, error } = await db().from("home_collections").insert(slug ? { ...row, slug } : row).select("id").single();
+  if (error && slug && noPageCols(error.message)) ({ data, error } = await db().from("home_collections").insert(row).select("id").single());
+  if (error || !data) throw new HttpError(503, "Could not create the collection.");
+  return c.json({ ok: true, id: data.id, slug }, 201);
 });
 
 collections.patch("/admin/collections/:id", async (c) => {
@@ -94,12 +125,25 @@ collections.patch("/admin/collections/:id", async (c) => {
     if (k !== null && !/^[a-z0-9_]{1,40}$/.test(k)) throw badRequest("Bad tag.");
     patch.tag_key = k;
   }
+  if (b.description !== undefined) patch.description = text(b.description, 600, "Description");
+  if (b.coverUrl !== undefined) {
+    const u = text(b.coverUrl, 1000, "Cover");
+    if (u !== null && !/^https:\/\//i.test(u)) throw badRequest("The cover must be an https:// link.");
+    patch.cover_url = u;
+  }
+  if (b.slug !== undefined) {
+    const s = slugify(String(b.slug ?? ""));
+    if (!SLUG_RE.test(s)) throw badRequest("The address can only have letters, numbers and dashes.");
+    if ((await freeSlug(s, id)) !== s) throw badRequest("Another collection already uses that address.");
+    patch.slug = s;
+  }
   if (b.sortOrder !== undefined) {
     const n = Number(b.sortOrder);
     if (!Number.isInteger(n) || n < 0 || n > 10_000) throw badRequest("Bad order.");
     patch.sort_order = n;
   }
   const { data, error } = await db().from("home_collections").update(patch).eq("id", id).select("id");
+  if (error && noPageCols(error.message)) throw new HttpError(503, "Collection pages are not switched on in the database yet.");
   if (error) throw new HttpError(503, "Could not save the collection.");
   if (!data?.length) throw notFound("Collection not found.");
   return c.json({ ok: true });
