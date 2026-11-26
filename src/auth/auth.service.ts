@@ -273,16 +273,50 @@ export class AuthService {
    * SessionService.createDbToken). 503 when the database secret is not set, so
    * the browser knows to stay on the anon key rather than retry.
    */
-  dbTokenFromAccessToken(accessToken: string) {
+  async dbTokenFromAccessToken(accessToken: string) {
     const payload = this.sessions.verifyAccessToken(accessToken);
     if (payload.typ !== "access" || !payload.sub) {
       throw new UnauthorizedException("Invalid access token");
     }
     const issued = this.sessions.createDbToken(payload.sub);
-    if (!issued) {
+    if (!issued || !(await this.dbTokensAccepted(issued.token))) {
       throw new ServiceUnavailableException("Database tokens are not configured");
     }
     return { access_token: issued.token, expires_in: issued.expiresIn, token_type: "bearer" };
+  }
+
+  /**
+   * Does PostgREST accept tokens signed with our SUPABASE_JWT_SECRET?
+   *
+   * A wrong secret (a typo, the new asymmetric key pasted instead of the legacy
+   * one) would make every signed-in query fail with 401 the moment the browser
+   * started sending tokens. So the first token is shown to PostgREST before any
+   * is handed out; on a 401 we answer 503 and browsers stay on the anon key.
+   * The verdict is kept per instance; a "no" is re-checked after 10 minutes.
+   */
+  private dbTokenCheck: { ok: boolean; at: number } | null = null;
+  private async dbTokensAccepted(token: string): Promise<boolean> {
+    const now = Date.now();
+    if (this.dbTokenCheck && (this.dbTokenCheck.ok || now - this.dbTokenCheck.at < 10 * 60_000)) {
+      return this.dbTokenCheck.ok;
+    }
+    const base = (this.config.get<string>("SUPABASE_URL") ?? "").trim().replace(/\/$/, "");
+    const anon = (this.config.get<string>("SUPABASE_ANON_KEY") ?? "").trim();
+    if (!base || !anon) return true; // nothing to check against; the browser falls back on a 401 itself
+    try {
+      const res = await fetch(`${base}/rest/v1/service_archetypes?select=key&limit=1`, {
+        headers: { apikey: anon, Authorization: `Bearer ${token}` },
+      });
+      if (res.status === 401) {
+        this.logger.error("PostgREST rejected a database token: SUPABASE_JWT_SECRET does not match the project's JWT secret");
+        this.dbTokenCheck = { ok: false, at: now };
+        return false;
+      }
+      if (res.ok) this.dbTokenCheck = { ok: true, at: now };
+      return res.ok;
+    } catch {
+      return false;
+    }
   }
 
   async refresh(refreshToken: string) {
