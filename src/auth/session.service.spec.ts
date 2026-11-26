@@ -56,3 +56,23 @@ describe("SessionService", () => {
     expect(payload.roles).toEqual(["USER"]);
   });
 });
+
+describe("SessionService.createDbToken", () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const jwt = require("jsonwebtoken");
+
+  it("signs an authenticated-role token for PostgREST with the user as sub", () => {
+    const service = new SessionService(new ConfigService({ SUPABASE_JWT_SECRET: "db-secret-for-tests-0123456789abcdef" }));
+    const issued = service.createDbToken("user-9");
+    expect(issued).not.toBeNull();
+    const payload = jwt.verify(issued!.token, "db-secret-for-tests-0123456789abcdef", { audience: "authenticated" });
+    expect(payload.sub).toBe("user-9");
+    expect(payload.role).toBe("authenticated");
+    expect(payload.exp - payload.iat).toBe(900);
+  });
+
+  it("returns null when the database secret is not configured", () => {
+    const service = new SessionService(new ConfigService({}));
+    expect(service.createDbToken("user-9")).toBeNull();
+  });
+});
