@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger, Optional, UnauthorizedException } from "@nestjs/common";
+import { BadRequestException, Injectable, Logger, Optional, ServiceUnavailableException, UnauthorizedException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { randomBytes } from "crypto";
 import { MailService } from "../mail/mail.service";
@@ -266,6 +266,23 @@ export class AuthService {
     } catch {
       throw new UnauthorizedException("Invalid or expired access token");
     }
+  }
+
+  /**
+   * Exchange a session access token for a database token (see
+   * SessionService.createDbToken). 503 when the database secret is not set, so
+   * the browser knows to stay on the anon key rather than retry.
+   */
+  dbTokenFromAccessToken(accessToken: string) {
+    const payload = this.sessions.verifyAccessToken(accessToken);
+    if (payload.typ !== "access" || !payload.sub) {
+      throw new UnauthorizedException("Invalid access token");
+    }
+    const issued = this.sessions.createDbToken(payload.sub);
+    if (!issued) {
+      throw new ServiceUnavailableException("Database tokens are not configured");
+    }
+    return { access_token: issued.token, expires_in: issued.expiresIn, token_type: "bearer" };
   }
 
   async refresh(refreshToken: string) {

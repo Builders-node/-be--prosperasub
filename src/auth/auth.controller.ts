@@ -144,6 +144,15 @@ export class AuthController {
     return this.auth.completeGoogleOAuth(body.code, body.redirectUrl);
   }
 
+  @ApiOperation({ summary: "Short-lived token for the browser's direct database calls" })
+  @ApiBearerAuth()
+  @ApiResponse({ status: 200, description: "A Supabase-compatible JWT for the signed-in user." })
+  @ApiResponse({ status: 503, description: "SUPABASE_JWT_SECRET is not configured." })
+  @Get("db-token")
+  dbToken(@Headers("authorization") authorization?: string) {
+    return this.auth.dbTokenFromAccessToken(this.readBearerToken(authorization));
+  }
+
   @ApiOperation({ summary: "Return current user and roles" })
   @ApiBearerAuth()
   @ApiResponse({ status: 200, description: "Current authenticated API user and roles." })
