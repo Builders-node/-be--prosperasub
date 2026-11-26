@@ -177,6 +177,34 @@ export class SessionService {
     return { email: String(payload.sub) };
   }
 
+  /**
+   * A short-lived token for the browser's direct database calls.
+   *
+   * The storefront, the business panel and the admin read and write Supabase
+   * straight from the browser. Without this they did it as `anon`, so the
+   * database could not tell one person from another and every table they touch
+   * had to be open to everyone. Signed with the project's JWT secret, this
+   * token makes PostgREST run the request as `authenticated` with `auth.uid()`
+   * = the signed-in user, which is what row-level security keys on.
+   *
+   * Only the identity is in it; who is an admin or a business member is looked
+   * up in the database by the policies, so a role change applies at once.
+   * Returns null when the secret is not configured, and the browser carries on
+   * as anon exactly as before.
+   */
+  createDbToken(userId: string): { token: string; expiresIn: number } | null {
+    const secret = this.config.get<string>("SUPABASE_JWT_SECRET")?.trim();
+    if (!secret || !userId) return null;
+    const ttl = Number(this.config.get("DB_TOKEN_TTL_SECONDS") ?? 900);
+    const token = jwt.sign({ role: "authenticated" }, secret, {
+      subject: userId,
+      audience: "authenticated",
+      expiresIn: ttl,
+      algorithm: "HS256"
+    });
+    return { token, expiresIn: ttl };
+  }
+
   async hashRefreshToken(token: string): Promise<string> {
     return crypto.createHash("sha256").update(token).digest("hex");
   }
