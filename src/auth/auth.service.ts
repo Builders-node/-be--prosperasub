@@ -7,6 +7,8 @@ import { PasswordService } from "./password.service";
 import { RoleName, SessionService } from "./session.service";
 import { buildAllowedOrigins, isAllowedOrigin } from "../config/app-origins";
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export type ApiRole = "super_admin" | "user";
 
 export interface ApiUser {
@@ -278,7 +280,14 @@ export class AuthService {
     if (payload.typ !== "access" || !payload.sub) {
       throw new UnauthorizedException("Invalid access token");
     }
-    const issued = this.sessions.createDbToken(payload.sub);
+    // `auth.uid()` casts the subject to uuid, so a Google session's
+    // "google-…" subject would make every row-level policy throw
+    // "invalid input syntax for type uuid". Hand out the account's real id.
+    const dbUserId = await this.resolveDbUserId(payload.sub, payload.email);
+    if (!dbUserId) {
+      throw new ServiceUnavailableException("Account id could not be resolved");
+    }
+    const issued = this.sessions.createDbToken(dbUserId);
     if (!issued || !(await this.dbTokensAccepted(issued.token))) {
       throw new ServiceUnavailableException("Database tokens are not configured");
     }
@@ -332,6 +341,18 @@ export class AuthService {
         throw new UnauthorizedException("Invalid refresh token");
       }
 
+      // Sessions minted before Google logins carried the account uuid still
+      // hold a "google-…" subject. Move them onto the real id on refresh, so
+      // nobody has to sign out and back in.
+      if (!UUID_RE.test(identity.user.id)) {
+        const dbUserId = await this.resolveDbUserId(identity.user.id, identity.user.email);
+        if (dbUserId) {
+          const user = { ...identity.user, id: dbUserId };
+          this.oauthUsers.set(user.id, { user, roles: identity.roles });
+          return this.createSessionResponse(user, identity.roles);
+        }
+      }
+
       return this.createSessionResponse(identity.user, identity.roles);
     } catch {
       throw new UnauthorizedException("Invalid or expired refresh token");
@@ -367,10 +388,14 @@ export class AuthService {
       throw new UnauthorizedException("Google account email could not be verified");
     }
 
-    const user = this.userFromGoogleProfile(tokenInfo);
+    const profileUser = this.userFromGoogleProfile(tokenInfo);
     const roles = email === this.user.email ? this.roles : (["user"] as ApiRole[]);
+    // The session's subject must be the account's uuid (users.id): the
+    // database token is minted from it and `auth.uid()` casts it to uuid.
+    // A "google-…" id only survives when the database cannot be reached.
+    const dbUserId = await this.upsertUserInDb(profileUser, roles);
+    const user = dbUserId ? { ...profileUser, id: dbUserId } : profileUser;
     this.oauthUsers.set(user.id, { user, roles });
-    void this.upsertUserInDb(user, roles);
 
     return this.createSessionResponse(user, roles);
   }
@@ -766,20 +791,49 @@ export class AuthService {
    * Upserts a user into Supabase via RPC (Google OAuth / owner sync).
    * Non-blocking — errors are logged and swallowed.
    */
-  private async upsertUserInDb(user: ApiUser, roles: ApiRole[]): Promise<void> {
-    if (!this.isSupabaseAvailable() || !user.email) return;
-    if (process.env.NODE_ENV === "test") return;
+  private async upsertUserInDb(user: ApiUser, roles: ApiRole[]): Promise<string | null> {
+    if (!this.isSupabaseAvailable() || !user.email) return null;
+    if (process.env.NODE_ENV === "test") return null;
 
     try {
-      await this.supabaseRpc("auth_upsert_oauth_user", {
+      const row = await this.supabaseRpc<{ id?: string | null }>("auth_upsert_oauth_user", {
         p_email:        user.email,
         p_name:         user.name || user.email,
         p_display_name: user.display_name || user.name || user.email,
         p_provider:     user.auth_provider === "google" ? "google" : "email",
         p_avatar_url:   user.avatar_url ?? null,
       });
+      const id = row?.id ?? null;
+      return id && UUID_RE.test(id) ? id : null;
     } catch (err) {
       this.logger.warn(`[upsertUserInDb] Failed: ${(err as Error).message}`);
+      return null;
+    }
+  }
+
+  /**
+   * The account's uuid (users.id) for a token subject. Already a uuid → as is.
+   * A Google login's "google-…" subject is looked up by email. Null when it
+   * cannot be resolved — callers must not hand that subject to the database.
+   */
+  private async resolveDbUserId(sub: string, email?: string): Promise<string | null> {
+    if (UUID_RE.test(sub)) return sub;
+    if (!email) return null;
+
+    const base = (this.config.get<string>("SUPABASE_URL") ?? "").trim().replace(/\/$/, "");
+    const key = this.config.get<string>("SUPABASE_SERVICE_ROLE_KEY") || this.config.get<string>("SUPABASE_ANON_KEY");
+    if (!base || !key) return null;
+    try {
+      const res = await fetch(
+        `${base}/rest/v1/users?select=id&email=eq.${encodeURIComponent(email.trim().toLowerCase())}&limit=1`,
+        { headers: { apikey: key, Authorization: `Bearer ${key}` } },
+      );
+      if (!res.ok) return null;
+      const rows = (await res.json().catch(() => [])) as Array<{ id?: string }>;
+      const id = rows?.[0]?.id ?? null;
+      return id && UUID_RE.test(id) ? id : null;
+    } catch {
+      return null;
     }
   }
 
