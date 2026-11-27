@@ -9,7 +9,7 @@ describe("SubscriptionRenewalService — crypto renewals", () => {
   const config = { get: (k: string) => ({ SUPABASE_URL: "https://db.test", SUPABASE_SERVICE_ROLE_KEY: "k" } as any)[k] } as any;
 
   function make(paidFor: jest.Mock) {
-    return new SubscriptionRenewalService({} as any, {} as any, config, { paidFor } as any);
+    return new SubscriptionRenewalService({} as any, {} as any, config, { paidFor } as any, {} as any);
   }
 
   /** Answers PostgREST GETs from a table → rows map; records every URL. */
