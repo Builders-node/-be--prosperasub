@@ -1,12 +1,23 @@
 import { BadRequestException, ForbiddenException, Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { BlinkService } from "./blink.service";
+import { CryptoGatewayService } from "./crypto-gateway/crypto-gateway.service";
 import { PayPalService } from "./paypal.service";
 
 /** `plan` is a universal `provider_subscriptions` row — a provider with no
  *  legacy table of its own. It renews by the same three rules as the rest. */
 export type RenewalService = "food" | "cleaning" | "beach" | "plan";
-export type RenewalPaymentMethod = "lightning" | "onchain" | "paypal";
+export type RenewalPaymentMethod = "lightning" | "onchain" | "paypal" | "crypto_gateway";
+
+/** What the renewal endpoints accept — one list for every DTO. */
+export const RENEWAL_PAYMENT_METHODS: RenewalPaymentMethod[] = ["lightning", "onchain", "paypal", "crypto_gateway"];
+
+/**
+ * Tables whose paid rows carry the payment that bought them. A reference found
+ * on one of these already paid for that order and cannot also pay a renewal —
+ * otherwise the first purchase's payment id would renew the plan for free.
+ */
+const ORDER_TABLES = ["provider_subscriptions", "food_subscriptions", "cleaning_subscriptions", "rental_bookings"];
 
 interface VerifyInput {
   method: RenewalPaymentMethod;
@@ -65,6 +76,7 @@ export class SubscriptionRenewalService {
     private readonly blink: BlinkService,
     private readonly paypal: PayPalService,
     private readonly config: ConfigService,
+    private readonly crypto: CryptoGatewayService,
   ) {}
 
   /**
@@ -109,7 +121,41 @@ export class SubscriptionRenewalService {
       }
     }
 
+    if (m === "crypto_gateway") {
+      // USDT/USDC/ETH/… through NOWPayments. paidFor() insists the payment was
+      // raised by this server (a checkout session exists), the gateway says it
+      // is paid, and the gateway's price covers this renewal.
+      const r = await this.crypto.paidFor(reference, amountCents);
+      if (!r.ok) throw new ForbiddenException(`Crypto payment not accepted (${r.reason})`);
+      return { providerStatus: r.status };
+    }
+
     throw new BadRequestException(`Unsupported payment_method: ${method}`);
+  }
+
+  /**
+   * One payment renews one period, once. Rejects a reference that already
+   * renewed something else (another subscription, or this one under another
+   * idempotency key) or that paid for an order. A retry of the SAME renewal
+   * (same subscription + key) passes, so idempotent retries keep working.
+   */
+  async assertReferenceUnused(input: { subscriptionId: string; idempotencyKey: string; reference: string | null }): Promise<void> {
+    const ref = (input.reference || "").trim();
+    if (!ref) return;
+    const enc = encodeURIComponent;
+    const prior = await this.rest<Array<{ subscription_id: string; idempotency_key: string }>>(
+      `/subscription_renewals?payment_reference=eq.${enc(ref)}&select=subscription_id,idempotency_key&limit=5`,
+      { method: "GET" },
+    );
+    if (prior.some((r) => r.subscription_id === input.subscriptionId && r.idempotency_key === input.idempotencyKey)) return;
+    if (prior.length) throw new ForbiddenException("This payment has already been used for a renewal.");
+    for (const table of ORDER_TABLES) {
+      const rows = await this.rest<Array<{ id: string }>>(
+        `/${table}?payment_reference=eq.${enc(ref)}&payment_status=eq.paid&select=id&limit=1`,
+        { method: "GET" },
+      );
+      if (rows.length) throw new ForbiddenException("This payment already paid for an order.");
+    }
   }
 
   /**
@@ -121,6 +167,7 @@ export class SubscriptionRenewalService {
    * INSERT and we then SELECT the surviving row.
    */
   async recordRenewal(input: RecordInput): Promise<RecordResult> {
+    await this.assertReferenceUnused(input);
     const body = {
       service: input.service,
       subscription_id: input.subscriptionId,

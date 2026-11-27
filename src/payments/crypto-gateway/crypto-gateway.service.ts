@@ -159,6 +159,26 @@ export class CryptoGatewayService {
     return { ...payment, paid };
   }
 
+  /**
+   * Stricter than verify(), for a payment that must pay a specific amount
+   * (a renewal): the payment must be one this server raised — its checkout
+   * session exists — and both the session and the gateway's price must cover
+   * `minCents`. verify() alone lets a payment with no session through, which
+   * is fine for settling the order it was raised for, not for paying another.
+   */
+  async paidFor(paymentId: string, minCents: number): Promise<{ ok: true; status: string } | { ok: false; reason: string }> {
+    if (!this.enabled) return { ok: false, reason: "not_configured" };
+    const gw = this.require();
+    const session = await this.settlement.sessionFor(gw.id, paymentId);
+    if (!session) return { ok: false, reason: "unknown_payment" };
+    // A cent of rounding between the fee calculation and the invoice is not a shortfall.
+    if ((session.amount_cents ?? 0) + 1 < minCents) return { ok: false, reason: "amount_too_low" };
+    const payment = await this.verify(paymentId);
+    if (!payment.paid) return { ok: false, reason: `not_paid:${payment.rawStatus}` };
+    if (payment.priceCents == null || payment.priceCents + 1 < minCents) return { ok: false, reason: "amount_too_low" };
+    return { ok: true, status: payment.rawStatus };
+  }
+
   /** Verified payment → rows flipped, ledger written, team told. Idempotent. */
   async settle(paymentId: string, via: string): Promise<boolean> {
     const gw = this.require();
