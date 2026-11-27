@@ -233,6 +233,12 @@ export class FoodService implements OnModuleInit {
       throw new BadRequestException("amount_cents must be a non-negative integer");
     }
 
+    // 0) The price is the server's, not the browser's: plan price x weeks.
+    const expected =
+      (await this.renewals.renewalPriceCents({ sourceKey: "food", sourcePlanId: sub.meal_plan_id, periods: this.weeksOf(sub) })) ??
+      ((Number(sub.weekly_price_cents) || 0) * this.weeksOf(sub) || null);
+    this.renewals.assertCoversPrice(payload.amount_cents, expected);
+
     // 1) Verify the payment before we touch the subscription. Throws 403 on a
     //    reference the provider doesn't confirm as paid.
     await this.renewals.verifyPayment({
