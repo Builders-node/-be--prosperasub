@@ -98,6 +98,7 @@ export function toCryptoPayment(res: any): CryptoPayment {
     payCurrency: res?.pay_currency ? String(res.pay_currency).toLowerCase() : null,
     priceCents: usdToCents(res?.price_amount),
     expiresAt: res?.expiration_estimate_date ?? null,
+    orderId: res?.order_id != null ? String(res.order_id) : null,
   };
 }
 

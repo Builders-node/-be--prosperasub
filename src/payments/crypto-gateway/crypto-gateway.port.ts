@@ -69,6 +69,8 @@ export interface CryptoPayment {
   /** What the gateway believes the order is worth, USD cents. */
   priceCents: number | null;
   expiresAt: string | null;
+  /** Our order id, as the gateway stores it (set by this server on create). */
+  orderId?: string | null;
 }
 
 export interface CryptoGateway {

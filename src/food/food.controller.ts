@@ -3,15 +3,15 @@ import { ApiBearerAuth, ApiBody, ApiOperation, ApiProperty, ApiResponse, ApiTags
 import { IsIn, IsInt, IsOptional, IsString, IsUUID, Min } from "class-validator";
 import { AccountAuthGuard, type AccountRequest } from "../account/account-auth.guard";
 import { FoodService } from "./food.service";
-import type { RenewalPaymentMethod } from "../payments/subscription-renewal.service";
+import { RENEWAL_PAYMENT_METHODS, type RenewalPaymentMethod } from "../payments/subscription-renewal.service";
 
 /**
  * Payload for /renew. Every field is required — the verify step needs the
  * reference; the audit row needs amount + idempotency key.
  */
 class RenewSubscriptionDto {
-  @ApiProperty({ enum: ["lightning", "onchain", "paypal"], example: "lightning" })
-  @IsIn(["lightning", "onchain", "paypal"])
+  @ApiProperty({ enum: RENEWAL_PAYMENT_METHODS, example: "lightning" })
+  @IsIn(RENEWAL_PAYMENT_METHODS)
   payment_method!: RenewalPaymentMethod;
 
   @ApiProperty({ example: "abc123deadbeef" })

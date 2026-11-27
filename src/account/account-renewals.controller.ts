@@ -3,11 +3,11 @@ import { ApiBearerAuth, ApiBody, ApiOperation, ApiProperty, ApiResponse, ApiTags
 import { IsIn, IsInt, IsOptional, IsString, IsUUID, Min } from "class-validator";
 import { AccountAuthGuard, type AccountRequest } from "./account-auth.guard";
 import { AccountRenewalsService } from "./account-renewals.service";
-import type { RenewalPaymentMethod } from "../payments/subscription-renewal.service";
+import { RENEWAL_PAYMENT_METHODS, type RenewalPaymentMethod } from "../payments/subscription-renewal.service";
 
 class RenewPayloadDto {
-  @ApiProperty({ enum: ["lightning", "onchain", "paypal"] })
-  @IsIn(["lightning", "onchain", "paypal"])
+  @ApiProperty({ enum: RENEWAL_PAYMENT_METHODS })
+  @IsIn(RENEWAL_PAYMENT_METHODS)
   payment_method!: RenewalPaymentMethod;
 
   @ApiProperty({ example: "abc123deadbeef" })

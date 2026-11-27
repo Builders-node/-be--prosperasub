@@ -1,9 +1,11 @@
-import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException, OnModuleInit, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import {
   RenewalPaymentMethod,
   SubscriptionRenewalService,
 } from "../payments/subscription-renewal.service";
+import { CryptoGatewayService } from "../payments/crypto-gateway/crypto-gateway.service";
+import { renewalIdempotencyKey } from "../payments/crypto-gateway/crypto-renewals";
 
 const TZ = "America/Tegucigalpa";
 const DAY_MS = 86_400_000;
@@ -35,13 +37,31 @@ interface FoodSubRow {
 }
 
 @Injectable()
-export class FoodService {
+export class FoodService implements OnModuleInit {
   private readonly logger = new Logger(FoodService.name);
 
   constructor(
     private readonly config: ConfigService,
     private readonly renewals: SubscriptionRenewalService,
+    @Optional() private readonly cryptoGateway?: CryptoGatewayService,
   ) {}
+
+  /** Crypto renewals finish server-side (see AccountRenewalsService.onModuleInit). */
+  onModuleInit() {
+    this.cryptoGateway?.registerRenewalHandler("food", async (intent, paymentId) => {
+      const rows = await this.rest<Array<{ user_id: string | null }>>(
+        `food_subscriptions?select=user_id&id=eq.${encodeURIComponent(intent.subscriptionId)}&limit=1`,
+      );
+      if (!rows?.[0]) throw new NotFoundException("Subscription not found");
+      return this.renewSubscription(String(rows[0].user_id ?? ""), intent.subscriptionId, {
+        payment_method: "crypto_gateway",
+        payment_reference: paymentId,
+        amount_cents: intent.amountCents,
+        surcharge_cents: intent.surchargeCents,
+        idempotency_key: renewalIdempotencyKey(paymentId),
+      });
+    });
+  }
 
   // ─── Date helpers (date-only, Honduras local) ────────────────────────────────
 

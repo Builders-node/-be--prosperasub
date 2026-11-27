@@ -1,6 +1,6 @@
 import { Body, Controller, Get, HttpCode, Logger, Param, Post, Req } from "@nestjs/common";
 import { ApiBody, ApiExcludeController, ApiOperation, ApiProperty, ApiResponse, ApiTags } from "@nestjs/swagger";
-import { IsInt, IsOptional, IsString, Matches, Min } from "class-validator";
+import { IsIn, IsInt, IsOptional, IsString, Matches, Min } from "class-validator";
 import type { Request } from "express";
 import { CryptoGatewayService } from "./crypto-gateway.service";
 
@@ -26,6 +26,13 @@ class CreateCryptoPaymentDto {
   // forbidNonWhitelisted, so accept what the Bitcoin DTO accepts.
   @ApiProperty({ required: false }) @IsOptional() @IsString() package_id?: string;
   @ApiProperty({ required: false }) @IsOptional() @IsInt() @Min(1) billing_period_months?: number;
+  // A renewal: the server extends this subscription itself once paid, even if
+  // the customer has closed the tab by then.
+  @ApiProperty({ required: false, enum: ["food", "cleaning", "beach", "plan"] })
+  @IsOptional() @IsIn(["food", "cleaning", "beach", "plan"]) renew_service?: "food" | "cleaning" | "beach" | "plan";
+  @ApiProperty({ required: false }) @IsOptional() @IsString() @Matches(/^[0-9A-Za-z-]{1,64}$/) renew_subscription_id?: string;
+  @ApiProperty({ required: false }) @IsOptional() @IsInt() @Min(1) renew_amount_cents?: number;
+  @ApiProperty({ required: false }) @IsOptional() @IsInt() @Min(0) renew_surcharge_cents?: number;
 }
 
 class CryptoStatusDto {
@@ -78,7 +85,7 @@ export class CryptoPaymentsController {
     const result = await this.crypto.verify(body.payment_id);
     // Settle here too, not only in the webhook: the browser often knows first,
     // and settle() is idempotent with the webhook and the cron.
-    if (result.paid) await this.crypto.settle(body.payment_id, "viaPoll");
+    if (result.paid) await this.crypto.settle(body.payment_id, "viaPoll", result);
     return publicView(result);
   }
 }
@@ -107,7 +114,7 @@ export class CryptoWebhookController {
       if (trusted && paymentId) {
         const result = await this.crypto.verify(paymentId);
         if (result.paid) {
-          const settled = await this.crypto.settle(paymentId, "viaWebhook");
+          const settled = await this.crypto.settle(paymentId, "viaWebhook", result);
           return { ok: true, action: settled ? "confirmed" : "already_settled" };
         }
         return { ok: true, action: "not_paid", state: result.state };

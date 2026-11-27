@@ -1,9 +1,11 @@
-import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException, OnModuleInit, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import {
   RenewalPaymentMethod,
   SubscriptionRenewalService,
 } from "../payments/subscription-renewal.service";
+import { CryptoGatewayService } from "../payments/crypto-gateway/crypto-gateway.service";
+import { renewalIdempotencyKey, type RenewalIntent } from "../payments/crypto-gateway/crypto-renewals";
 
 const TZ = "America/Tegucigalpa";
 const DAY_MS = 86_400_000;
@@ -66,13 +68,44 @@ interface PlanSubRow {
  * place.
  */
 @Injectable()
-export class AccountRenewalsService {
+export class AccountRenewalsService implements OnModuleInit {
   private readonly logger = new Logger(AccountRenewalsService.name);
 
   constructor(
     private readonly config: ConfigService,
     private readonly renewals: SubscriptionRenewalService,
+    @Optional() private readonly cryptoGateway?: CryptoGatewayService,
   ) {}
+
+  /**
+   * Crypto renewals finish server-side: when the gateway confirms a renewal
+   * payment (webhook, poll or cron) it hands it here, and the subscription is
+   * extended by the same code path as the customer's own call — same
+   * verification, same audit row, same idempotency key — on behalf of the
+   * subscription's owner.
+   */
+  onModuleInit() {
+    if (!this.cryptoGateway) return;
+    const payload = (intent: RenewalIntent, paymentId: string): RenewPayload => ({
+      payment_method: "crypto_gateway",
+      payment_reference: paymentId,
+      amount_cents: intent.amountCents,
+      surcharge_cents: intent.surchargeCents,
+      idempotency_key: renewalIdempotencyKey(paymentId),
+    });
+    this.cryptoGateway.registerRenewalHandler("cleaning", async (intent, paymentId) => {
+      const sub = await this.fetchCleaning(intent.subscriptionId);
+      return this.renewCleaning(String(sub.user_id ?? ""), intent.subscriptionId, payload(intent, paymentId));
+    });
+    this.cryptoGateway.registerRenewalHandler("beach", async (intent, paymentId) => {
+      const sub = await this.fetchBeach(intent.subscriptionId);
+      return this.renewBeach(String(sub.user_id ?? ""), intent.subscriptionId, payload(intent, paymentId));
+    });
+    this.cryptoGateway.registerRenewalHandler("plan", async (intent, paymentId) => {
+      const sub = await this.fetchPlan(intent.subscriptionId);
+      return this.renewPlan({ id: String(sub.user_id ?? "") }, intent.subscriptionId, payload(intent, paymentId));
+    });
+  }
 
   // ═══════════════════════════════════════════════════════════════════════
   // Cleaning

@@ -119,6 +119,30 @@ export class PaymentSettlementService {
   }
 
   /** Latest checkout-session figures for a reference (server-written at invoice time). */
+  /**
+   * Gateway renewals raised since `sinceIso` that no `subscription_renewals`
+   * row carries yet — what the webhook sweep and the cron re-check.
+   */
+  async unsettledRenewalRefs(provider: string, sinceIso: string, limit = 25): Promise<string[]> {
+    try {
+      const sessions = await this.rest<Array<{ provider_payment_id: string }>>(
+        `/payment_checkout_sessions?provider=eq.${encodeURIComponent(provider)}` +
+        `&context=like.renewal:*&created_at=gte.${encodeURIComponent(sinceIso)}` +
+        `&select=provider_payment_id&order=created_at.desc&limit=${limit}`,
+      );
+      const refs = [...new Set((sessions ?? []).map((s) => String(s.provider_payment_id)).filter(Boolean))];
+      if (!refs.length) return [];
+      const done = await this.rest<Array<{ payment_reference: string }>>(
+        `/subscription_renewals?payment_reference=in.(${refs.map((r) => `"${r.replace(/"/g, "")}"`).join(",")})&select=payment_reference`,
+      );
+      const settled = new Set((done ?? []).map((d) => String(d.payment_reference)));
+      return refs.filter((r) => !settled.has(r));
+    } catch (e) {
+      this.logger.debug(`unsettledRenewalRefs failed: ${(e as Error).message}`);
+      return [];
+    }
+  }
+
   async sessionFor(provider: string, ref: string): Promise<{ amount_cents: number | null; amount_sats: number | null } | null> {
     try {
       const rows = await this.rest<Array<{ amount_cents: number | null; amount_sats: number | null }>>(
