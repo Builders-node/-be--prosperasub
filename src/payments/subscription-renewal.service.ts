@@ -4,11 +4,20 @@ import { BlinkService } from "./blink.service";
 import { CryptoGatewayService } from "./crypto-gateway/crypto-gateway.service";
 import { renewalIdempotencyKey } from "./crypto-gateway/crypto-renewals";
 import { PayPalService } from "./paypal.service";
+import { PaymentSettlementService } from "./payment-settlement.service";
 
 /** `plan` is a universal `provider_subscriptions` row — a provider with no
  *  legacy table of its own. It renews by the same three rules as the rest. */
 export type RenewalService = "food" | "cleaning" | "beach" | "plan";
 export type RenewalPaymentMethod = "lightning" | "onchain" | "paypal" | "crypto_gateway";
+
+/** USD cents PayPal captured on an order (all completed captures). */
+export function paypalCapturedCents(order: any): number {
+  const caps = (order?.purchase_units ?? []).flatMap((u: any) => u?.payments?.captures ?? []);
+  return caps
+    .filter((c: any) => String(c?.status).toUpperCase() === "COMPLETED")
+    .reduce((s: number, c: any) => s + Math.round(Number(c?.amount?.value ?? 0) * 100), 0);
+}
 
 /** What the renewal endpoints accept — one list for every DTO. */
 export const RENEWAL_PAYMENT_METHODS: RenewalPaymentMethod[] = ["lightning", "onchain", "paypal", "crypto_gateway"];
@@ -78,7 +87,56 @@ export class SubscriptionRenewalService {
     private readonly paypal: PayPalService,
     private readonly config: ConfigService,
     private readonly crypto: CryptoGatewayService,
+    private readonly settlement: PaymentSettlementService,
   ) {}
+
+  /**
+   * What renewing this subscription costs today, by the server's own numbers:
+   * the plan's current price x the term that was bought x people (only where
+   * the plan is priced per person) - the same formula the checkout shows
+   * (frontend lib/checkout/planCheckoutModel.totalFor). Null when the plan
+   * cannot be found; the caller then falls back to the row's stored price.
+   *
+   * Pass `planId` (a provider_plans id) or `sourceKey` + `sourcePlanId` (the
+   * legacy food / cleaning plan the catalog row mirrors).
+   */
+  async renewalPriceCents(q: {
+    planId?: string | null;
+    sourceKey?: string;
+    sourcePlanId?: string | null;
+    periods: number;
+    people?: number;
+  }): Promise<number | null> {
+    const enc = encodeURIComponent;
+    let filter: string | null = null;
+    if (q.planId) filter = `id=eq.${enc(q.planId)}`;
+    else if (q.sourceKey && q.sourcePlanId) filter = `source_service_key=eq.${enc(q.sourceKey)}&source_plan_id=eq.${enc(q.sourcePlanId)}`;
+    if (!filter) return null;
+    const rows = await this.rest<Array<{ price_cents: number | null; pricing_mode: string | null }>>(
+      `/provider_plans?${filter}&select=price_cents,pricing_mode&order=created_at.asc&limit=1`,
+      { method: "GET" },
+    ).catch(() => [] as Array<{ price_cents: number | null; pricing_mode: string | null }>);
+    const plan = rows?.[0];
+    if (!plan || plan.price_cents == null) return null;
+    const perPerson = plan.pricing_mode === "per_person";
+    return Number(plan.price_cents) * Math.max(1, Number(q.periods) || 1) * (perPerson ? Math.max(1, Number(q.people) || 1) : 1);
+  }
+
+  /**
+   * The amount a renewal claims must be the renewal's price. Before this the
+   * browser's `amount_cents` was trusted outright, so a 1-cent payment
+   * claiming "amount_cents: 1" extended any plan. A cent of rounding is not a
+   * shortfall. With no price to check against (plan gone, nothing stored) the
+   * renewal is refused rather than waved through.
+   */
+  assertCoversPrice(amountCents: number, expectedCents: number | null): void {
+    if (expectedCents == null || !Number.isFinite(expectedCents) || expectedCents <= 0) {
+      throw new ForbiddenException("This subscription's price could not be determined. Contact support to renew it.");
+    }
+    if (!Number.isFinite(amountCents) || amountCents + 1 < expectedCents) {
+      throw new ForbiddenException(`Renewal amount is below the plan price (USD ${(expectedCents / 100).toFixed(2)}).`);
+    }
+  }
 
   /**
    * Verify a payment reference against its issuing provider. Throws
@@ -93,6 +151,11 @@ export class SubscriptionRenewalService {
     if (m === "lightning") {
       const r = await this.blink.getPaymentStatus(reference);
       if (!r.paid) throw new ForbiddenException(`Lightning payment not confirmed (status ${r.status})`);
+      // Paid is not enough: the invoice must be one this server raised, for at
+      // least this renewal's amount (its checkout session says what it was for).
+      const session = await this.settlement.sessionFor("blink", reference);
+      if (!session) throw new ForbiddenException("Lightning invoice was not raised by this server.");
+      if ((session.amount_cents ?? 0) + 1 < amountCents) throw new ForbiddenException("Lightning payment is below the renewal amount.");
       return { providerStatus: r.status };
     }
 
@@ -109,17 +172,21 @@ export class SubscriptionRenewalService {
       // PayPal orders can already be captured (COMPLETED) or in APPROVED state
       // waiting for capture. captureOrder is idempotent — re-captures resolve as
       // paid instead of erroring, so we can just call it here.
+      let status = "COMPLETED";
       try {
         const r = await this.paypal.captureOrder(reference);
         if (!r.paid) throw new ForbiddenException("PayPal order not COMPLETED");
-        return { providerStatus: r.status };
+        status = r.status;
       } catch {
         // Fall back to reading the order — it may have been captured already
         // via a webhook we don't own.
         const order = (await this.paypal.getOrder(reference)) as any;
-        if (order?.status === "COMPLETED") return { providerStatus: "COMPLETED" };
-        throw new ForbiddenException("PayPal payment not confirmed");
+        if (order?.status !== "COMPLETED") throw new ForbiddenException("PayPal payment not confirmed");
       }
+      // What PayPal actually captured must cover this renewal.
+      const order = (await this.paypal.getOrder(reference).catch(() => null)) as any;
+      if (paypalCapturedCents(order) + 1 < amountCents) throw new ForbiddenException("PayPal payment is below the renewal amount.");
+      return { providerStatus: status };
     }
 
     if (m === "crypto_gateway") {

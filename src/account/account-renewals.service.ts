@@ -41,6 +41,7 @@ interface BeachSubRow {
   total_cents: number | null;
   plan_id: string | null;
   plan_name: string | null;
+  people: string | number | null;
 }
 
 interface PlanSubRow {
@@ -119,13 +120,19 @@ export class AccountRenewalsService implements OnModuleInit {
       throw new ForbiddenException("Cancelled subscriptions cannot be renewed.");
     }
 
+    const months = Math.max(Number(sub.billing_period_months) || 1, 1);
+    // The price is the server's, not the browser's: plan price x term.
+    const expected =
+      (await this.renewals.renewalPriceCents({ sourceKey: "cleaning", sourcePlanId: sub.package_id, periods: months })) ??
+      (Number(sub.total_price_cents) || (Number(sub.monthly_price_cents) || 0) * months || null);
+    this.renewals.assertCoversPrice(payload.amount_cents, expected);
+
     await this.renewals.verifyPayment({
       method: payload.payment_method,
       reference: payload.payment_reference,
       amountCents: payload.amount_cents,
     });
 
-    const months = Math.max(Number(sub.billing_period_months) || 1, 1);
     const previousEnd = this.endDateOf(sub.end_date, sub.start_date, months);
     const nextStart = this.continuousNextStart(previousEnd);
     const newEnd = this.addMonths(nextStart, months);
@@ -184,6 +191,12 @@ export class AccountRenewalsService implements OnModuleInit {
     if (String(sub.status).toLowerCase() === "cancelled") {
       throw new ForbiddenException("Cancelled subscriptions cannot be renewed.");
     }
+
+    // Beach is one term per renewal; per-person plans count the people.
+    const expected =
+      (await this.renewals.renewalPriceCents({ planId: sub.plan_id, periods: 1, people: Number(sub.people) || 1 })) ??
+      (Number(sub.total_cents) || null);
+    this.renewals.assertCoversPrice(payload.amount_cents, expected);
 
     await this.renewals.verifyPayment({
       method: payload.payment_method,
@@ -274,6 +287,15 @@ export class AccountRenewalsService implements OnModuleInit {
     if (String(sub.status).toLowerCase() === "cancelled") {
       throw new ForbiddenException("Cancelled subscriptions cannot be renewed.");
     }
+
+    // Same term as the purchase, at the plan's current price (as the checkout shows it).
+    const expected =
+      (await this.renewals.renewalPriceCents({
+        planId: sub.plan_id,
+        periods: Math.max(1, Number(sub.periods_paid) || 1),
+        people: Number(sub.metadata?.people) || 1,
+      })) ?? (Number(sub.price_cents) || null);
+    this.renewals.assertCoversPrice(payload.amount_cents, expected);
 
     await this.renewals.verifyPayment({
       method: payload.payment_method,
@@ -397,7 +419,7 @@ export class AccountRenewalsService implements OnModuleInit {
       // that offer "renew" have not all moved.
       `provider_subscriptions?source_service_key=eq.beach` +
       `&or=(id.eq.${this.enc(id)},source_subscription_id.eq.${this.enc(id)})` +
-      `&select=id,user_id,status,start_date,end_date,plan_id,` +
+      `&select=id,user_id,status,start_date,end_date,plan_id,people:metadata->>people,` +
       `total_cents:price_cents,plan_name:metadata->>plan_name&limit=1`,
     );
     const sub = rows?.[0];
