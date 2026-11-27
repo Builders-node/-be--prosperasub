@@ -2,6 +2,7 @@ import { BadRequestException, ForbiddenException, Injectable, Logger } from "@ne
 import { ConfigService } from "@nestjs/config";
 import { BlinkService } from "./blink.service";
 import { CryptoGatewayService } from "./crypto-gateway/crypto-gateway.service";
+import { renewalIdempotencyKey } from "./crypto-gateway/crypto-renewals";
 import { PayPalService } from "./paypal.service";
 
 /** `plan` is a universal `provider_subscriptions` row — a provider with no
@@ -166,7 +167,14 @@ export class SubscriptionRenewalService {
    * (subscription_id, idempotency_key), the second-and-onward calls skip the
    * INSERT and we then SELECT the surviving row.
    */
-  async recordRenewal(input: RecordInput): Promise<RecordResult> {
+  async recordRenewal(raw: RecordInput): Promise<RecordResult> {
+    // A gateway payment renews under ONE key, whoever records it first — the
+    // customer's browser or the gateway's webhook — so the second caller gets
+    // the first one's outcome rather than "payment already used".
+    const input: RecordInput =
+      raw.method === "crypto_gateway" && raw.reference
+        ? { ...raw, idempotencyKey: renewalIdempotencyKey(raw.reference) }
+        : raw;
     await this.assertReferenceUnused(input);
     const body = {
       service: input.service,
@@ -179,7 +187,8 @@ export class SubscriptionRenewalService {
       payment_method: input.method,
       payment_reference: input.reference,
       idempotency_key: input.idempotencyKey,
-      renewed_by_user: input.userId,
+      // Empty when the gateway webhook renews a row with no owner on file.
+      renewed_by_user: input.userId || null,
     };
 
     // First attempt — ignore-duplicates returns [] on conflict instead of 409.
@@ -197,7 +206,7 @@ export class SubscriptionRenewalService {
     if (Array.isArray(inserted) && inserted.length) {
       // Fire-and-forget user notification. Non-blocking — the renewal already
       // succeeded; a failed notification shouldn't roll it back.
-      this.notifyUser(input, inserted[0]).catch((err) => {
+      if (input.userId) this.notifyUser(input, inserted[0]).catch((err) => {
         this.logger.warn(`[renewal-notify] user ${input.userId}: ${err.message}`);
       });
       return { status: "created", row: inserted[0] };

@@ -1624,6 +1624,12 @@ export class AdminService {
       }
     }
 
+    // Crypto renewals whose webhook never arrived and whose tab was closed:
+    // the payment carries what it renews, so the cron can still finish it.
+    if (this.cryptoGateway?.enabled) {
+      activated += await this.cryptoGateway.sweepRenewals().catch(() => 0);
+    }
+
     const expired = await this.expireUnverifiablePending(scopes);
     return { checked: totalChecked, activated, expired };
   }
